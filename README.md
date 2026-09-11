@@ -89,8 +89,11 @@ python scripts/download_models.py
 > 国内直连 GitHub Releases 实测只有几十 KB/s。脚本默认走 gh-proxy.com 镜像，
 > 失败自动换源；--mirror "" 可切回直连。
 
+模型落在**项目自己的 ./models/** 下，拷走整个目录就能跑，不依赖外部路径。
+
 **已经装过别的 sherpa-onnx 项目？** 不用重复下载：程序会按顺序自动探测
 ./models 和 ../voice-assistant/models，也可以在 config.yaml 里写死 models_dir。
+（探测到哪儿了、有没有缺文件，跑 `python -m voice_agent doctor` 一眼就能看到。）
 
 ### 3. 配置
 

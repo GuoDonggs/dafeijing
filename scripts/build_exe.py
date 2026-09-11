@@ -71,14 +71,48 @@ def dir_stats(path: Path) -> tuple[int, int]:
     return files, total
 
 
+def _link_target(path: Path) -> str:
+    """目录联接 / 符号链接指向哪里；不是链接就返回空串。
+
+    刻意不看"目标还在不在"：联接坏了（目标被删了）同样要认得出来，
+    否则既删不掉、也改不了指向。os.path.isjunction 走 lstat，不受目标影响。
+    """
+    try:
+        if os.path.isjunction(path):
+            try:
+                return str(path.resolve())
+            except OSError:
+                return os.readlink(path)
+    except (OSError, AttributeError):
+        pass
+    if path.is_symlink():
+        try:
+            return str(path.resolve())
+        except OSError:
+            return os.readlink(path)
+    return ""
+
+
 def remove_path(path: Path) -> bool:
-    # 注意：dist 里可能有一个指向模型目录的目录联接（junction，见 packaging/README.md）。
-    # 实测过 shutil.rmtree 只删联接本身、不会顺着删掉真模型（Python 3.12 / Windows），
-    # 所以这里可以放心用 rmtree。
-    if not path.exists():
+    """删文件 / 目录 / 目录联接。
+
+    目录联接（dist/models 就是，见 packaging/README.md）要特别处理：
+    Python 3.12 的 shutil.rmtree **拒绝**作用在联接上，直接抛
+    "Cannot call rmtree on a symbolic link"。它不会顺着删掉真模型（这点是好
+    消息），但也删不掉联接本身 —— 早先这里写着"rmtree 是安全的"，实际效果是
+    "删不掉还当成功"，换模型目录时会留下一个指向旧位置的联接。
+    摘联接用 os.rmdir，只动链接，目标目录一个字节都不碰。
+    """
+    is_link = bool(_link_target(path))
+    if not is_link and not path.exists():
         return True
     try:
-        if path.is_dir():
+        if is_link:
+            try:
+                os.rmdir(path)
+            except OSError:
+                path.unlink()
+        elif path.is_dir():
             shutil.rmtree(path)
         else:
             path.unlink()
@@ -127,23 +161,12 @@ KEEP_FILES = ("config.yaml", "config.yaml.bak", "apps.yaml", ".env")
 KEEP_DIRS = ("build",)
 
 
-def _junction_target(path: Path) -> str:
-    """目录联接（mklink /J）指向哪里；不是联接就返回空串。"""
-    check = getattr(os.path, "isjunction", None)
-    if check is None or not path.is_dir():
-        return ""
-    try:
-        return str(path.resolve()) if check(path) else ""
-    except OSError:
-        return ""
-
-
 def _stash_user_data(out_dir: Path, stash: Path) -> dict:
     """把产物目录里的用户数据挪到一边，返回一份「怎么放回去」的说明。"""
     plan: dict = {"files": [], "dirs": [], "skills": [], "models": ""}
     if not out_dir.is_dir():
         return plan
-    plan["models"] = _junction_target(out_dir / "models")
+    plan["models"] = _link_target(out_dir / "models")
     stash.mkdir(parents=True, exist_ok=True)
     for name in KEEP_FILES:
         source = out_dir / name
@@ -152,7 +175,7 @@ def _stash_user_data(out_dir: Path, stash: Path) -> dict:
             plan["files"].append(name)
     for name in KEEP_DIRS:
         source = out_dir / name
-        if source.is_dir() and not _junction_target(source):
+        if source.is_dir() and not _link_target(source):
             shutil.copytree(source, stash / name, dirs_exist_ok=True)
             plan["dirs"].append(name)
     # skills/：只收「源仓库里没有」的那些，也就是用户自己加的
