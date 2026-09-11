@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语音 Agent 控制台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-state="off">
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◉</span>
+      <div class="brand-text">
+        <h1>语音 Agent</h1>
+        <p class="sub">唤醒词 · 语音识别 · 工具调用 · 语音合成</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="pill" id="pill-mode" title="大脑模式">离线规则</span>
+      <span class="pill" id="pill-engine"><i class="dot"></i><span id="pill-engine-text">未启动</span></span>
+      <button class="btn primary" id="btn-start">启动监听</button>
+      <button class="btn" id="btn-stop" disabled>停止</button>
+      <button class="btn danger" id="btn-cancel" title="Esc">打断</button>
+      <button class="btn icon" id="btn-theme" title="切换主题">◐</button>
+    </div>
+  </header>
+
+  <main class="grid">
+
+    <!-- 左：状态 -->
+    <section class="panel status-panel">
+      <div class="orb-wrap">
+        <div class="orb" id="orb"><div class="orb-core"></div></div>
+        <div class="orb-label" id="state-text">未启动</div>
+      </div>
+
+      <canvas class="wave" id="wave" width="520" height="72"></canvas>
+      <div class="meter-head"><span>麦克风电平</span><span id="meter-value">0.000</span></div>
+
+      <dl class="facts">
+        <div><dt>唤醒次数</dt><dd id="fact-hits">0</dd></div>
+        <div><dt>对话轮数</dt><dd id="fact-turns">0</dd></div>
+        <div><dt>识别 RTF</dt><dd id="fact-asr">0</dd></div>
+        <div><dt>合成 RTF</dt><dd id="fact-tts">0</dd></div>
+        <div><dt>工具 / 技能</dt><dd id="fact-tools">0 / 0</dd></div>
+      </dl>
+
+      <div class="wake-chips" id="wake-chips"></div>
+      <div class="hint" id="boot-hint"></div>
+    </section>
+
+    <!-- 中：对话 -->
+    <section class="panel talk-panel">
+      <div class="panel-head">
+        <span>对话记录</span>
+        <span class="head-actions"><button class="link" id="btn-clear-chat">清空</button></span>
+      </div>
+      <div class="transcript" id="transcript">
+        <div class="empty" id="transcript-empty">
+          还没有对话。喊一声唤醒词，或者在下面直接输入指令。
+        </div>
+      </div>
+
+      <div class="compose">
+        <input id="cmd-input" type="text" placeholder="输入指令，回车派发（例如：看看 C 盘还剩多少空间）" autocomplete="off">
+        <button class="btn primary" id="btn-send">派遣</button>
+        <button class="btn" id="btn-say" title="只朗读，不执行">播报</button>
+      </div>
+
+      <div class="log-head">
+        <button class="link" id="btn-toggle-log">运行日志 ▾</button>
+        <span class="head-actions">
+          <button class="link" id="btn-listen">录音测试</button>
+          <button class="link" id="btn-clear-log">清空</button>
+        </span>
+      </div>
+      <div class="log" id="log"></div>
+    </section>
+
+    <!-- 右：工具 / 技能 / 配置 / 设备 -->
+    <section class="panel side-panel">
+      <nav class="tabs">
+        <button class="tab active" data-tab="tools">工具</button>
+        <button class="tab" data-tab="skills">技能</button>
+        <button class="tab" data-tab="config">配置</button>
+        <button class="tab" data-tab="devices">设备</button>
+      </nav>
+
+      <div class="tab-body" id="tab-tools">
+        <input class="filter" id="tools-filter" placeholder="过滤工具…" autocomplete="off">
+        <div class="list" id="tools-list"></div>
+      </div>
+
+      <div class="tab-body hidden" id="tab-skills">
+        <div class="row">
+          <button class="btn small" id="btn-reload-skills">重新加载</button>
+          <button class="btn small primary" id="btn-new-skill">新建技能</button>
+        </div>
+        <p class="note" id="skills-dirs"></p>
+        <div class="list" id="skills-list"></div>
+      </div>
+
+      <div class="tab-body hidden" id="tab-config">
+        <div class="form" id="settings-form"></div>
+        <div class="row">
+          <button class="btn primary" id="btn-save-settings">保存设置</button>
+          <button class="btn small" id="btn-toggle-raw">高级：编辑 YAML</button>
+        </div>
+        <div class="hidden" id="raw-wrap">
+          <textarea id="raw-config" spellcheck="false"></textarea>
+          <div class="row">
+            <button class="btn small primary" id="btn-save-raw">保存 YAML</button>
+            <span class="note" id="config-path"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-body hidden" id="tab-devices">
+        <label class="field"><span>麦克风</span><select id="dev-in"></select></label>
+        <label class="field"><span>扬声器</span><select id="dev-out"></select></label>
+        <div class="row">
+          <button class="btn primary" id="btn-save-devices">应用并重启引擎</button>
+          <button class="btn small" id="btn-refresh-devices">刷新</button>
+        </div>
+        <p class="note">换设备会重启监听；引擎运行中时建议先停止。</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal hidden" id="skill-modal">
+  <div class="modal-box">
+    <h3 id="skill-modal-title">新建技能</h3>
+    <label class="field"><span>文件名</span><input id="skill-name" value="my_skill.yaml"></label>
+    <textarea id="skill-body" spellcheck="false"></textarea>
+    <p class="note" id="skill-hint"></p>
+    <div class="row">
+      <button class="btn primary" id="btn-save-skill">保存并加载</button>
+      <button class="btn" id="btn-run-skill">试运行</button>
+      <button class="btn" id="btn-close-skill">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>window.VOICE_TOKEN = "__VOICE_TOKEN__";</script>
+<script src="/static/app.js"></script>
+</body>
+</html>

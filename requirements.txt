@@ -1,0 +1,15 @@
+# 语音控制电脑 Agent —— 运行依赖（Python 3.10+）
+# 全部本地推理，不需要云端语音服务；LLM 仅用于「理解意图」，可关。
+sherpa-onnx>=1.10,<2          # 唤醒词 KWS / 语音识别 ASR / 语音合成 TTS / 端点检测 VAD
+sounddevice>=0.4.6            # 麦克风与扬声器（PortAudio）
+numpy>=1.24
+scipy>=1.10                   # 重采样与滤波
+PyYAML>=6.0
+requests>=2.28                # 调用 OpenAI 兼容 LLM（DeepSeek / 通义 / 本地 Ollama…）
+psutil>=5.9                   # CPU / 内存 / 磁盘 / 电量
+pypinyin>=0.51                # 把「小爱同学」这类唤醒词转成模型需要的拼音音素
+
+# ── 桌面界面（可选：不装也能用  python -m voice_agent ui --web）──
+PyQt6>=6.6                    # 原生桌面窗口
+opencv-python>=4.8            # 屏幕找图（find_on_screen / click_image）
+Pillow>=10.0                  # 截屏与图像缩放

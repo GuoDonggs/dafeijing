@@ -1,0 +1,22 @@
+# 行尾统一成 LF：仓库里存 LF，检出也是 LF。
+#
+# 本机 git 的 core.autocrlf 是 true（Windows 安装时的常见默认值），不写这段的话
+# 检出会把 LF 变成 CRLF —— 于是"只改了一行，整个文件都显示被改过"。
+# 这个项目里的文件本来就是 LF，和 Python、以及 web/ 那三件套都合得来。
+* text=auto eol=lf
+
+# 二进制：别做行尾转换，也别尝试 diff
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.wav  binary
+*.onnx binary
+*.bin  binary
+*.exe  binary
+*.dll  binary
+*.pyd  binary
+
+# 生成的中间产物与锁文件不参与 diff
+build/kokoro_scan.json -diff

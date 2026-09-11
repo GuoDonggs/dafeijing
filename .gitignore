@@ -1,0 +1,50 @@
+# —— Python 运行时垃圾 ——
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# —— 打包产物（PyInstaller）——
+# dist/ 是 scripts/build_exe.py 的成品目录（几百 MB），build/pyinstaller/ 是它的中间产物。
+# 注意：build/ 本身还是程序运行期的工作目录（记忆、自检音频、生成的关键词表），
+# 所以这里只忽略 PyInstaller 的那一层，不整个忽略 build/。
+dist/
+dist-slim/
+build/pyinstaller/
+# 打包前会把「放在 exe 旁边的用户数据」暂存到这里，打完再放回去。
+# config.yaml 就在其中（含 API Key），绝对不能入库。
+build/dist-user-data/
+
+# —— 运行期落盘的数据 ——
+build/memory.json
+build/selftest.wav
+build/keywords.generated.txt
+build/vision/
+build/screenshots/
+# 声纹档：里面是声纹向量，属于生物特征，不入库
+build/voiceprint.json
+build/voiceprint.json.bak
+# 找图 / 屏幕匹配测试留下的临时图
+build/tpl*.png
+build/tpl*.jpg
+
+# 音色扫描：kokoro_voices/ 是从 HuggingFace 下的 103 个风格向量（45 MB，可以再下），
+# 结果表 kokoro_scan.json 留着 —— 默认音色就是照它挑的
+build/kokoro_voices/
+build/kokoro_sid_names.json
+build/kokoro_voice_map.json
+
+# —— 模型权重：约 1.2 GB，不入库 ——
+# 打包时刻意不把模型放进 exe，运行时从 ../voice-assistant/models 或 ./models 读。
+models/
+
+# —— 本地配置：里面有 API Key，别提交 ——
+config.yaml
+config.yaml.bak
+
+# —— Node 残留 ——
+# 本项目没有 Node 构建步骤（web/ 是免依赖的原生 JS），node_modules/ 是空壳。
+# 这几个是早期误留的，真要纳入版本管理就 git add -f。
+node_modules/
+package.json
+package-lock.json

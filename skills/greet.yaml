@@ -1,0 +1,21 @@
+# 最简单的技能：直接说一句话（action.type = say）
+# 参数用 {who} 这种占位符引用，模型会自己从用户的话里抽出来。
+name: greet
+title: 打招呼
+description: 用一句自定义的话跟用户打招呼或问候。当用户说「跟我打个招呼」「问个好」时调用。
+parameters:
+  who:
+    type: string
+    description: 怎么称呼用户，例如「老板」「张工」；没听出来就填「你」
+    required: true
+# 没有 API Key 时靠这些触发词命中；args 是预设参数（这里固定称呼为「你」）
+triggers:
+  - phrase: 打个招呼
+    args: {who: "你"}
+  - phrase: 问个好
+    args: {who: "你"}
+  - phrase: 问候我
+    args: {who: "你"}
+action:
+  type: say
+  text: "你好呀，{who}！我是你的电脑语音助手，有事喊我就行。"

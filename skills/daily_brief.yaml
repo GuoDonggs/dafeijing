@@ -1,0 +1,16 @@
+# 组合型技能：把已有工具串起来（action.type = sequence）
+# 每一步都是 {tool: 工具名, args: {...}}，结果自动用「；」连起来播报。
+name: daily_brief
+title: 每日简报
+description: 一次性汇报当前时间、电脑状态和磁盘剩余空间。当用户说「来个简报」「汇报一下情况」时调用。
+parameters: {}
+triggers: ["每日简报", "来个简报", "汇报一下情况", "汇报情况", "今日简报"]
+action:
+  type: sequence
+  confirm: false
+  steps:
+    - tool: get_time
+      args: {}
+    - tool: system_info
+      args:
+        kind: "全部"
