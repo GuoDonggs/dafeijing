@@ -31,6 +31,7 @@ from . import rules
 from . import tools
 from .config import PROJECT_ROOT, Config
 from .llm import Llm, LlmError
+from .subagent import SubAgentManager
 
 __all__ = ["Brain"]
 
@@ -39,7 +40,12 @@ _TOOL_HINT = """你可以调用本机工具来完成任务，规则：
 - 需要真实数据（时间、磁盘、内存、文件、命令输出）时必须调工具，禁止凭空编造；
 - 一次能做完就不要分多轮；同一个工具连续失败两次就停下来说明原因；
 - 工具返回的是已经整理好的中文结果，直接转述，不要重新格式化；
-- 回复会被朗读：不要 Markdown、不要列表、不要念路径和一长串 ID。"""
+- 回复会被朗读：不要 Markdown、不要列表、不要念路径和一长串 ID。
+
+有些事要跑好几步、中间结果又长又吵（比如"查三样东西再汇总"），
+这种就派给后台子代理（spawn_subagent）去做，你先回一句"我让人去查了"，
+用户可以接着说别的；子代理做完会自己回来汇报。
+一句就能答完的小事不要派，直接自己做。"""
 
 # 工具结果进入模型上下文前的字符预算。
 # 800 字大约对应一两句话的朗读量，再长用户也听不完，却要按最多 6 轮重复付费。
@@ -49,6 +55,9 @@ HISTORY_BUDGET = 4000
 HISTORY_TURNS = 24
 # 上一次对话多久之内还算"同一场"（秒）。隔夜还记得随口一说，比忘掉更吓人。
 CONTEXT_TTL_S = 2 * 60 * 60
+# max_rounds 配 0（不限）时的硬上限。不是给正常任务用的，
+# 纯粹是防止模型绕圈时把 token 烧穿。
+UNLIMITED_ROUNDS_CAP = 200
 
 
 class Brain:
@@ -72,6 +81,11 @@ class Brain:
         self._load_context()
 
         tools.set_vision_handler(self._answer_with_vision)
+        # 子代理：把「要跑好几步、中间结果又长又吵」的事丢到后台去做。
+        # 放在这里而不是 agent 里，是因为它和「看图」一样属于大脑的能力，
+        # 通过 tools.set_subagent_handler 注册后，模型才能调用 spawn_subagent。
+        self.subagents = SubAgentManager(cfg, log=log)
+        tools.set_subagent_handler(self.subagents)
         self._clients["chat"] = self._build_client("chat")
         self.llm = self._clients["chat"]
 
@@ -301,7 +315,10 @@ class Brain:
             messages.append({"role": "system", "content": context})
 
         failures = 0
-        rounds = max(1, self.cfg.llm.max_rounds)
+        # max_rounds <= 0 表示不限步数；仍然留一道硬上限，
+        # 免得模型真的绕起圈来把 token 烧光（绕圈检测也会兜一层）
+        configured = int(self.cfg.llm.max_rounds)
+        rounds = configured if configured > 0 else UNLIMITED_ROUNDS_CAP
         # 同一个工具、同一套参数连着调三次，就是绕进去了（模型自己出不来）
         repeats: dict[str, int] = {}
         for _round in range(rounds):

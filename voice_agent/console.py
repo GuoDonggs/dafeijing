@@ -37,6 +37,8 @@ from .skills import (
     PROJECT_TOOL_DIR,
     SKILL_DIRS,
     SkillLoader,
+    dep_names,
+    install_deps,
     skill_template,
     tool_template,
 )
@@ -324,6 +326,11 @@ class Console:
             "agent.barge_in_wake": cfg.agent.barge_in_wake,
             "agent.confirm.enabled": cfg.agent.confirm.enabled,
             "agent.listen_timeout_ms": cfg.agent.listen_timeout_ms,
+            # 子代理：改完立刻生效（管理器每次都从 cfg 现读，不用重启）
+            "agent.subagent_enabled": cfg.agent.subagent_enabled,
+            "agent.subagent_max": cfg.agent.subagent_max,
+            "agent.subagent_rounds": cfg.agent.subagent_rounds,
+            "agent.subagent_announce": cfg.agent.subagent_announce,
             "speech.profile": cfg.speech.profile,
             "speech.device": cfg.speech.device,
             "speech.threads": cfg.speech.threads,
@@ -608,6 +615,31 @@ class Console:
         self.log("[skills] 已保存 " + str(target))
         return {"ok": True, "path": str(target)}
 
+    def install_skill_deps(self, path: str) -> dict:
+        """给某个技能 / 自定义工具装它声明的依赖，装完自动重新加载。
+
+        没有这个入口时，用户唯一的办法是看到报错、自己开终端敲 pip ——
+        而这恰恰是"自定义工具"最容易卡住的地方。
+        """
+        target = Path(str(path or "")).resolve()
+        info = next((s for s in self.skills if str(s.source) == str(target)), None)
+        if info is None:
+            return {"ok": False, "error": "找不到这个文件，先点「重新加载」再看一眼"}
+        packages = list(info.missing) or [dep_names(d)[1] for d in info.deps]
+        if not packages:
+            return {"ok": False, "error": "这个文件没有声明 deps，没什么可装的"}
+        self.log("[skills] 正在安装 " + "、".join(packages) + " ……")
+        result = install_deps(packages)
+        self.reload_skills(announce=False)
+        again = next((s for s in self.skills if str(s.source) == str(target)), None)
+        still = list(again.missing) if again is not None else []
+        if result.get("ok"):
+            self.log("[skills] 装好了：" + "、".join(packages))
+        else:
+            self.log("[skills] 装依赖失败：" + str(result.get("error")))
+        return {**result, "missing": still,
+                "loaded": bool(again is not None and again.ok)}
+
     def skill_roots(self) -> list[Path]:
         return [d.resolve() for d in self.skill_dirs()]
 
@@ -769,6 +801,8 @@ class Console:
             "input_device": None, "output_device": None,
             "transcript": [], "follow_up_ms": int(self.cfg.agent.follow_up_ms),
             "listen_timeout_ms": int(self.cfg.agent.listen_timeout_ms),
+            "subagents": {"enabled": bool(self.cfg.agent.subagent_enabled),
+                          "total": 0, "running": 0, "text": ""},
         }
         good = sum(1 for s in self.skills if s.ok)
         return {

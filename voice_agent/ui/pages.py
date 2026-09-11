@@ -184,6 +184,11 @@ class HomePage(Page):
             if state != "off" and status.get("state_text"):
                 text = str(status["state_text"])
             hint = self._hint(snapshot, status, state)
+        # 后台子代理还在干活时把进度挂在提示行后面：用户看不见进程，
+        # 但至少知道"刚派出去那件事还在跑"，而不是以为助手忘了。
+        subs = status.get("subagents") or {}
+        if subs.get("running") and state in ("idle", "listen"):
+            hint = (hint + "　·　" + str(subs.get("text") or "")).strip("　· ")
         if self.state_label.text() != text:
             self.state_label.setText(text)
         self.state_label.setStyleSheet("color: " + theme.STATE_COLORS.get(state, theme.TEXT))
@@ -563,6 +568,13 @@ class SkillsPage(Page):
                                   theme.ACCENT if skill.get("kind") == "tool" else theme.PURPLE))
         box.addWidget(ui.Pill("正常" if ok else "加载失败",
                               theme.GREEN if ok else theme.RED))
+        # 只差装包的话给一个按钮 —— 不然用户只能自己开终端敲 pip，
+        # 而"自定义工具跑不起来"十有八九就是卡在这一步
+        if skill.get("needs_install"):
+            install = ui.primary_button("装依赖")
+            install.setToolTip("要装：" + "、".join(skill.get("missing") or []))
+            install.clicked.connect(lambda _=False, s=skill: self.install(s))
+            box.addWidget(install)
         edit = ui.plain_button("编辑")
         edit.setEnabled(ok and not str(skill.get("source", "")).endswith(".py"))
         edit.clicked.connect(lambda _=False, s=skill: self.edit(s))
@@ -572,6 +584,44 @@ class SkillsPage(Page):
         box.addWidget(delete)
         row.add_trailing(tools_box)
         return row
+
+    def install(self, skill: dict) -> None:
+        """装这个文件声明的依赖。pip 可能要跑一阵子，别卡住界面。"""
+        path = str(skill.get("source", ""))
+        self._error_box("正在安装依赖",
+                        "要装：" + "、".join(skill.get("missing") or []) + "\n\n"
+                        "点确定后开始装，装完会自动重新加载。网络慢的话可能要等一会儿。")
+        holder: dict = {}
+
+        def work() -> None:
+            holder["result"] = self.console.install_skill_deps(path)
+
+        import threading
+
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+
+        def poll() -> None:
+            if thread.is_alive():
+                QTimer.singleShot(300, poll)
+                return
+            result = holder.get("result") or {"ok": False, "error": "没有结果"}
+            self.reload()
+            if result.get("ok"):
+                self._error_box("装好了",
+                                "依赖已安装。"
+                                + ("工具已经能用了。" if result.get("loaded")
+                                   else "但工具还是没加载起来，看看它的报错。"))
+            else:
+                self._error_box("装依赖失败", str(result.get("error")))
+
+        QTimer.singleShot(300, poll)
+
+    def _error_box(self, title: str, text: str) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.exec()
 
     def create(self, kind: str = "skill") -> None:
         if kind == "tool":
@@ -693,13 +743,23 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
          ["off", "low", "medium", "high", "max"]),
         ("llm.base_url", "服务地址", "任何 OpenAI 兼容服务", "text", None),
         ("llm.model", "模型名", "", "text", None),
-        ("llm.max_rounds", "一步最多调几次工具", "多步任务撞上限会只说半句；默认 12", "choice",
-         ["6", "12", "20"]),
+        ("llm.max_rounds", "一步最多调几次工具", "多步任务撞上限会只说半句；不限就不收尾", "choice",
+         ["6", "12", "20", "0"], {"0": "不限制"}),
         ("llm.api_key", "API Key", "留空表示不改动；也可以读环境变量", "password", None),
     ]),
     ("外观", [
         ("ui.accent", "主题色", "换主色，整个界面跟着变；不用重启", "accent", None),
         ("ui.show_stats", "底部速览", "主界面底部的唤醒 / 算力 / 合成 / 声纹四格", "bool", None),
+    ]),
+    ("子代理", [
+        ("agent.subagent_enabled", "启用子代理",
+         "把「要好几步才做得完」的事丢到后台去做，你可以接着说别的", "bool", None),
+        ("agent.subagent_max", "同时最多几个", "同时跑太多会一起变慢", "choice",
+         ["1", "2", "3", "5"]),
+        ("agent.subagent_rounds", "每个最多做几步", "步数用完它会先停下来说说查到什么", "choice",
+         ["4", "8", "12"]),
+        ("agent.subagent_announce", "做完主动汇报", "闲下来时它会念一句结果；关掉就只记在对话里",
+         "bool", None),
     ]),
     ("交互", [
         ("agent.follow_up_ms", "追问窗口", "答完继续收音的时长，0 = 回待命", "choice",
@@ -740,21 +800,25 @@ class SettingsPage(Page):
     # ── 构建 ──
     def build(self) -> None:
         values = self.console.settings()
-        warning = self._engine_warning(values)
-        if warning is not None:
-            self.body.addWidget(warning)
+        # 警告卡**一直在布局里**，只切换显示与否。以前是"不是 chattts 就不创建"，
+        # 而页面是建一次就缓存下来的 —— 用户把引擎换回 vits，那张卡还赖在顶上。
+        self._engine_warning_card = self._engine_warning(values)
+        self.body.addWidget(self._engine_warning_card)
         self.body.addWidget(self._voiceprint_card(values))
         for title, fields in SETTING_SECTIONS:
             self.body.addWidget(ui.section_title(title))
             card = ui.Card()
-            for key, label, hint, kind, options in fields:
+            for field in fields:
+                key, label, hint, kind, options = field[:5]
+                labels = field[5] if len(field) > 5 else None
                 card.body.addWidget(self._row(key, label, hint, kind, options,
-                                              values.get(key)))
+                                              values.get(key), labels))
             self.body.addWidget(card)
         self.body.addStretch(1)
 
     def _row(self, key: str, label: str, hint: str, kind: str,
-             options: list[str] | None, value: Any) -> QWidget:
+             options: list[str] | None, value: Any,
+             labels: dict[str, str] | None = None) -> QWidget:
         if kind == "voice":
             return self._voice_row(label, hint)
         if kind == "volume":
@@ -769,13 +833,16 @@ class SettingsPage(Page):
             return setting_row(label, hint, control)
 
         if kind == "choice":
-            labels = [THRESHOLD_LABELS.get(o, o) for o in (options or [])]
+            # 每一行可以自带"值 -> 人话"的映射（例如 max_rounds 的 0 显示成「不限制」）
+            table = dict(THRESHOLD_LABELS)
+            table.update(labels or {})
+            shown_options = [table.get(o, o) for o in (options or [])]
             current = "" if value is None else str(value)
-            shown = THRESHOLD_LABELS.get(current, current)
-            control = ui.SegmentedControl(labels, shown, width=260)
+            shown = table.get(current, current)
+            control = ui.SegmentedControl(shown_options, shown, width=260)
             control.changed.connect(
-                lambda shown_label, k=key, opts=options:
-                self._save(k, self._choice_value(shown_label, opts)))
+                lambda shown_label, k=key, opts=options, tb=table:
+                self._save(k, self._choice_value(shown_label, opts, tb)))
             self.widgets[key] = ("choice", control)
             wrap = QWidget()
             box = QVBoxLayout(wrap)
@@ -801,14 +868,21 @@ class SettingsPage(Page):
         self.widgets[key] = ("text", control)
         return setting_row(label, hint, control)
 
-    def _engine_warning(self, values: dict) -> ui.Card | None:
-        """选了 ChatTTS 就在最上面摆一张警告卡。
+    @staticmethod
+    def _using_chattts(values: dict) -> bool:
+        return str(values.get("tts.engine") or "").strip().lower() == "chattts"
+
+    def _refresh_engine_warning(self) -> None:
+        card = getattr(self, "_engine_warning_card", None)
+        if card is not None:
+            card.setVisible(self._using_chattts(self.console.settings()))
+
+    def _engine_warning(self, values: dict) -> ui.Card:
+        """ChatTTS 的警告卡：只在真的用它时才显示。
 
         它和 VITS 不是一个量级的东西：要显卡、吃 2 GB 显存、首次加载十几秒、
         合成速度大约 1 倍实时。这些事不提前说清楚，用户只会觉得"助手变卡了"。
         """
-        if str(values.get("tts.engine") or "").strip().lower() != "chattts":
-            return None
         card = ui.Card()
         head = QHBoxLayout()
         icon = QLabel()
@@ -829,6 +903,7 @@ class SettingsPage(Page):
         note.setObjectName("RowSubtitle")
         note.setWordWrap(True)
         card.body.addWidget(note)
+        card.setVisible(self._using_chattts(values))
         return card
 
     def _volume_row(self, label: str, hint: str, value: Any) -> QWidget:
@@ -1016,13 +1091,40 @@ class SettingsPage(Page):
         self._audition_hint.setVisible(True)
 
     def on_tick(self, snapshot: dict, state: str) -> None:
-        # 只关心试听那一行：其余地方由各自的控件自己刷
+        # 只关心试听和录音这两处：其余地方由各自的控件自己刷
         self._paint_audition(self.console.audition_status())
+        self._paint_voice_progress()
+
+    def _paint_voice_progress(self) -> None:
+        """录音时显示「还剩几秒 / 有没有听到人声」。"""
+        live = getattr(self, "voice_live", None)
+        if live is None or not live.isVisible():
+            return
+        agent = self.console.agent
+        voice = getattr(agent, "voiceprint", None)
+        if voice is None:
+            return
+        info = voice.progress()
+        if info.get("state") != "recording":
+            self.voice_progress.setText("")
+            return
+        level = float(info.get("level") or 0.0)
+        self.voice_progress.setText(
+            "还剩 " + str(info.get("left", 0)) + " 秒　已听到 "
+            + str(info.get("speech", 0)) + " 秒说话声")
+        if level > 0.06:
+            live.setText("有声音")
+            live.set_color(theme.GREEN)
+        else:
+            live.setText("听…")
+            live.set_color(theme.DIM)
 
     @staticmethod
-    def _choice_value(shown: str, options: list[str] | None) -> Any:
+    def _choice_value(shown: str, options: list[str] | None,
+                      table: dict[str, str] | None = None) -> Any:
+        lookup = table if table is not None else THRESHOLD_LABELS
         for option in options or []:
-            if THRESHOLD_LABELS.get(option, option) == shown:
+            if lookup.get(option, option) == shown:
                 return option
         return shown
 
@@ -1037,6 +1139,9 @@ class SettingsPage(Page):
             box.setText(str(result.get("error")))
             box.exec()
             return
+        if "tts.engine" in (updates or {}):
+            # 换成 / 换离 ChatTTS 时，上面那张警告卡要立刻跟着出现或收起
+            self._refresh_engine_warning()
         if result.get("restart_needed"):
             self._toast("已保存，重启引擎后生效")
 
@@ -1073,6 +1178,18 @@ class SettingsPage(Page):
         note.setObjectName("CardSubtitle")
         note.setWordWrap(True)
         card.body.addWidget(note)
+
+        # 录音引导：写清楚"说什么、说多久、录完会检查什么"。
+        # 不写的话用户往往对着麦克风愣一下、或者只说一个"喂"，录进一段静音。
+        guide = QLabel(
+            "录的时候请用平常的音量和语速说一句完整的话，例如：\n"
+            "　　「今天天气不错，我想听点音乐」\n"
+            "说够 1.2 秒就算数（最长录 4 秒）。录完会先体检："
+            "没声音、太短、离麦太近爆音，都会让你重录，不会把废录音存进档案。"
+        )
+        guide.setObjectName("RowSubtitle")
+        guide.setWordWrap(True)
+        card.body.addWidget(guide)
 
         row = ui.ListRow("usercheck", "开启声纹匹配", "对着麦克风录一段自己的声音作为凭证")
         self.voice_toggle = ui.ToggleSwitch(checked=bool(values.get("speaker.enabled")))
@@ -1111,6 +1228,18 @@ class SettingsPage(Page):
         buttons.addStretch(1)
         card.body.addLayout(buttons)
 
+        # 录音时的实时反馈：还剩几秒、有没有听到人声
+        live = QHBoxLayout()
+        live.setSpacing(8)
+        self.voice_progress = QLabel("")
+        self.voice_progress.setObjectName("Value")
+        live.addWidget(self.voice_progress)
+        self.voice_live = ui.Pill("待机", theme.DIM)
+        self.voice_live.setVisible(False)
+        live.addWidget(self.voice_live)
+        live.addStretch(1)
+        card.body.addLayout(live)
+
         self.voice_hint = QLabel("")
         self.voice_hint.setObjectName("Hint")
         self.voice_hint.setWordWrap(True)
@@ -1147,8 +1276,11 @@ class SettingsPage(Page):
 
         self.btn_enroll.setEnabled(False)
         self.btn_test.setEnabled(False)
-        seconds = 3.0
-        self.voice_hint.setText("请说话……（" + str(int(seconds)) + " 秒）")
+        seconds = 4.0
+        self.voice_hint.setText("现在开始说 —— 用平常的音量和语速，说一句完整的话。")
+        self.voice_live.setVisible(True)
+        self.voice_live.setText("听…")
+        self.voice_live.set_color(theme.DIM)
         holder: dict = {}
 
         def work() -> None:
@@ -1167,19 +1299,23 @@ class SettingsPage(Page):
             self.btn_enroll.setEnabled(True)
             self.btn_test.setEnabled(True)
             result = holder.get("result") or {"ok": False, "error": "没有结果"}
+            self.voice_progress.setText("")
+            self.voice_live.setVisible(False)
             if action == "enroll":
                 if result.get("ok"):
-                    self.voice_hint.setText("录好了（第 " + str(result.get("count", 1))
-                                            + " 条）。再录一两次会更稳。")
+                    self.voice_hint.setText(
+                        "录好了（第 " + str(result.get("count", 1)) + " 条，"
+                        + str(result.get("speech_seconds", 0)) + " 秒说话声）。"
+                        + "再录一两次会更稳。")
                 else:
-                    self.voice_hint.setText(str(result.get("error")))
+                    self.voice_hint.setText("这次没录成：" + str(result.get("error")))
             else:
                 if result.get("ok"):
-                    verdict = "匹配 ✅" if result.get("allowed") else "不匹配 ❌"
+                    verdict = "匹配" if result.get("allowed") else "不匹配"
                     self.voice_hint.setText(verdict + "　相似度 " + str(result.get("score"))
                                             + "　" + str(result.get("note")))
                 else:
-                    self.voice_hint.setText(str(result.get("error")))
+                    self.voice_hint.setText("这次没测成：" + str(result.get("error")))
             self.refresh_voice_status()
 
         QTimer.singleShot(200, poll)

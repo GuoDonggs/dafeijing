@@ -39,6 +39,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import re
 import subprocess
@@ -81,10 +82,18 @@ class SkillInfo:
     kind: str = "yaml"
     tools: list[str] = field(default_factory=list)
     error: str = ""
+    # 这个文件声明要用哪些第三方包（YAML 的 deps / Python 的 DEPS），以及缺了哪几个
+    deps: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not self.error
+
+    @property
+    def needs_install(self) -> bool:
+        """是不是"只差装包"就能好 —— 界面据此决定要不要显示「装依赖」。"""
+        return bool(self.missing)
 
     def as_dict(self) -> dict:
         return {
@@ -95,6 +104,9 @@ class SkillInfo:
             "kind": self.kind,
             "tools": list(self.tools),
             "error": self.error,
+            "deps": list(self.deps),
+            "missing": list(self.missing),
+            "needs_install": self.needs_install,
         }
 
 
@@ -121,6 +133,123 @@ def normalize_triggers(raw: Any) -> tuple:
         if phrase:
             out.append((phrase, dict(args)))
     return tuple(out)
+
+
+def _module_available(name: str) -> bool:
+    """这个包导得进来吗（不真的 import，省得触发副作用）。"""
+    try:
+        return importlib.util.find_spec(str(name)) is not None
+    except (ImportError, ValueError, AttributeError):
+        return False
+
+
+def normalize_deps(raw: Any) -> list[str]:
+    """把 deps 统一成 ["模块名", "pip名:模块名", ...]。
+
+    允许写 "pillow:PIL" 这种 —— 导入名和 pip 名不一致的包不少
+    （PIL/pillow、cv2/opencv-python、yaml/PyYAML）。
+    """
+    if isinstance(raw, str):
+        raw = [raw]
+    out: list[str] = []
+    for item in raw or []:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def dep_names(dep: str) -> tuple[str, str]:
+    """("pillow:PIL") -> ("PIL", "pillow")；只写一个就两边一样。"""
+    if ":" in dep:
+        pip_name, _, module = dep.partition(":")
+        return module.strip() or pip_name.strip(), pip_name.strip()
+    return dep.strip(), dep.strip()
+
+
+def missing_deps(deps: list[str]) -> list[str]:
+    """返回缺的 pip 包名。"""
+    return [dep_names(d)[1] for d in deps if not _module_available(dep_names(d)[0])]
+
+
+def _deps_from_source(path: Path) -> list[str]:
+    """从 Python 文件里读出 DEPS 列表 —— **不执行它**。
+
+    需要在"导入失败"时也能告诉用户缺什么，所以只能静态地看源码：
+    形如 DEPS = ["requests"] 的赋值用 ast 取出来，取不到就当没声明。
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        return []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id.upper() == "DEPS":
+                try:
+                    value = ast.literal_eval(node.value)
+                except (ValueError, SyntaxError):
+                    return []
+                return normalize_deps(value)
+    return []
+
+
+def install_deps(packages: list[str], timeout: float = 600.0) -> dict:
+    """用 pip 装依赖，返回 {ok, output/error}。
+
+    打包版里 sys.executable 是 exe 自己，拿它跑 pip 是错的 ——
+    那种情况去找机器上的 python，找不到就老实让用户自己装。
+    """
+    names = [str(p).strip() for p in packages if str(p).strip()]
+    if not names:
+        return {"ok": False, "error": "没有要装的包"}
+
+    if getattr(sys, "frozen", False):
+        import shutil  # noqa: PLC0415
+
+        python = shutil.which("python") or shutil.which("py")
+        if not python:
+            return {"ok": False,
+                    "error": "打包版里不能自动装包（这台机器上没找到 python）。"
+                             "请自己执行：python -m pip install " + " ".join(names)}
+    else:
+        python = sys.executable
+
+    try:
+        proc = subprocess.run(
+            [python, "-m", "pip", "install", "--disable-pip-version-check", *names],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "装包超时了（网络慢？可以自己在终端里装）"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": "装不了：" + str(exc)[:160]}
+
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        tail = [line for line in output.splitlines() if line.strip()]
+        return {"ok": False,
+                "error": "pip 返回 " + str(proc.returncode) + "："
+                         + (tail[-1][:180] if tail else "没有输出")}
+    return {"ok": True, "packages": names, "output": output[-400:]}
+
+
+def _friendly_error(exc: BaseException, deps: list[str]) -> str:
+    """把导入错误翻译成"缺什么、怎么装"。"""
+    if isinstance(exc, ModuleNotFoundError) and exc.name:
+        module = str(exc.name).split(".")[0]
+        if module in ("voice_agent", "__main__"):
+            return "导入失败：" + str(exc)[:160]
+        known = {dep_names(d)[0]: dep_names(d)[1] for d in deps}
+        pip_name = known.get(module, module)
+        return ("缺 Python 包 " + pip_name + "。装一下：python -m pip install "
+                + pip_name + "（或在界面上点「装依赖」）")
+    if isinstance(exc, ImportError):
+        return "导入失败：" + str(exc)[:160]
+    return str(exc)[:200]
 
 
 def _render(template: str, values: dict[str, Any]) -> str:
@@ -359,6 +488,8 @@ class SkillLoader:
                 info = self._load_python(path)
             else:
                 continue
+            if info is None:
+                continue      # 普通辅助模块，不是工具
             if from_tools:
                 info.kind = "tool"
             infos.append(info)
@@ -378,10 +509,21 @@ class SkillLoader:
     def _load_yaml(self, path: Path) -> SkillInfo:
         from .tools import Tool, register
 
+        deps: list[str] = []
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             if not isinstance(data, dict):
                 raise ValueError("技能文件顶层必须是映射")
+            # deps 声明的是"这个工具要用哪些第三方包"。shell/say 类用不上，
+            # 但 Python 版和调用外部命令的版本会用到；缺了就明确告诉用户去装。
+            deps = normalize_deps(data.get("deps"))
+            missing = missing_deps(deps)
+            if missing:
+                return SkillInfo(path.stem, str(data.get("title") or path.stem),
+                                 str(data.get("description") or ""), path, "yaml", [],
+                                 "缺 Python 包：" + "、".join(missing)
+                                 + "。装一下：python -m pip install " + " ".join(missing),
+                                 deps=deps, missing=missing)
             name = str(data.get("name") or path.stem).strip()
             if not _NAME_RE.match(name):
                 raise ValueError("name 只能是小写字母开头的英文/数字/下划线，例如 my_skill")
@@ -412,9 +554,10 @@ class SkillLoader:
                 source=str(path),
                 triggers=normalize_triggers(data.get("triggers")),
             ), replace=True)
-            return SkillInfo(name, title, description, path, "yaml", [name])
+            return SkillInfo(name, title, description, path, "yaml", [name], deps=deps)
         except Exception as exc:  # noqa: BLE001 - 单个技能坏了不能拖垮整体
-            return SkillInfo(path.stem, path.stem, "", path, "yaml", [], str(exc)[:200])
+            return SkillInfo(path.stem, path.stem, "", path, "yaml", [], str(exc)[:200],
+                             deps=deps, missing=missing_deps(deps))
 
     @staticmethod
     def _normalize_parameters(raw: Any) -> dict:
@@ -447,10 +590,20 @@ class SkillLoader:
     def _load_python(self, path: Path) -> SkillInfo:
         from .tools import Tool, register
 
+        # 先静态读出依赖：导入失败时也要能告诉用户缺什么
+        deps = _deps_from_source(path)
+        missing = missing_deps(deps)
+        if missing:
+            return SkillInfo(path.stem, path.stem, "", path, "python", [],
+                             "缺 Python 包：" + "、".join(missing)
+                             + "。装一下：python -m pip install " + " ".join(missing),
+                             deps=deps, missing=missing)
         try:
             module = self._import_module(path)
         except Exception as exc:  # noqa: BLE001
-            return SkillInfo(path.stem, path.stem, "", path, "python", [], "导入失败：" + str(exc)[:160])
+            return SkillInfo(path.stem, path.stem, "", path, "python", [],
+                             _friendly_error(exc, deps),
+                             deps=deps, missing=missing_deps(deps))
 
         registered: list[str] = []
         try:
@@ -470,7 +623,12 @@ class SkillLoader:
             else:
                 raw_tools = getattr(module, "TOOLS", None)
                 if not raw_tools:
-                    raise ValueError("Python 技能需要定义 TOOLS 列表或 register(registry) 函数")
+                    # 用户很自然会把自己的辅助模块和工具放在同一个目录里。
+                    # 那些文件没有 TOOLS 也没关系，不该被当成"加载失败"报出来 ——
+                    # 但如果是"本来想写工具、忘了写 TOOLS"，还是得提醒。
+                    if self._looks_like_tool(path):
+                        raise ValueError("Python 技能需要定义 TOOLS 列表或 register(registry) 函数")
+                    return None
                 for index, raw in enumerate(raw_tools):
                     tool = self._coerce_tool(raw, path)
                     register(tool, replace=True)
@@ -481,11 +639,25 @@ class SkillLoader:
 
             for name in registered:
                 unregister(name)
-            return SkillInfo(path.stem, path.stem, "", path, "python", [], str(exc)[:200])
+            return SkillInfo(path.stem, path.stem, "", path, "python", [],
+                             _friendly_error(exc, deps), deps=deps)
 
         title = str(getattr(module, "TITLE", "") or path.stem)
         description = str(getattr(module, "DESCRIPTION", "") or "")
-        return SkillInfo(path.stem, title, description, path, "python", registered)
+        return SkillInfo(path.stem, title, description, path, "python", registered,
+                         deps=deps or normalize_deps(getattr(module, "DEPS", None)))
+
+    @staticmethod
+    def _looks_like_tool(path: Path) -> bool:
+        """这个 .py 是"想当工具但写漏了"，还是只是隔壁的辅助模块？
+
+        判据很朴素：源码里出现过 TOOLS 或 handler，就认为作者的意图是写工具。
+        """
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return True
+        return ("TOOLS" in text) or ("def handler" in text)
 
     @staticmethod
     def _coerce_tool(raw: Any, path: Path) -> Any:
@@ -520,13 +692,32 @@ class SkillLoader:
 
     @staticmethod
     def _import_module(path: Path):
+        """导入一个用户写的 Python 工具/技能文件。
+
+        两件容易踩的事：
+        1. 用户很自然会把这个文件**旁边**的模块 import 进来（helper.py、
+           同目录的包）。默认 sys.path 里没有那个目录，所以临时加进去。
+        2. 失败了不能只说 "No module named xxx" —— 要告诉他是哪个包、
+           怎么装（_friendly_error 负责翻译）。
+        """
         module_name = "voice_agent_skill_" + re.sub(r"\W+", "_", path.stem)
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
             raise ImportError("无法加载 " + str(path))
         module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        folder = str(path.parent)
+        added = folder not in sys.path
+        if added:
+            sys.path.insert(0, folder)
+        try:
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        finally:
+            if added:
+                try:
+                    sys.path.remove(folder)
+                except ValueError:
+                    pass
         return module
 
 
@@ -578,9 +769,34 @@ triggers:                  # 离线模式（没配 API Key）靠它喊得动
 | app | target | 打开本机应用 |
 | sequence | steps | 依次调用已有工具，如 steps: [{tool: get_time, args: {}}] |
 
+## 要用第三方包怎么办
+
+在文件里声明 **deps**，助手就知道该装什么：
+
+```yaml
+name: fetch_page
+deps: [requests]          # 导入名和 pip 名不一样时写 "pip名:导入名"，例如 pillow:PIL
+action:
+  type: shell
+  command: python -c "import requests;print('ok')"
+```
+
+Python 版写一个大写的 DEPS：
+
+```python
+import requests           # 没装的话，界面上会显示「缺 Python 包 requests」并给一个「装依赖」按钮
+
+DEPS = ["requests"]
+```
+
+缺包时**点一下界面上那个「装依赖」就能装好**，装完自动重新加载，不用自己开终端。
+（打包版里如果机器上没有 python，它会告诉你手敲哪条命令。）
+
 ## Python 写法（需要任意逻辑时）
 
 ```python
+DEPS = []                 # 要用第三方包就写在这里
+
 def handler(city: str = "") -> str:
     return city + " 今天晴，25 度"
 
@@ -592,6 +808,9 @@ TOOLS = [{
     "handler": handler,
 }]
 ```
+
+辅助模块可以直接放在工具旁边，用 `from helper import xxx` 引进来就行 ——
+只要它里面没有 TOOLS / handler，助手就不会把它当成一个坏掉的工具。
 
 > 工具出错只会让这一个工具不可用，不会影响助手启动。
 > 改完在界面上点「重新加载」，不用重启。

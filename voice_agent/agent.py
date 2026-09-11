@@ -50,6 +50,14 @@ class VoiceAgent:
         self.log = log
         self.brain = Brain(cfg, log=log)
 
+        # 后台子代理做完事要主动汇报，但只能在「真的闲着」的时候开口 ——
+        # 抢在用户正听的回答前面说话，听起来就是助手在自言自语。
+        # 所以回调只负责入队，真正的播报交给采集循环择机做。
+        self.brain.subagents.on_done = self._on_subagent_done
+        self._announce: deque = deque(maxlen=5)
+        self._announce_lock = threading.Lock()
+        self._announce_busy = False
+
         self.wake: WakeWord | None = None
         self.vad: VadSegmenter | None = None
         self.asr: Asr | None = None
@@ -160,6 +168,7 @@ class VoiceAgent:
         try:
             while self._running:
                 self._check_timeout()
+                self._check_announce()
                 block = self.mic.read(timeout=0.2) if self.mic is not None else None
                 if block is None:
                     continue
@@ -197,6 +206,9 @@ class VoiceAgent:
             worker.join(timeout=2.0)
         self._speaking.clear()
         self._recent.clear()
+        with self._announce_lock:
+            self._announce.clear()
+        self._announce_busy = False
         # 必须清掉：否则再次 start() 时「已就绪」和「我在」会被当成「正在停止」而被静默丢弃
         self._stop_speak.clear()
         self._interrupt.clear()
@@ -209,6 +221,11 @@ class VoiceAgent:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def subagents(self):
+        """后台子代理管理器（界面查进度用）。"""
+        return self.brain.subagents
 
     def status(self) -> dict:
         """给网页 UI / 外部程序看的一份快照。"""
@@ -248,6 +265,8 @@ class VoiceAgent:
             "follow_up_ms": int(self.cfg.agent.follow_up_ms),
             "follow_up_mode": str(self.cfg.agent.follow_up_mode),
             "listen_timeout_ms": int(self.cfg.agent.listen_timeout_ms),
+            # 后台子代理：界面拿它显示「派出去的活还在跑」
+            "subagents": self.brain.subagents.snapshot(),
             "turns": self.turns,
             "mic_level": round(float(self.mic.level), 4) if self.mic else 0.0,
             "asr_rtf": round(self.asr.rtf, 4) if self.asr else 0.0,
@@ -359,6 +378,60 @@ class VoiceAgent:
             self.log("[agent] 等待超时，回到待命")
             self._note("system", "（没听到你说话）")
             self._cue("timeout")
+
+    # ───────────────────── 子代理汇报 ─────────────────────
+
+    def _on_subagent_done(self, item) -> None:
+        """子代理做完时的回调（跑在子代理线程里）。
+
+        这里**只记录和入队**，绝不直接说话：此刻用户可能正在听另一条回答，
+        而这个线程也不知道麦克风那边是什么状况。
+        """
+        text = (item.result or "").strip()
+        name = item.name or item.id
+        if not text:
+            self.log("[subagent] " + name + " 没给出结论，跳过汇报")
+            return
+        self._note("assistant", "「" + name + "」回话：" + text)
+        if not self.cfg.agent.subagent_announce:
+            self.log("[subagent] 汇报（配置为不播报）：" + text[:40])
+            return
+        with self._announce_lock:
+            if len(self._announce) == self._announce.maxlen:
+                # 队列满说明积压了好几条没播 —— 说出来，别让它静悄悄地丢
+                self.log("[subagent] 待播汇报积压，最早的一条不再单独播报")
+            self._announce.append((name, text))
+
+    def _check_announce(self) -> None:
+        """在采集循环里择机播报子代理的汇报。
+
+        条件卡得严是故意的：只有**真的待命**、没在播报、也没有任务线程时才开口。
+        播报放进单独的线程而不是就地播，是因为 _speak 会一直阻塞到念完 ——
+        卡在采集循环里，麦克风的数据就没人收了，表现为「醒着却听不见」。
+        """
+        if self._announce_busy or not self._announce or self._state != _IDLE:
+            return
+        if self._speaking.is_set():
+            return
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            return
+        with self._announce_lock:
+            if not self._announce:
+                return
+            name, text = self._announce.popleft()
+        self._announce_busy = True
+        threading.Thread(target=self._announce_worker, args=(name, text),
+                         name="voice-agent-announce", daemon=True).start()
+
+    def _announce_worker(self, name: str, text: str) -> None:
+        try:
+            self.log("[agent] 汇报子代理结果：" + text[:40])
+            self._speak("「" + name + "」那边有结果了：" + text, kind="notice")
+        except Exception as exc:  # noqa: BLE001 - 汇报失败不该影响主循环
+            self.log("[agent] 子代理汇报播报失败：" + str(exc)[:80])
+        finally:
+            self._announce_busy = False
 
     # ───────────────────── 状态迁移 ─────────────────────
 

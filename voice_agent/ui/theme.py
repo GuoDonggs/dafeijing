@@ -78,6 +78,12 @@ def set_accent(color: str) -> str:
 
     预设名（blue / teal / …）走 config.resolve_accent 解析：直接交给 QColor 的话，
     QColor("teal") 会拿到 CSS 的 #008080，不是我们预设的青绿。
+
+    **改色范围覆盖到"大块底色"**：早先只有按钮、描边、胶囊这些小块掺主色，
+    卡片和窗口底色一直是中性灰，换主题时看到的效果就是"只有按钮变了颜色"。
+    现在卡片、输入框、分隔线也各掺 6%~12% 主色 —— 掺得少是有意的：
+    要的是"整块界面偏过去"，而不是变成另一个 App。
+    文字颜色（TEXT / MUTED / DIM）**不掺**，保证对比度不随主题波动。
     """
     global ACCENT, BLUE, ACCENT_HOVER, ACCENT_PRESSED
     global ACCENT_DISABLED_BG, ACCENT_DISABLED_FG, ACCENT_GLOW
@@ -90,18 +96,31 @@ def set_accent(color: str) -> str:
     BLUE = ACCENT                      # 兼容旧引用
     ACCENT_HOVER = c.lighter(122).name()
     ACCENT_PRESSED = c.darker(118).name()
+    # 待命态用的就是主色。这个字典是模块级的，不跟着改的话圆球还是旧颜色。
+    STATE_COLORS["idle"] = ACCENT
+
+    # ── 大块底色（必须排在依赖它们的派生色前面）──
+    # 每次都从写死的基色重新混，不做增量累加：连续换十次主题也不会越混越偏。
+    global BG, SIDEBAR, CARD, CARD_HOVER, CARD_ACTIVE, FIELD, SEPARATOR
+    BG = mix("#0A0A0F", ACCENT, 0.06)
+    SIDEBAR = mix("#111118", ACCENT, 0.06)
+    CARD = mix("#16161D", ACCENT, 0.08)
+    CARD_HOVER = mix("#1D1D26", ACCENT, 0.10)
+    CARD_ACTIVE = mix("#24242F", ACCENT, 0.12)
+    FIELD = mix("#0E0E14", ACCENT, 0.07)
+    SEPARATOR = mix("#26262F", ACCENT, 0.12)
+
     ACCENT_DISABLED_BG = mix(ACCENT, BG, 0.72)
     ACCENT_DISABLED_FG = mix(ACCENT, MUTED, 0.55)
     ACCENT_GLOW = rgba(ACCENT, 0.28)
-    # 待命态用的就是主色。这个字典是模块级的，不跟着改的话圆球还是旧颜色。
-    STATE_COLORS["idle"] = ACCENT
-    # 面板描边、卡片描边也带一点主色：换主色时整块窗口都会变，
-    # 而不是"只有按钮换了颜色"（这正是之前的毛病）
+
+    # ── 描边、悬停、胶囊 ──
     global PANEL_BORDER, CARD_BORDER, ROW_HOVER, SURFACE_TOP, BADGE_BG, PILL_BG
-    PANEL_BORDER = mix(ACCENT, SEPARATOR, 0.26)
-    CARD_BORDER = mix(ACCENT, SEPARATOR, 0.58)
+    PANEL_BORDER = mix(ACCENT, SEPARATOR, 0.30)
+    CARD_BORDER = mix(ACCENT, SEPARATOR, 0.55)
     ROW_HOVER = rgba(ACCENT, 0.14)
-    SURFACE_TOP = mix(BG, ACCENT, 0.14)
+    # 面板从上到下的渐变：顶部掺一点主色，整块窗口的色调就跟着主色走
+    SURFACE_TOP = mix(BG, ACCENT, 0.16)
     BADGE_BG = rgba(ACCENT, 0.16)
     PILL_BG = rgba(ACCENT, 0.12)
     return ACCENT

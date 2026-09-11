@@ -29,6 +29,12 @@ from typing import Any, Callable
 from ._shared import TURN, reset_turn
 from .apps import open_app, open_url, web_search
 from .files import list_files, read_file, recall, remember, search_files
+from .subagents import (
+    cancel_subagent_tool,
+    set_subagent_handler,
+    spawn_subagent_tool,
+    subagent_status_tool,
+)
 from .system_info import get_time, system_info
 # 这些名字同时也是一层公开 API：skills.py 的 sequence 动作会写 tools.open_app(...)，
 # 所以即使本模块自己不直接调用，也要保持可导入。
@@ -333,6 +339,9 @@ _BUILTIN_TITLES = {
     "run_command": "执行命令",
     "remember": "记事",
     "recall": "回忆",
+    "spawn_subagent": "派子代理",
+    "subagent_status": "子代理进度",
+    "cancel_subagent": "取消子代理",
 }
 SKILL_INFOS: list = []
 _SKILLS_LOADED = False

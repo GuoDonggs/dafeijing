@@ -86,9 +86,6 @@ def web_search(query: str = "") -> str:
     return open_url(DEFAULT_SEARCH.format(quote(value)))
 
 
-DEFAULT_SEARCH = "https://www.bing.com/search?q={}"
-
-
 _APP_ALIASES = {
     "记事本": "notepad", "笔记本": "notepad", "文本": "notepad",
     "计算器": "calc", "画图": "mspaint", "资源管理器": "explorer", "文件管理器": "explorer",

@@ -26,6 +26,7 @@ from .files import (
     search_files,
     write_file,
 )
+from .subagents import cancel_subagent_tool, spawn_subagent_tool, subagent_status_tool
 from .system_info import get_time, system_info
 from .vision import (
     app_map_tool,
@@ -437,3 +438,36 @@ _register(Tool(
     parameters=_params(query={"type": "string", "description": "关键词，留空则返回最近几条"}),
     handler=recall,
 ))
+# ─────────────────────────── 子代理 ───────────────────────────
+# 参考 DSH / CodeWhale 的做法：把「要跑好几步、中间结果又长又吵」的事丢到后台，
+# 主对话立刻回一句「我让人去查了」，用户的耳朵不用干等，主对话的上下文也不会
+# 被一堆中间工具结果撑爆。子代理做完会自己回来汇报。
+
+_register(Tool(
+    name="spawn_subagent",
+    description=(
+        "把一件需要好几步、比较费时的事交给后台子代理去做，立刻返回，不耽误继续对话。"
+        "适合「查三样东西再汇总」「把一堆文件里的某个信息找出来」这类任务；"
+        "一句就能答完的小事不要用它。派完之后如果用户问进度，用 subagent_status 查。"
+    ),
+    parameters=_params(
+        task=_S_REQ,
+        name={"type": "string", "description": "给这件事起个短名字，例如「查磁盘」，留空自动编号"},
+    ),
+    handler=spawn_subagent_tool,
+))
+
+_register(Tool(
+    name="subagent_status",
+    description="查看后台子代理的进度和结果。留空返回所有子代理的一句话状态。",
+    parameters=_params(name={"type": "string", "description": "子代理的名字或编号，留空表示全部"}),
+    handler=subagent_status_tool,
+))
+
+_register(Tool(
+    name="cancel_subagent",
+    description="叫停一个还在跑的后台子代理，例如用户说「别查了」。",
+    parameters=_params(name={"type": "string", "description": "子代理的名字或编号，留空表示最近派出的那个"}),
+    handler=cancel_subagent_tool,
+))
+

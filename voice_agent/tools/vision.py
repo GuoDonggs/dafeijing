@@ -23,11 +23,6 @@ def set_vision_handler(handler) -> None:
     _VISION_HANDLER[0] = handler
 
 
-def set_vision_handler(handler) -> None:
-    """注册「看图回答问题」的实现（brain 负责接上多模型里的 vision 档案）。"""
-    _VISION_HANDLER[0] = handler
-
-
 def _screen():
     from .. import screen as screen_mod  # noqa: PLC0415
 

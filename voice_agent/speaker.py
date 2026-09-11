@@ -33,6 +33,16 @@ PROFILE_PATH = PROJECT_ROOT / "build" / "voiceprint.json"
 MODEL_DIR = PROJECT_ROOT / "models" / "speaker"
 DEFAULT_THRESHOLD = 0.55
 
+# ── 录音体检的门槛 ──
+# 为什么要体检："录了 3 秒"和"说了 3 秒"是两回事。麦克风静音、用户没开口、
+# 离麦太远，录到的都是一段近乎静音的音频 —— 拿它注册出来的声纹谁都不像，
+# 之后要么认不出主人、要么谁都能唤醒，而且极难查。所以在**注册之前**就拦下来。
+MIN_SPEECH_S = 1.2        # 一段里至少要有这么久的"确实在说话"
+SPEECH_RMS = 0.010        # 单帧 RMS 超过它算说话
+MIN_PEAK = 0.030          # 整段峰值低于它 = 基本没声音
+CLIP_PEAK = 0.985         # 峰值贴着 1.0 = 爆音，多半离麦太近
+FRAME_S = 0.02
+
 
 def find_model(explicit: str = "") -> Path | None:
     """找声纹模型：先看配置，再在 models/speaker 里挑一个 .onnx。"""
@@ -58,6 +68,9 @@ class Voiceprint:
         self._lock = threading.Lock()
         self.last_score = 0.0
         self.rejected = 0
+        # 录音进度：界面每 300ms 轮一次，用来显示"还剩几秒 / 现在有没有声音"
+        self._progress: dict = {"state": "idle", "seconds": 0.0, "speech": 0.0,
+                                "level": 0.0, "left": 0.0, "hint": ""}
         self.accepted = 0
         self._model = find_model(str(getattr(cfg.speaker, "model", "") or ""))
         self._vectors: dict[str, list[float]] = {}
@@ -201,49 +214,133 @@ class Voiceprint:
         self.rejected += 1
         return False, best, "声纹不匹配（" + str(round(best, 3)) + " < " + str(self.threshold) + "）"
 
+    # ── 录音（带引导与体检）──
+
+    def progress(self) -> dict:
+        """当前录音进度，给界面轮询用。"""
+        return dict(self._progress)
+
+    def _set_progress(self, **fields: Any) -> None:
+        self._progress.update(fields)
+
+    @staticmethod
+    def inspect(audio: np.ndarray, sample_rate: int) -> dict:
+        """给一段录音做体检：到底有没有人说话、有没有爆音。
+
+        返回 {seconds, speech_seconds, peak, rms, level, problem, hint}；
+        problem 为空串表示这段可以用。
+        """
+        data = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if data.size == 0:
+            return {"seconds": 0.0, "speech_seconds": 0.0, "peak": 0.0, "rms": 0.0,
+                    "problem": "empty", "hint": "什么都没录到，检查一下麦克风"}
+        width = max(1, int(FRAME_S * sample_rate))
+        frames = [data[i:i + width] for i in range(0, data.size - width + 1, width)]
+        rms_list = [float(np.sqrt(np.mean(f ** 2))) if f.size else 0.0 for f in frames]
+        peak = float(np.max(np.abs(data)))
+        rms = float(np.sqrt(np.mean(data ** 2)))
+        speech_frames = sum(1 for value in rms_list if value >= SPEECH_RMS)
+        speech_seconds = speech_frames * FRAME_S
+
+        problem, hint = "", ""
+        if peak < MIN_PEAK:
+            problem, hint = "silent", "没听到声音。确认麦克风没被静音，然后靠近一点再说一次"
+        elif speech_seconds < MIN_SPEECH_S:
+            problem, hint = ("too_short",
+                             "只听到 " + str(round(speech_seconds, 1)) + " 秒说话声，"
+                             "太短了。请完整说一句话，比如「今天天气不错，我想听点音乐」")
+        elif peak >= CLIP_PEAK:
+            problem, hint = "clipping", "声音太大了（爆音），离麦克风远一点再说一次"
+        return {"seconds": round(data.size / sample_rate, 2),
+                "speech_seconds": round(speech_seconds, 2),
+                "peak": round(peak, 3), "rms": round(rms, 4),
+                "level": round(min(1.0, rms * 8), 3),
+                "problem": problem, "hint": hint}
+
+    def record_take(self, seconds: float = 4.0) -> dict:
+        """录一段并体检。返回 {ok, samples, ...体检结果}。
+
+        seconds 是**最长**录多久：一旦说满了 MIN_SPEECH_S 而且已经录够 2.5 秒，
+        就提前收工 —— 让用户等满 4 秒是没必要的，而且他们往往说完就不吭声了。
+        """
+        from . import audio as audio_io  # noqa: PLC0415
+
+        rate = int(self.cfg.audio.sample_rate)
+        self._set_progress(state="recording", seconds=0.0, speech=0.0, level=0.0,
+                           left=round(seconds, 1), hint="请说话")
+        device = audio_io.resolve_device(self.cfg.audio.input_device, "input")
+        mic = audio_io.Mic(device=device, sample_rate=rate,
+                           block_size=self.cfg.audio.block_size)
+        mic.start()
+        try:
+            chunks: list[np.ndarray] = []
+            started = time.monotonic()
+            while True:
+                elapsed = time.monotonic() - started
+                if elapsed >= seconds:
+                    break
+                block = mic.read(timeout=0.2)
+                if block is None:
+                    continue
+                chunks.append(np.asarray(block, dtype=np.float32).reshape(-1))
+                if chunks:
+                    recent = np.concatenate(chunks[-8:])
+                    level = float(np.sqrt(np.mean(recent ** 2))) if recent.size else 0.0
+                    self._set_progress(seconds=round(elapsed, 1), level=round(min(1.0, level * 8), 3),
+                                       left=round(max(0.0, seconds - elapsed), 1))
+        finally:
+            mic.close()
+        if not chunks:
+            self._set_progress(state="error", hint="没录到任何音频，检查一下麦克风")
+            return {"ok": False, "samples": np.zeros(0, dtype=np.float32),
+                    "problem": "empty", "hint": "什么都没录到，检查一下麦克风"}
+        audio = np.concatenate(chunks)
+        report = self.inspect(audio, rate)
+        self._set_progress(
+            state="ok" if not report["problem"] else "error",
+            seconds=report["seconds"], speech=report["speech_seconds"],
+            level=report["level"], hint=report["hint"] or "听起来很清楚，可以了",
+        )
+        return {"ok": not report["problem"], "samples": audio, **report}
+
     def verify_now(self, seconds: float = 3.0) -> dict:
         """录一小段并直接给分数，用来在设置里"试一下"。"""
-        from . import audio as audio_io  # noqa: PLC0415
-
-        device = audio_io.resolve_device(self.cfg.audio.input_device, "input")
-        mic = audio_io.Mic(device=device, sample_rate=self.cfg.audio.sample_rate,
-                           block_size=self.cfg.audio.block_size)
-        mic.start()
-        try:
-            chunks = []
-            deadline = time.monotonic() + seconds
-            while time.monotonic() < deadline:
-                block = mic.read(timeout=0.2)
-                if block is not None:
-                    chunks.append(block)
-        finally:
-            mic.close()
-        if not chunks:
-            return {"ok": False, "error": "没录到声音"}
-        audio = np.concatenate(chunks)
-        allowed, score, note = self.check(audio)
+        take = self.record_take(seconds)
+        if not take.get("ok"):
+            return {"ok": False, "error": take.get("hint") or "这段录音不能用"}
+        allowed, score, note = self.check(take["samples"])
         return {"ok": True, "allowed": allowed, "score": round(score, 3), "note": note}
 
-    def enroll_now(self, seconds: float = 3.0, name: str = "owner") -> dict:
-        """录一小段并注册成声纹。"""
-        from . import audio as audio_io  # noqa: PLC0415
+    def enroll_now(self, seconds: float = 4.0, name: str = "owner") -> dict:
+        """录一段、体检、再注册。
 
-        device = audio_io.resolve_device(self.cfg.audio.input_device, "input")
-        mic = audio_io.Mic(device=device, sample_rate=self.cfg.audio.sample_rate,
-                           block_size=self.cfg.audio.block_size)
-        mic.start()
-        try:
-            chunks = []
-            deadline = time.monotonic() + seconds
-            while time.monotonic() < deadline:
-                block = mic.read(timeout=0.2)
-                if block is not None:
-                    chunks.append(block)
-        finally:
-            mic.close()
-        if not chunks:
-            return {"ok": False, "error": "没录到声音"}
-        return self.enroll(np.concatenate(chunks), name)
+        体检不过就**不写进档案**，并把原因原样返回给界面 —— 录进一段静音，
+        比没录还糟：之后要么认不出主人，要么谁都能唤醒。
+        """
+        take = self.record_take(seconds)
+        if not take.get("ok"):
+            return {"ok": False, "error": take.get("hint") or "这段录音不能用",
+                    "problem": take.get("problem", ""),
+                    "speech_seconds": take.get("speech_seconds", 0.0)}
+
+        # 第 2、3 次录的时候顺手比一比：跟已有的差太多，多半换了个人或者离麦远近差太多
+        if self._vectors.get(name):
+            vector = self.embed(take["samples"])
+            if vector is not None:
+                similarity = self._cosine(self._vectors[name], vector)
+                if similarity < 0.35:
+                    self._set_progress(state="error",
+                                       hint="这次听起来和上次差得有点多，建议重录一次")
+                    return {"ok": False, "problem": "inconsistent",
+                            "error": "这次的声音和之前录的差得有点多（相似度 "
+                                     + str(round(similarity, 2)) + "）。"
+                                     "同样的距离、同样的音量再说一次",
+                            "score": round(similarity, 3)}
+        result = self.enroll(take["samples"], name)
+        if result.get("ok"):
+            result["speech_seconds"] = take.get("speech_seconds", 0.0)
+            result["hint"] = take.get("hint", "")
+        return result
 
     # ── 存档 ──
     def load_profile(self) -> None:

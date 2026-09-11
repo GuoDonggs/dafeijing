@@ -464,6 +464,13 @@ class AgentCfg:
     min_silence_ms: int = 700
     min_speech_ms: int = 250
     vad_threshold: float = 0.5
+    # ── 子代理 ──
+    # 把"要跑好几步"的事丢到后台单独做：主对话先回一句"我去查"，
+    # 做完再播报结果。只有长任务才会用到它。
+    subagent_enabled: bool = True
+    subagent_max: int = 3           # 同时最多几个
+    subagent_rounds: int = 8        # 每个子代理最多调几次工具
+    subagent_announce: bool = True  # 做完要不要主动播报
     exit_words: list[str] = field(default_factory=lambda: ["退下", "再见"])
     persona: str = ("你是运行在用户电脑上的语音助手，名字叫「大肥鲸」。"
                     "回答会被朗读，所以要短、要口语化，不要罗列 Markdown。")
@@ -667,6 +674,10 @@ class Config:
                 min_silence_ms=int(_get(raw, "agent.min_silence_ms", 700)),
                 min_speech_ms=int(_get(raw, "agent.min_speech_ms", 250)),
                 vad_threshold=float(_get(raw, "agent.vad_threshold", 0.5)),
+                subagent_enabled=bool(_get(raw, "agent.subagent_enabled", True)),
+                subagent_max=int(_get(raw, "agent.subagent_max", 3)),
+                subagent_rounds=int(_get(raw, "agent.subagent_rounds", 8)),
+                subagent_announce=bool(_get(raw, "agent.subagent_announce", True)),
                 exit_words=_str_list(_get(raw, "agent.exit_words", None), agent_defaults.exit_words),
                 persona=str(_get(raw, "agent.persona", AgentCfg.persona)),
                 confirm=ConfirmCfg(

@@ -38,6 +38,32 @@ def pump(app, ms: int = 400) -> None:
         _time.sleep(0.01)
 
 
+def grab_pixels(widget, step: int = 5) -> list[tuple[int, int, int]]:
+    """把控件真实渲染一遍，隔几个像素采一个点。
+
+    为什么要抓像素：换主题的 bug（"只有按钮变了颜色"）在样式表字符串里是
+    看不出来的 —— 颜色确实写进去了，只是掺得太少、或者压根没用到卡片底色上。
+    """
+    image = widget.grab().toImage()
+    return [
+        (image.pixelColor(x, y).red(), image.pixelColor(x, y).green(),
+         image.pixelColor(x, y).blue())
+        for y in range(0, image.height(), step)
+        for x in range(0, image.width(), step)
+    ]
+
+
+def pixel_diff_ratio(before: list, after: list, threshold: int = 8) -> float:
+    """两次渲染里明显变色的像素占比。"""
+    if not before or len(before) != len(after):
+        return 0.0
+    changed = sum(
+        1 for a, b in zip(before, after)
+        if abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > threshold
+    )
+    return changed / len(before)
+
+
 def fake_snapshot(config: Path, **overrides) -> dict:
     status = {
         "running": True, "state": "listen", "state_text": "正在听", "speaking": False,
@@ -215,6 +241,30 @@ def window_smoke() -> None:
                 check("主窗口样式表里是新主色", theme.ACCENT in window.styleSheet())
                 settings.page._on_accent("blue")
                 check("能换回默认蓝", theme.ACCENT.lower() == "#0a84ff", theme.ACCENT)
+
+                # 换主题要改到"整块界面"，不是只有按钮。
+                # 用户的原话是"主题色只改变按钮颜色"—— 早先确实只有按钮/描边/胶囊
+                # 掺了主色，卡片和窗口底色一直是中性灰。这里抓真实像素来比：
+                # 样式表字符串里有新主色，并不等于用户看得出来。
+                window.set_accent("blue")
+                pump(app, 80)
+                px_blue = grab_pixels(window)
+                window.set_accent("purple")
+                pump(app, 80)
+                px_purple = grab_pixels(window)
+                moved = pixel_diff_ratio(px_blue, px_purple)
+                check("换主题后整块面板都变色（不只是按钮）", moved > 0.5,
+                      "变了 {:.0%} 的像素".format(moved))
+                check("卡片底色也跟着主色走（不再是中性灰）",
+                      theme.CARD.lower() != "#16161d" and theme.BG.lower() != "#0a0a0f",
+                      theme.CARD)
+                check("文字颜色不掺主色（保证对比度）",
+                      theme.TEXT == "#F5F5F7" and theme.MUTED == "#9A9AA8", theme.TEXT)
+                window.set_accent("blue")
+                pump(app, 80)
+                check("换回蓝色后卡片底色也回得去",
+                      theme.CARD == "#16161D" or pixel_diff_ratio(grab_pixels(window), px_blue) < 0.05,
+                      theme.CARD)
 
             # 改了「要重启才生效」的设置：主界面弹提示条，能一键重启
             console = settings.page.console

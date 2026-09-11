@@ -152,6 +152,18 @@ class PageDialog(FramelessDialog):
         self._timer.timeout.connect(self._tick)
         self._timer.start(300)
 
+    def closeEvent(self, event) -> None:  # noqa: ANN001, N802
+        """关窗时把页面摘出来，别让它跟着窗口一起销毁。
+
+        页面是**缓存的**（同一个 Page 实例会被反复塞进新窗口）。窗口一关，
+        它的子控件会被 Qt 一起销毁，而缓存里还留着那个已经死掉的指针 ——
+        下次点「设置」就会出现一个只有标题、内容全空的窗口。
+        这里先把页面从窗口里摘下来（setParent(None)），它就活得下来。
+        """
+        self._timer.stop()
+        self.page.setParent(None)
+        super().closeEvent(event)
+
     def _tick(self) -> None:
         if self.parent() is None:
             return
@@ -269,13 +281,24 @@ class MainWindow(QWidget):
         self.home = pages_mod.HomePage(self.console, self.panel)
         inner.addWidget(self.home, 1)
         self.pages = {"home": self.home}
+        # 每个页面最多一个窗口；重复点菜单时把它提到前面就行
+        self._dialogs: dict[str, PageDialog] = {}
         self.home.start_requested.connect(self.start_engine)    # type: ignore[attr-defined]
         self.home.stop_requested.connect(self.stop_engine)      # type: ignore[attr-defined]
         self.home.cancel_requested.connect(self.cancel_task)    # type: ignore[attr-defined]
 
     def _page_for(self, key: str, factory, title: str, width: int = 720,
                   height: int = 640) -> PageDialog:
-        """按需创建页面 —— 没打开过的页面不占内存，启动也更快。"""
+        """按需创建页面 —— 没打开过的页面不占内存，启动也更快。
+
+        窗口已经开着就直接提到前面，不再开第二个：以前重复点「设置」会新开一个
+        窗口，把页面控件从旧窗口里抢走，两个窗口都变得半死不活。
+        """
+        existing = self._dialogs.get(key)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return existing
         if key not in self.pages:
             page = factory(self.console)
             # 设置页里换了主题色，主窗口得跟着变色（图标是渲染后缓存的，
@@ -284,7 +307,9 @@ class MainWindow(QWidget):
             if signal is not None:
                 signal.connect(self.set_accent)
             self.pages[key] = page
-        return PageDialog(self.pages[key], title, self, width, height)
+        dialog = PageDialog(self.pages[key], title, self, width, height)
+        self._dialogs[key] = dialog
+        return dialog
 
     def _bind_shortcuts(self) -> None:
         pairs = [
