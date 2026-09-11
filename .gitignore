@@ -30,8 +30,11 @@ build/tpl*.jpg
 
 # 跨轮上下文：里面有你说过的话，不入库
 build/conversation.json
-# 提交信息临时文件（git commit -F 用）
+# 临时文件：提交信息（git commit -F 用）与排查用的小脚本
 build/commit-msg*.txt
+build/cmsg*.txt
+build/*probe*.py
+build/_*.py
 # 探测/调试留下的音频
 build/_*.wav
 build/_*.mp3
