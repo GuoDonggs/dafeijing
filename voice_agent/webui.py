@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import mimetypes
 import queue
-import re
 import secrets
 import threading
 import time

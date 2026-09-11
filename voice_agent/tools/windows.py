@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from ._shared import SCREENSHOT_DIR
+from ._shared import HOME, SCREENSHOT_DIR
 
 _CMD_SYNTAX = re.compile(r'[&|<>^"\']')
 
@@ -440,6 +440,44 @@ _KEY_NAMES = {
     "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
     "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
 }
+
+
+# ── Win32 常量与结构体 ──
+# 这些都放在文件末尾（函数后面）：Python 是调用时解析全局名，所以没问题，
+# 而这样上半部分读起来就是纯粹的业务逻辑。
+#
+# 提醒：这一段当初在 tools.py 拆成 tools/ 包时被漏掉了，后果是 _ps() 里
+# NameError 被 except 吞掉、永远返回空串（音量、截屏、系统信息全部静默失效），
+# type_text / press_keys 则直接抛异常。加回来之后才真正能用。
+
+# PowerShell 的输出编码：Windows 控制台默认不是 UTF-8，不先设一下，
+# 中文路径、窗口标题回来就是乱码
+_PS_UTF8 = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = (
+        ("dx", ctypes.c_long), ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    )
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = (
+        ("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    )
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = (("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT),
+                ("padding", ctypes.c_byte * 40))
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = (("type", ctypes.c_ulong), ("u", _INPUTUNION))
 
 
 _KEYEVENTF_KEYUP = 0x0002

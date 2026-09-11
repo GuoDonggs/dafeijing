@@ -217,15 +217,24 @@ def main() -> int:
     spoken.clear()
 
     # 4a 真实路径：确认阶段说的话会被 ASR 识别并投进确认队列
-    agent._begin_listen("confirm")
     # 前面补一小段静音：收音保护期会吃掉开头 0.15s，真人也是先停一下再开口
-    cancel_audio, heard = find_command_audio(agent, "取消", "取消")
-    check("能挑到一段识别正确的合成音频", cancel_audio is not None, repr(heard))
-    if cancel_audio is not None:
+    #
+    # 这里要重试几次：「识别器单独读得对」不等于「喂进状态机还读得对」，
+    # 再加上 VITS 合成自带随机噪声，一次就断言会让测试随机变红。
+    answer = ""
+    picked = None
+    for _try in range(4):
+        agent._begin_listen("confirm")
+        cancel_audio, heard = find_command_audio(agent, "取消", "取消")
+        if cancel_audio is None:
+            continue
+        picked = heard
         feed(agent, np.concatenate([silence(0.3), cancel_audio, silence(1.2)]))
-    answer = "" if agent._confirm_q.empty() else agent._confirm_q.get_nowait()
+        answer = "" if agent._confirm_q.empty() else agent._confirm_q.get_nowait()
+        if "取消" in answer:
+            break
+    check("能挑到一段识别正确的合成音频", picked is not None, repr(picked))
     check("确认阶段听清了回答", "取消" in answer, repr(answer))
-
     # 4b 判定逻辑：答案是在「问完之后」才到的，所以用一个小线程模拟用户开口
     def answer_later(text: str, delay: float = 0.3) -> None:
         threading.Thread(

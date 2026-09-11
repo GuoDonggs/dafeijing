@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 
 from ._shared import DEFAULT_SEARCH
