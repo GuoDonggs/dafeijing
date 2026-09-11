@@ -355,6 +355,14 @@ ChatTTS 每次调用有 1.5~2 秒的固定开销，调 length_scale 之类的没
 3. **预取线程**：播第一块的时候，后面的块已经在合成了（speak 里的 tts-prefetch），
    所以块放大不会让等待变长。
 
+> 预取这条路上踩过一个很隐蔽的坑，记在这里免得再犯：消费端原本用
+> `item[0] == "error"` 判断出错标记，而正常消息的第一项是 **numpy 数组** ——
+> 数组比较得到逐元素的布尔数组，`if` 它直接抛
+> "The truth value of an array with more than one element is ambiguous"。
+> 它只在"回复够长、切成多块"时才会走到，短回复怎么测都正常，
+> 所以躲过了全部测试，表现就是**长回复整句都不出声**。
+> 现在改用对象哨兵，并且加了一条专门的回归测试（场景 9）。
+
 ---
 
 ## 五、对话：上下文与连续对话
@@ -790,7 +798,7 @@ vits 的 lexicon.txt 里一个英文字母都没有，C盘 的 C 会被判为 OO
 | 端到端响应 | 说完话到开口：规则模式约 0.1s；LLM 模式取决于模型首字延迟 |
 | 打包体积 | dist/VoiceAgent 约 4.6 GB / 5457 个文件（含 torch，模型仍不在包内） |
 
-八个测试脚本共 **246 项断言全部通过**：selftest 10、test_pipeline 31、
+八个测试脚本共 **249 项断言全部通过**：selftest 10、test_pipeline 34、
 test_llm_loop 12、test_skills 41、test_webui 55、test_gui 52、test_voices 33、
 test_speaker 12。
 

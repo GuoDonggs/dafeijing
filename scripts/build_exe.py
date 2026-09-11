@@ -279,7 +279,14 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[1/4] 跳过清理（--no-clean）")
     else:
         print("\n[1/4] 清理旧产物")
-        remove_path(out_dir)
+        # 删不干净就直接停：以前只是打印一句警告继续往下走，
+        # 结果 PyInstaller 在一个没清空的目录上构建失败，报的错和真正的原因
+        # （有程序占着文件）八竿子打不着，排查很费劲。
+        if not remove_path(out_dir):
+            print()
+            print("  [中止] 产物目录删不掉，多半是程序还在运行。")
+            print("  先关掉 " + str(out_dir / WINDOWED_EXE) + " 和 VoiceAgentCLI.exe，再重新打包。")
+            return 1
         remove_path(work_sub)
         print("  已清理 " + str(out_dir))
     if kept or plan["models"]:

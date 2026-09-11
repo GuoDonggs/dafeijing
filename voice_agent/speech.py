@@ -495,7 +495,12 @@ class Tts:
         return samples, rate
 
     def _generate(self, text: str, speaker: int, speed: float) -> tuple[np.ndarray, int]:
-        """真正去合成。两个引擎的调用方式完全不同，在这里分开。"""
+        """真正去合成。两个引擎的调用方式完全不同，在这里分开。
+
+        ChatTTS 启动后日志里会出现一句 "found invalid characters: {'？'}"，
+        看着像在抱怨我们喂的标点 —— 实测喂半角问号也照样打印，它是 ChatTTS
+        在校验自己的同音字表，跟输入无关，可以不管。
+        """
         if self._chat is not None:
             import ChatTTS  # noqa: PLC0415
 
@@ -622,6 +627,13 @@ class Tts:
 
         out: queue.Queue = queue.Queue(maxsize=2)
         done = object()
+        # 出错时往队列里塞的标记。**必须用对象，不能用字符串**：
+        # 正常消息是 (numpy 数组, 采样率)，拿 item[0] == "error" 去比会得到一个
+        # 逐元素的布尔数组，if 它就直接抛
+        # "The truth value of an array with more than one element is ambiguous"。
+        # 这条路径只在"回复够长、切成多块"时才走到，短回复一切正常 ——
+        # 所以它躲过了所有测试，只在你真说话的时候炸。
+        failed = object()
         cancel = threading.Event()
 
         def stopped() -> bool:
@@ -646,7 +658,7 @@ class Tts:
                     if samples.size and not offer((samples, rate)):
                         break
             except Exception as exc:  # 合成崩了要让播放侧知道，不能干等
-                offer(("error", exc))
+                offer((failed, exc))
             offer(done)
 
         worker = threading.Thread(target=produce, name="tts-prefetch", daemon=True)
@@ -657,7 +669,7 @@ class Tts:
                 item = out.get()
                 if item is done:
                     break
-                if isinstance(item, tuple) and item and item[0] == "error":
+                if isinstance(item, tuple) and item and item[0] is failed:
                     print("[tts] 合成失败：" + repr(item[1]), file=sys.stderr, flush=True)
                     finished = False
                     break

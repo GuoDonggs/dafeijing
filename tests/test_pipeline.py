@@ -334,6 +334,33 @@ def main() -> int:
     check("对话记录文本可读",
           any(item["text"] == "不客气。" for item in agent.status()["transcript"]))
 
+    print("\n场景 9：长回复要切成多块播出来（这里曾经整个播报都炸掉）")
+    # 回归测试：预取播放的消费端以前拿 item[0] == "error" 判断出错标记，
+    # 而正常消息的第一项是 numpy 数组 —— 数组比较得到逐元素布尔数组，
+    # if 它直接抛 "The truth value of an array ... is ambiguous"。
+    # 只在"回复够长、切成多块"时才走到，所以短回复怎么测都正常。
+    from voice_agent import speech as speech_mod
+
+    played: list = []
+    original_play = speech_mod.audio_io.play
+
+    def fake_play(samples, rate, **kwargs):  # noqa: ANN001, ANN202
+        played.append(int(samples.size))
+        return True
+
+    speech_mod.audio_io.play = fake_play
+    try:
+        long_text = ("好的，我先看了一下你的磁盘，C 盘还剩 156 GB，D 盘还剩 402 GB，"
+                     "空间都还够用。另外浏览器也已经帮你打开了，还要做别的吗？")
+        chunks = agent.tts.chunks(long_text)
+        ok = agent.tts.speak(long_text, kind="reply")
+        check("长回复被切成多块", len(chunks) >= 2, str(len(chunks)) + " 块")
+        check("多块都播出来了", ok and len(played) == len(chunks),
+              "播了 " + str(len(played)) + " / " + str(len(chunks)))
+        check("没有空块", bool(played) and all(size > 0 for size in played), str(played))
+    finally:
+        speech_mod.audio_io.play = original_play
+
     print()
     if failures:
         print("失败 " + str(len(failures)) + " 项：" + "、".join(failures))
