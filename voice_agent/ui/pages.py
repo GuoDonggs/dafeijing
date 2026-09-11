@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
@@ -692,6 +693,8 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
          ["off", "low", "medium", "high", "max"]),
         ("llm.base_url", "服务地址", "任何 OpenAI 兼容服务", "text", None),
         ("llm.model", "模型名", "", "text", None),
+        ("llm.max_rounds", "一步最多调几次工具", "多步任务撞上限会只说半句；默认 12", "choice",
+         ["6", "12", "20"]),
         ("llm.api_key", "API Key", "留空表示不改动；也可以读环境变量", "password", None),
     ]),
     ("外观", [
@@ -981,11 +984,40 @@ class SettingsPage(Page):
             box.exec()
             self._audition_hint.setVisible(False)
             return
-        text = "正在试听 " + str(result.get("voice"))
-        if result.get("loading"):
-            text += "　·　首次要先加载合成模型，等几秒"
+        self._paint_audition(self.console.audition_status())
+
+    def _paint_audition(self, info: dict) -> None:
+        """把试听进度画到那一行提示上。
+
+        以前只在点击的瞬间写一句"正在试听 / 首次要加载"，之后没人清 ——
+        用户看到的就是"一直显示在加载"。现在 on_tick 每 300ms 轮一次状态。
+        """
+        state = str(info.get("state") or "idle")
+        voice = str(info.get("voice") or "")
+        if state == "idle":
+            self._audition_hint.setVisible(False)
+            return
+        if state == "loading":
+            text, color = "正在加载合成模型…（首次要十几秒）", theme.ORANGE
+        elif state == "playing":
+            text, color = "正在试听 " + voice, theme.ACCENT
+        elif state == "done":
+            text, color = "试听结束：" + voice, theme.GREEN
+            # 播完留 5 秒再收起来，让人来得及看一眼
+            if time.time() - float(info.get("at") or 0) > 5.0:
+                self.console.clear_audition()
+                self._audition_hint.setVisible(False)
+                return
+        else:
+            text, color = "试听失败：" + str(info.get("error") or "未知原因"), theme.RED
+            self.console.clear_audition()
         self._audition_hint.setText(text)
+        self._audition_hint.setStyleSheet("color: " + color + "; font-size: 12px;")
         self._audition_hint.setVisible(True)
+
+    def on_tick(self, snapshot: dict, state: str) -> None:
+        # 只关心试听那一行：其余地方由各自的控件自己刷
+        self._paint_audition(self.console.audition_status())
 
     @staticmethod
     def _choice_value(shown: str, options: list[str] | None) -> Any:

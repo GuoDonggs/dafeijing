@@ -301,7 +301,10 @@ class Brain:
             messages.append({"role": "system", "content": context})
 
         failures = 0
-        for _round in range(max(1, self.cfg.llm.max_rounds)):
+        rounds = max(1, self.cfg.llm.max_rounds)
+        # 同一个工具、同一套参数连着调三次，就是绕进去了（模型自己出不来）
+        repeats: dict[str, int] = {}
+        for _round in range(rounds):
             if interrupt is not None and interrupt.is_set():
                 return ""
             message = client.chat(messages, tools=tools.openai_tools())
@@ -331,6 +334,12 @@ class Brain:
                 if interrupt is not None and interrupt.is_set():
                     return ""
                 self.used_tools = True
+                # 绕圈检测：完全相同的一步重复三次，多半是模型卡住了
+                fingerprint = name + "|" + str(arguments)
+                repeats[fingerprint] = repeats.get(fingerprint, 0) + 1
+                if repeats[fingerprint] >= 3:
+                    self.log("[brain] " + name + " 用同样的参数连调 3 次，判定为绕圈，提前收尾")
+                    return self._wrap_up(client, messages, user_text, "我卡在重复执行同一步上了")
                 outcome = tools.call_result(name, arguments, on_confirm=confirm)
                 if outcome.ok:
                     self.log("[brain] 工具返回 " + outcome.text[:120])
@@ -346,8 +355,32 @@ class Brain:
                     "content": self._cap_result(outcome.text),
                 })
 
-        self._remember(user_text, "（步骤太多，已停止）")
-        return "这件事分了好几步还没做完，我先停下来。"
+        self.log("[brain] 到了步数上限（" + str(rounds) + " 轮），让模型自己收个尾")
+        return self._wrap_up(client, messages, user_text, "")
+
+    def _wrap_up(self, client: Llm, messages: list[dict], user_text: str,
+                 note: str = "") -> str:
+        """步数用完时的收尾：再问一次模型，让它说清楚做到哪儿了。
+
+        以前这里直接甩一句"这件事分了好几步还没做完，我先停下来" —— 用户既不知道
+        做了什么，也不知道还剩什么，等于白说。多花一次**不带工具**的调用，换一句
+        "已经打开了浏览器，天气还没查到"。
+        """
+        prompt = ("（系统提示：本轮步数已达上限，不要再调用任何工具。）"
+                  "请用一两句口语化中文说清楚：已经完成了什么、还剩什么没做。")
+        reply = ""
+        try:
+            message = client.chat(messages + [{"role": "user", "content": prompt}])
+            reply = (message.get("content") or "").strip()
+        except LlmError as exc:
+            self.log("[brain] 收尾总结也失败了：" + str(exc)[:80])
+        if not reply:
+            reply = "这件事步骤有点多，我先停一下。已经做过的不会重复执行。"
+        if note:
+            reply = note + "。" + reply
+        self._remember(user_text, reply)
+        self.wants_followup = True   # 话没说完，留个窗口让用户接着讲
+        return reply
 
     def _remember(self, user_text: str, reply: str) -> None:
         self.history.append({"role": "user", "content": user_text})

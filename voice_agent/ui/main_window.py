@@ -82,8 +82,10 @@ class FramelessDialog(QDialog):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 10)
-        self.panel = ui.RoundedPanel(self, radius=18, color=theme.BG, border=theme.SEPARATOR)
+        self.panel = ui.RoundedPanel(self, radius=18, color=theme.BG,
+                                     border=theme.PANEL_BORDER, top=theme.SURFACE_TOP)
         outer.addWidget(self.panel)
+        self.apply_theme()
 
         inner = QVBoxLayout(self.panel)
         inner.setContentsMargins(18, 12, 18, 18)
@@ -103,6 +105,15 @@ class FramelessDialog(QDialog):
         inner.addLayout(bar)
         self.body = inner
         self._drag: QPoint | None = None
+
+    def apply_theme(self) -> None:
+        """把当前主题刷到这个窗口上（换主色时主窗口会挨个调用）。
+
+        页面窗口是独立顶层窗口，主窗口 setStyleSheet 影响不到它们 ——
+        以前漏了这一步，所以"换了主题色，弹出来的设置页还是旧配色"。
+        """
+        self.setStyleSheet(theme.qss())
+        self.panel.set_colors(theme.BG, theme.PANEL_BORDER, theme.SURFACE_TOP)
 
     # 无边框窗口要自己实现拖动
     def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802
@@ -216,7 +227,7 @@ class MainWindow(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)     # 留白给圆角与描边
         self.panel = ui.RoundedPanel(self, radius=20, color=theme.BG,
-                                     border=theme.PANEL_BORDER)
+                                     border=theme.PANEL_BORDER, top=theme.SURFACE_TOP)
         outer.addWidget(self.panel)
 
         inner = QVBoxLayout(self.panel)
@@ -381,8 +392,20 @@ class MainWindow(QWidget):
         """
         color = theme.set_accent(value)
         self.setStyleSheet(theme.qss())
-        # 面板描边也带主色：换色时整块窗口一起变，而不是只有按钮变
-        self.panel.set_colors(theme.BG, theme.PANEL_BORDER)
+        # 面板描边 + 顶部渐变也带主色：换色时整块窗口一起变，而不是只有按钮变
+        self.panel.set_colors(theme.BG, theme.PANEL_BORDER, theme.SURFACE_TOP)
+        # 页面窗口是独立顶层窗口，得挨个刷；它们里面还有胶囊、图标要重上色
+        for dialog in self.findChildren(FramelessDialog):
+            try:
+                dialog.apply_theme()
+            except Exception:  # noqa: BLE001 - 换主题失败不该影响主流程
+                pass
+        # 胶囊的底色掺了主色，但它用的是内联样式表，得主动刷一遍
+        for pill in self.findChildren(ui.Pill):
+            try:
+                pill.refresh_theme()
+            except Exception:  # noqa: BLE001
+                pass
         # 已经建过的页面也刷一遍（设置页就是发信号的那个）。
         # 这里刻意不关窗口：用户点一下色点，设置窗口就自己消失，很突兀。
         for page in self.pages.values():

@@ -69,6 +69,33 @@ if _example_config.is_file():
 if SKILLS_DIR.is_dir():
     datas += [(str(p), "skills") for p in sorted(SKILLS_DIR.iterdir()) if p.is_file()]
 
+# 自定义工具示例：和 skills 同一套格式，放在 tools/ 里
+TOOLS_DIR = PROJECT_ROOT / "tools"
+if TOOLS_DIR.is_dir():
+    datas += [(str(p), "tools") for p in sorted(TOOLS_DIR.iterdir()) if p.is_file()]
+
+# ChatTTS 的 res/ 是数据文件（同音字表、分词表），只收 Python 模块是不够的：
+# 少了它运行时报 "No such file: ChatTTS/res/homophones_map.json"。
+def _add_package_data(package, subdir=""):
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec(package)
+    except Exception:
+        spec = None
+    if spec is None or not spec.submodule_search_locations:
+        print("[spec] 没装 " + package + "，跳过它的数据文件")
+        return
+    root = Path(list(spec.submodule_search_locations)[0])
+    src = root / subdir if subdir else root
+    if src.is_dir():
+        datas.append((str(src), package + ("/" + subdir if subdir else "")))
+        print("[spec] 收 " + package + "/" + subdir + " 的数据文件")
+
+
+_add_package_data("ChatTTS", "res")
+# transformers / tokenizers 的钩子（PyInstaller 自带）会处理自己的数据，
+# 这里只补 ChatTTS 自己的。
+
 # ── 二进制 ─────────────────────────────────────────────────────────────────
 # sherpa_onnx 把 C 运行时放在 sherpa_onnx/lib/ 下（含它自己那份 onnxruntime.dll）。
 # Python 扩展模块 _sherpa_onnx.*.pyd 会被自动收集，但它依赖的 DLL 不是 Python 模块，
@@ -105,16 +132,16 @@ EXCLUDES = [
     # 注意：PyQt6 不能排 —— 桌面界面就是用它写的，排掉之后 exe 起不来。
     # 只排我们不用的那几个 GUI 框架（Tkinter 也已经不用了）。
     "PyQt5", "PySide2", "PySide6", "wx", "tkinter",
-    "torch", "torchvision", "torchaudio", "torchgen",
-    # ChatTTS 及其依赖链（transformers / vocos / encodec …）。
-    # 它是「想更好听才装」的可选引擎，本体加依赖两个多 GB，不该进这个包。
-    # 排掉之后 exe 里的 ChatTTS 会 import 失败，speech.py 会给出明确提示，
-    # 让人换回 vits —— 这比打一个 3 GB 的包好。
-    "ChatTTS", "chattts", "transformers", "tokenizers", "vocos", "encodec",
-    "vector_quantize_pytorch", "einx", "pybase16384", "sentencepiece",
-    "huggingface_hub", "safetensors", "hf_xet",
-    "tensorflow", "keras", "sklearn", "sympy",
-    "numba", "llvmlite", "cupy", "pyarrow", "dask",
+    # torch 及其语音依赖必须**打进去** —— ChatTTS 就是跑在它上面的。
+    # 之前这里把 torch 排掉了，等于 exe 里选了 chattts 也起不来。
+    # torchvision 用不到，可以排（它自己就好几百 MB）。
+    # torchgen 不能排：torch 自己 import 它，排掉就是
+    # "No module named 'torchgen'"。torchvision 用不到，留着排除。
+    "torchvision",
+    "tensorflow", "keras", "sklearn",
+    # numba / llvmlite 不能排：ChatTTS 自己 import numba，einx 还要 sympy。
+    # （sympy 也不在上面那几行里 —— 同样是因为 einx。）
+    "cupy", "pyarrow", "dask",
     "pytest", "_pytest", "sphinx", "docutils",
 ]
 

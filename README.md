@@ -328,8 +328,10 @@ python -m voice_agent voices --set bazong           # 写进配置（不动其�
 1. **要独显**：约 2 GB 显存；没有 N 卡会自动退回 CPU，那就非常慢了；
 2. **首次加载十几秒**：要联网下约 1 GB 权重，之后走本地缓存；
 3. **慢**：RTF 0.9~1.9，一句话要等 1~2 秒才开口；
-4. **要装包**：python -m pip install ChatTTS（约 2 GB，含 torch 依赖）。
+4. **源码运行要装包**：python -m pip install ChatTTS（约 2 GB，含 torch 依赖）。
    没装却在配置里选它，启动会直接报错并告诉你怎么办 —— 不会静悄悄地哑掉。
+   **打包版已经把 ChatTTS 打进去了**，开箱即用；代价是产物从 563 MB 涨到 4.6 GB
+   （torch 一个包就 4 GB）。只想要小体积见 packaging/README.md 第 4 节。
 
 改完要**重启引擎**（主界面会弹提示条，点「立即重启」即可）。
 
@@ -786,7 +788,7 @@ vits 的 lexicon.txt 里一个英文字母都没有，C盘 的 C 会被判为 OO
 | 语音合成（ChatTTS） | RTF 0.9~1.9（音质更好，但要显卡、首次加载十几秒） |
 | 语音识别 | RTF 0.03（1 秒音频约 30 毫秒） |
 | 端到端响应 | 说完话到开口：规则模式约 0.1s；LLM 模式取决于模型首字延迟 |
-| 打包体积 | dist/VoiceAgent 约 499 MB / 1225 个文件（模型不在包内） |
+| 打包体积 | dist/VoiceAgent 约 4.6 GB / 5457 个文件（含 torch，模型仍不在包内） |
 
 八个测试脚本共 **246 项断言全部通过**：selftest 10、test_pipeline 31、
 test_llm_loop 12、test_skills 41、test_webui 55、test_gui 52、test_voices 33、

@@ -354,7 +354,10 @@ class LlmCfg:
     model: str = "deepseek-chat"
     api_key: str = ""
     temperature: float = 0.3
-    max_rounds: int = 6
+    # 一轮对话里最多让模型调几次工具。6 太少：稍微多步一点的任务
+    # （"看看磁盘、再打开浏览器、顺便搜一下"）就会撞上限，
+    # 用户听到的是"这件事分了好几步还没做完"。
+    max_rounds: int = 12
     timeout_s: float = 30.0
     # 思考程度：off / low / medium / high / max。越深越慢越贵。
     # 语音场景默认 low —— 思考是"看不见的沉默"，用户只听到助手不说话。
@@ -643,7 +646,7 @@ class Config:
                 model=str(_get(raw, "llm.model", "deepseek-chat")),
                 api_key=str(_get(raw, "llm.api_key", "") or ""),
                 temperature=float(_get(raw, "llm.temperature", 0.3)),
-                max_rounds=int(_get(raw, "llm.max_rounds", 6)),
+                max_rounds=int(_get(raw, "llm.max_rounds", 12)),
                 timeout_s=float(_get(raw, "llm.timeout_s", 30)),
                 reasoning_effort=str(_get(raw, "llm.reasoning_effort", "low")),
                 extra_body=dict(_get(raw, "llm.extra_body", None) or {}),

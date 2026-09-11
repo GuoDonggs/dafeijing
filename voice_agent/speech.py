@@ -391,10 +391,11 @@ class Tts:
             import ChatTTS  # noqa: PLC0415
         except ImportError as exc:
             raise RuntimeError(
-                "选择了 ChatTTS 但没有它。两种情况："
-                "① 打包版（exe）刻意不带 ChatTTS，请把合成引擎换回 vits；"
-                "② 源码运行的话装一下：python -m pip install ChatTTS"
-                "（约 2 GB，含 torch 依赖）。界面上「语音与算力 → 合成引擎」可以直接改。"
+                "选择了 ChatTTS 但导不进来：" + str(exc)[:80]
+                + "。源码运行的话装一下：python -m pip install ChatTTS"
+                "（约 2 GB，含 torch 依赖）；"
+                "打包版已经把 ChatTTS 打进去了，起不来多半是显存不够或模型没下完。"
+                "想立刻恢复：界面上「语音与算力 → 合成引擎」换回 vits。"
             ) from exc
         import torch  # noqa: PLC0415
 

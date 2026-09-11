@@ -1,0 +1,40 @@
+把 ChatTTS 打进 exe，并修掉主题色 / 试听 / 步数上限
+
+【ChatTTS 不再排除在 exe 外】
+- EXCLUDES 里去掉了 torch / torchaudio / ChatTTS / transformers / tokenizers /
+  vocos / encodec / vector_quantize_pytorch / einx / pybase16384 /
+  huggingface_hub / safetensors / hf_xet / sympy / numba / llvmlite。
+- 三个坑，构建阶段完全看不出来，全是运行时才炸：
+  · torchgen 被排掉 -> "No module named 'torchgen'"（torch 自己 import 它）
+  · numba / sympy 被排掉 -> ChatTTS 直接 import numba，einx 要 sympy
+  · ChatTTS/res/ 是数据文件，只收 .py 不够 -> "No such file: homophones_map.json"
+- 实测打包版：VoiceAgentCLI.exe say 能出声，3.33 秒音频 / 24 kHz / GPU
+  NVIDIA GeForce RTX 4060 Ti，selftest 依旧 10/10。
+- 代价：产物 563 MB -> 4.6 GB（torch 一个包 4 GB），构建 62 秒 -> 5.5 分钟。
+  packaging/README.md 第 4 节写清了想回到小体积要往 EXCLUDES 里加什么。
+
+【主题色终于真的全局生效】
+之前只把描边掺了 38% 主色 —— 肉眼几乎看不出来，用户的感受就是"只有按钮变色"。
+现在：
+- 面板描边掺 74% 主色，卡片描边掺 42%；
+- 面板改成从上到下的渐变（顶部掺 14% 主色），整块窗口的色调跟着主色走；
+- 胶囊标签底色、列表行图标底、列表悬停、小节标题竖条、滚动条、聊天气泡
+  全部走主色；
+- 关键：页面窗口是独立顶层窗口，主窗口 setStyleSheet 影响不到它们 ——
+  以前换色后弹出来的设置页还是旧配色。现在 FramelessDialog 有 apply_theme()，
+  换色时主窗口会挨个调用。
+
+【试听不再卡在"正在加载"】
+Console 现在记录试听状态（idle/loading/playing/done/error），设置页每 300ms
+轮一次：加载中显示橙色提示、播放中显示青色、播完显示绿色并 5 秒后自动收起、
+失败显示红色并把原因写出来。以前只在点击那一刻写一句提示，之后没人清。
+
+【"这件事分了好几步还没做完"】
+- llm.max_rounds 默认 6 -> 12（多步任务撞上限就只说半句）；
+- 撞上限时不再甩一句套话，而是**再问模型一次**（不带工具）让它说清楚
+  "已经做了什么、还剩什么"；
+- 加绕圈检测：同一个工具、同一套参数连调 3 次就提前收尾，不再白烧轮次。
+- 设置界面加了「一步最多调几次工具」。
+
+另外：tools/ 里的自定义工具示例也一起打进 exe。
+测试 236 项 + selftest 10 项全部通过，pyflakes 干净，打包版 GUI 384x700 正常。

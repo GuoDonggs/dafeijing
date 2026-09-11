@@ -44,10 +44,17 @@ ACCENT_PRESSED = "#0A6FD8"
 ACCENT_DISABLED_BG = "#1B3A5C"
 ACCENT_DISABLED_FG = "#6E88A6"
 ACCENT_GLOW = "rgba(10, 132, 255, 0.28)"
-# 这几个也由 set_accent() 更新，见下
+# 这几个也由 set_accent() 更新，见下。
+# 上一版把它们调得太接近灰色（面板描边只掺了 38% 主色），换主题时肉眼几乎看不出
+# 区别 —— 用户的原话是"只有按钮变了颜色"。现在主色掺得足够多，整块窗口都跟着变。
 PANEL_BORDER = "#1B1B24"
 CARD_BORDER = "#22222C"
-ROW_HOVER = "rgba(10, 132, 255, 0.10)"
+ROW_HOVER = "rgba(10, 132, 255, 0.14)"
+# 面板从上到下的渐变：顶部掺一点主色，整块窗口的色调就跟着主色走
+SURFACE_TOP = "#0C0C14"
+# 列表行左边的图标底、胶囊标签的底色
+BADGE_BG = "rgba(10, 132, 255, 0.16)"
+PILL_BG = "rgba(10, 132, 255, 0.12)"
 
 
 def rgba(color: str, alpha: float) -> str:
@@ -90,10 +97,13 @@ def set_accent(color: str) -> str:
     STATE_COLORS["idle"] = ACCENT
     # 面板描边、卡片描边也带一点主色：换主色时整块窗口都会变，
     # 而不是"只有按钮换了颜色"（这正是之前的毛病）
-    global PANEL_BORDER, CARD_BORDER, ROW_HOVER
-    PANEL_BORDER = mix(ACCENT, SEPARATOR, 0.62)
-    CARD_BORDER = mix(ACCENT, SEPARATOR, 0.86)
-    ROW_HOVER = rgba(ACCENT, 0.10)
+    global PANEL_BORDER, CARD_BORDER, ROW_HOVER, SURFACE_TOP, BADGE_BG, PILL_BG
+    PANEL_BORDER = mix(ACCENT, SEPARATOR, 0.26)
+    CARD_BORDER = mix(ACCENT, SEPARATOR, 0.58)
+    ROW_HOVER = rgba(ACCENT, 0.14)
+    SURFACE_TOP = mix(BG, ACCENT, 0.14)
+    BADGE_BG = rgba(ACCENT, 0.16)
+    PILL_BG = rgba(ACCENT, 0.12)
     return ACCENT
 
 
@@ -169,6 +179,8 @@ def qss() -> str:
     #ListRow {{ border-radius: {RADIUS_CONTROL}px; }}
     #ListRow:hover {{ background: {ROW_HOVER}; }}
     #SectionBar {{ background: {ACCENT}; border-radius: 2px; }}
+    #Badge {{ background: {BADGE_BG}; border-radius: 8px; }}
+    #Pill {{ background: {PILL_BG}; border-radius: 9px; padding: 2px 10px; font-size: 11px; }}
     #CardTitle {{ color: {TEXT}; font-size: 14px; font-weight: 600; }}
     #CardSubtitle {{ color: {MUTED}; font-size: 12px; }}
     #RowTitle {{ color: {TEXT}; font-size: 13px; }}

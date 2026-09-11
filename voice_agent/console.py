@@ -73,6 +73,9 @@ class Console:
         audio_io.set_output_gain(self.cfg.audio.output_gain)
         # 改了但还没重启引擎的设置项：键 -> 中文名，界面拿它弹「需要重启」
         self.missing_restart: dict[str, str] = {}
+        # 试听进度：idle / loading / playing / done / error。
+        # 界面靠它显示状态，不然"正在加载"会一直挂在设置页上没人清。
+        self.audition: dict = {"state": "idle", "voice": "", "error": "", "at": 0.0}
         self.skills: list = []
         self.reload_skills(announce=False)
 
@@ -407,6 +410,17 @@ class Console:
     # 试听念的这句话：短一点，能听出音色就够了
     AUDITION_TEXT = "你好，我是大肥鲸。今天天气不错，有什么可以帮你的吗？"
 
+    def audition_status(self) -> dict:
+        """试听进度：界面靠它显示"加载中 / 正在播 / 完了 / 失败"。
+
+        以前只返回一句"正在试听"，界面把提示写在标签上就再也没人管它 ——
+        用户看到的就是"一直显示正在加载"。
+        """
+        return dict(self.audition)
+
+    def clear_audition(self) -> None:
+        self.audition = {"state": "idle", "voice": "", "error": "", "at": 0.0}
+
     def audition_voice(self, value: Any) -> dict:
         """试听一个音色：后台线程里合成并播出来，不卡界面。
 
@@ -427,6 +441,10 @@ class Console:
             return {"ok": False, "error": "引擎起不来：" + str(exc)[:120]}
         label = voice_table.label(engine, sid)
         needs_load = getattr(agent, "tts", None) is None
+        self.audition = {
+            "state": "loading" if needs_load else "playing",
+            "voice": label, "error": "", "at": time.time(),
+        }
 
         def work() -> None:
             try:
@@ -435,11 +453,19 @@ class Console:
                     agent.load()
                 tts = getattr(agent, "tts", None)
                 if tts is None:
-                    self.log("[试听] 合成模型没起来，看看模型文件齐不齐（doctor）")
+                    self.audition.update(state="error",
+                                         error="合成模型没起来，先跑 doctor 看看模型齐不齐")
                     return
+                self.audition.update(state="playing", at=time.time())
                 tts.speaker_id = sid
-                tts.speak(self.AUDITION_TEXT)
+                ok = tts.speak(self.AUDITION_TEXT)
+                self.audition.update(
+                    state="done" if ok else "error",
+                    error="" if ok else "没播出来（声卡被别的程序占用了？）",
+                    at=time.time(),
+                )
             except Exception as exc:  # noqa: BLE001 - 试听失败不该影响主流程
+                self.audition.update(state="error", error=str(exc)[:160], at=time.time())
                 self.log("[试听] " + label + " 播放失败：" + str(exc)[:160])
 
         self.log("[试听] " + label + ("（首次要先加载模型，等几秒）" if needs_load else ""))

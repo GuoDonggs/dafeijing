@@ -92,32 +92,43 @@ skills/ 同理：往 dist/VoiceAgent/skills/ 里丢 .yaml / .py 就多一个技�
 
 ## 4. 体积
 
-实测（Python 3.12.2 + PyInstaller 6.22.2 + onnxruntime-gpu 1.29 + sherpa_onnx 1.13.7）：
+实测（Python 3.12.2 + PyInstaller 6.22.2 + onnxruntime-gpu 1.29 + sherpa_onnx 1.13.7
++ torch 2.13 + ChatTTS 0.2.5）：
 
-| 构建 | 产物 | 体积 |
-| --- | --- | --- |
-| 默认（桌面版 + 命令行版） | dist/VoiceAgent/ | **499 MB**（1226 个文件），其中两个 exe 各 12.1 MB |
-| python scripts/build_exe.py --console --slim | dist-slim/VoiceAgent/ | **322 MB**（1 个 exe） |
+| 构建 | 产物 | 体积 | 构建耗时 |
+| --- | --- | --- | --- |
+| 默认（桌面版 + 命令行版） | dist/VoiceAgent/ | **4.6 GB**（5463 个文件），两个 exe 各 68 MB | 约 5.5 分钟 |
+| python scripts/build_exe.py --console --slim | dist-slim/VoiceAgent/ | 见下 | 约 3 分钟 |
 
-占大头的几项（默认构建里量出来的）：
+占大头的几项：
 
 | 组件 | 大约 | 说明 |
 | --- | --- | --- |
+| torch/ | 4.0 GB | **ChatTTS 的推理后端**。排掉它，exe 里选 chattts 就起不来 |
 | onnxruntime/（capi + providers） | 200 MB | 其中 onnxruntime_providers_cuda.dll 一个就 168 MB，--slim 会去掉它 |
 | cv2/ | 111 MB | screen.py 的找图（模板匹配）用得上 |
+| transformers/ + tokenizers/ + huggingface_hub/ | 110 MB | ChatTTS 的文本前端与权重加载 |
 | scipy/ + scipy.libs/ | 67 MB | audio.py 只用 scipy.signal.resample_poly 一个函数，但整个包都会进来 |
 | sherpa_onnx/ | 27 MB | KWS / VAD / ASR / TTS 的 C 运行时（含它自带的一份 onnxruntime.dll） |
-| numpy/ + numpy.libs/ | 26 MB | |
-| PIL/ | 11 MB | 截图 / 缩图 |
-| python312.dll + tcl/tk + 标准库 + 两个 exe | 约 40 MB | |
-| pypinyin / requests / psutil / tkinter 数据 | 约 12 MB | |
+| numpy/ + numba/ + llvmlite/ | 90 MB | numba 是 ChatTTS 直接 import 的，排不掉 |
+| PIL/ + python312.dll + 标准库 + 两个 exe | 约 60 MB | |
 
-两个 exe 各嵌了一份 PYZ 归档（约 12 MB），所以窗口版 + 命令行版会比只出命令行版多占一份。
-介意体积就用 --console；再要小就加 --slim。
+**只想跑 VITS 的话不用这么大。** 在 packaging/voice-agent.spec 的 EXCLUDES 里
+把 torch / ChatTTS / transformers / tokenizers / vocos / encodec /
+vector_quantize_pytorch / einx / pybase16384 / huggingface_hub / safetensors /
+hf_xet 加回去，产物体积会回到 560 MB 左右 —— 代价是 exe 里选 chattts 会明确报错，
+只能用 vits。两者不可兼得。
 
-特意排除掉的（本机装了也不进包）：torch / torchvision（4 GB）、pandas（60 MB）、
-matplotlib（30 MB）、PyQt5/PySide、IPython / jupyter、tensorflow、sklearn、sympy 等。
+两个 exe 各嵌了一份 PYZ 归档，所以窗口版 + 命令行版会比只出命令行版多占一份。
+介意体积就用 --console；再要小就加 --slim（去掉 CUDA provider，省 170 MB）。
+
+特意排除掉的（本机装了也不进包）：torchvision、pandas、matplotlib、
+PyQt5/PySide、IPython / jupyter、tensorflow、sklearn、cupy 等。
 排除清单在 packaging/voice-agent.spec 的 EXCLUDES。
+
+> 注意两个**不能排**的：torchgen（torch 自己 import 它）和 numba / sympy
+> （ChatTTS 与 einx 要）。排掉的表现是运行时
+> "No module named 'torchgen'"，构建阶段完全看不出来。
 
 ## 5. 构建完怎么验
 

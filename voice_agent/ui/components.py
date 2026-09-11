@@ -18,7 +18,7 @@ from PyQt6.QtCore import (
     pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QFont, QPainter, QRadialGradient
+from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QRadialGradient
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QColorDialog,
@@ -54,13 +54,19 @@ class Pill(QLabel):
     def __init__(self, text: str = "", color: str = theme.MUTED,
                  parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
+        self.setProperty("_pillColor", color)
         self._apply(color)
 
     def _apply(self, color: str) -> None:
+        # 底色掺一点主色：一屏里十几个胶囊，换主题时到处都能看到变化
         self.setStyleSheet(
-            "QLabel { background: rgba(255,255,255,0.07); color: " + color
+            "QLabel { background: " + theme.PILL_BG + "; color: " + color
             + "; border-radius: 9px; padding: 2px 10px; font-size: 11px; }"
         )
+
+    def refresh_theme(self) -> None:
+        """换主色后重新上色（颜色本身是外面给的，这里只需要重刷底色）。"""
+        self._apply(self.property("_pillColor") or theme.MUTED)
 
     def set_color(self, color: str) -> None:
         self._apply(color)
@@ -359,7 +365,9 @@ class ListRow(QFrame):
             badge.setFixedSize(30, 30)
             badge.setPixmap(theme.pixmap(icon_name, theme.TEXT, 17))
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setStyleSheet("background: rgba(255,255,255,0.08); border-radius: 8px;")
+            # 交给全局 QSS 的 #Badge —— 那样换主色时它会自己跟着变，
+            # 不用挨个去改内联样式
+            badge.setObjectName("Badge")
             row.addWidget(badge)
         else:
             row.addSpacing(0)
@@ -452,24 +460,36 @@ class RoundedPanel(QWidget):
     """
 
     def __init__(self, parent: QWidget | None = None, radius: int = 18,
-                 color: str = theme.BG, border: str = theme.SEPARATOR) -> None:
+                 color: str = theme.BG, border: str = theme.SEPARATOR,
+                 top: str = "") -> None:
         super().__init__(parent)
         self._radius = radius
         self._color = QColor(color)
         self._border = QColor(border)
+        # 顶部颜色：不是纯色而是从上到下的渐变。掺一点主色，
+        # 换主题时整块窗口的色调都会变 —— 光靠描边那一条线太不明显了。
+        self._top = QColor(top or color)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
 
-    def set_colors(self, color: str, border: str) -> None:
+    def set_colors(self, color: str, border: str, top: str = "") -> None:
         self._color = QColor(color)
         self._border = QColor(border)
+        self._top = QColor(top or color)
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: ANN001, N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        brush = self._color
+        if self._top != self._color:
+            gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            gradient.setColorAt(0.0, self._top)
+            gradient.setColorAt(0.45, self._color)
+            gradient.setColorAt(1.0, self._color)
+            brush = gradient
         painter.setPen(self._border)
-        painter.setBrush(self._color)
+        painter.setBrush(brush)
         painter.drawRoundedRect(rect, self._radius, self._radius)
         painter.end()
 
