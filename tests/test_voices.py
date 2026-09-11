@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""音色表测试：不需要模型、不需要麦克风。
+"""音色表测试：不需要模型、不需要显卡。
 
 这一组盯的是「配置写了什么」和「耳朵里听到什么」之间那个翻译层。
-起因是一个真事：配置里写 tts.engine: kokoro + speaker_id: 0，
-而 Kokoro 的 0 号是英文音色 af_maple —— 拿它念中文，出来又闷又粗还带电流声。
-所以这里把几条契约钉死。
+两个引擎的"音色"含义不一样：vits 是 5 个固定角色音，ChatTTS 是一个随机种子。
+这里把几条契约钉死。
 
 运行：python tests/test_voices.py
 """
@@ -36,73 +35,63 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 def main() -> int:
     print()
-    print("=== 音色表结构 ===")
-    check("Kokoro 有 103 个音色", len(V.KOKORO_VOICES) == 103, str(len(V.KOKORO_VOICES)))
-    check("0~2 号是英文音色",
-          all(not V.is_chinese("kokoro", i) for i in (0, 1, 2)),
-          "、".join(V.name("kokoro", i) for i in range(3)))
-    check("3~102 号是中文音色",
-          all(V.is_chinese("kokoro", i) for i in range(3, 103)))
-    check("3~57 是女声、58~102 是男声",
-          V.is_female("kokoro", 3) and V.is_female("kokoro", 57)
-          and not V.is_female("kokoro", 58) and not V.is_female("kokoro", 102))
-    check("默认音色是中文音色", V.is_chinese("kokoro", V.KOKORO_DEFAULT),
-          str(V.KOKORO_DEFAULT) + " " + V.name("kokoro", V.KOKORO_DEFAULT))
+    print("=== 引擎归一化 ===")
+    check("vits 是默认", V.engine_of("") == "vits" and V.engine_of("vits") == "vits")
+    check("chattts 的几种写法都认",
+          all(V.engine_of(x) == "chattts" for x in ("chattts", "ChatTTS", "chat_tts", "chat")))
+    check("不认识的名字回落到 vits（老配置写着 kokoro 也不会炸）",
+          V.engine_of("kokoro") == "vits")
 
     print()
-    print("=== 英文音色必须被换掉（这次问题的根）===")
-    for sid in (0, 1, 2):
-        got, note = V.sanitize("kokoro", sid, 103)
-        check("Kokoro " + str(sid) + " 号换成中文音色", V.is_chinese("kokoro", got) and bool(note),
-              str(sid) + " -> " + str(got) + " " + V.name("kokoro", got))
-    got, note = V.sanitize("kokoro", 5, 103)
-    check("已经是中文音色就不动它", got == 5 and not note, str(got))
-    got, note = V.sanitize("kokoro", 999, 103)
-    check("越界下标夹回范围内", 0 <= got < 103 and bool(note), str(got))
-    got, note = V.sanitize("vits", 0, 5)
-    check("VITS 的音色不受影响", got == 0 and not note)
+    print("=== vits：5 个固定角色音 ===")
+    check("一共 5 个", len(V.VITS_VOICES) == 5 and V.count("vits") == 5)
+    names = [V.name("vits", i) for i in range(5)]
+    check("名字来自模型自带的 speakers 字段",
+          names == ["suyingxue", "gunian", "fushiyu", "bingjiao", "bazong"], "、".join(names))
+    check("标签里带性别和音高",
+          "女声" in V.label("vits", 0) and "Hz" in V.label("vits", 0), V.label("vits", 0))
+    check("性别判断正确",
+          V.is_female("vits", 0) and not V.is_female("vits", 1)
+          and V.is_female("vits", 3) and not V.is_female("vits", 4))
 
     print()
-    print("=== 按名字 / 编号 / 序号选 ===")
+    print("=== chattts：种子即音色 ===")
+    check("默认种子在候选里", V.CHATTTS_DEFAULT in V.CHATTTS_SEEDS, str(V.CHATTTS_DEFAULT))
+    check("标签写成「种子 N」", "种子" in V.label("chattts", 42), V.label("chattts", 42))
+    check("种子不区分性别", V.is_female("chattts", 42))
+    check("种子上限远大于候选个数", V.count("chattts") > len(V.CHATTTS_SEEDS),
+          str(V.count("chattts")))
+    check("下拉框给的是挑过的种子",
+          len(V.catalog("chattts")) == len(V.CHATTTS_SEEDS), str(len(V.catalog("chattts"))))
+
+    print()
+    print("=== 按名字 / 编号 / 种子选 ===")
     cases = [
-        ("kokoro", "zf_003", 5),
-        # 界面上显示的就是「zf_003 · 女声」这种标签，直接粘回来也得认
-        ("kokoro", "zf_003 · 女声", 5),
-        ("kokoro", "  zf_003  ", 5),
-        ("kokoro", "zm_009", 58),
-        ("kokoro", "5", 5),
-        ("kokoro", "女声1", 3),
-        ("kokoro", "男声1", 58),
         ("vits", "suyingxue", 0),
         ("vits", "bazong", 4),
         ("vits", "2", 2),
+        ("vits", "女声1", 0),
+        ("vits", "男声1", 1),
         ("vits", "不认识", None),
+        ("chattts", "seed42", 42),
+        ("chattts", "42", 42),
+        ("chattts", "  2024  ", 2024),
+        ("chattts", "abc", None),
     ]
     for engine, want, expect in cases:
         got = V.resolve(engine, want)
-        check("resolve(" + engine + ", " + want + ")", got == expect,
-              "得到 " + str(got))
+        check("resolve({}, {})".format(engine, want.strip()), got == expect, "得到 " + str(got))
 
     print()
-    print("=== 界面下拉框里只有中文音色 ===")
-    kokoro_rows = V.catalog("kokoro")
-    check("Kokoro 列表里没有英文音色",
-          all(sid >= V.KOKORO_CHINESE_FIRST for sid, _ in kokoro_rows),
-          str(len(kokoro_rows)) + " 项")
-    female = V.catalog("kokoro", male=False)
-    male = V.catalog("kokoro", male=True)
-    check("男女分列且加起来是全部", len(female) + len(male) == len(kokoro_rows),
-          str(len(female)) + " + " + str(len(male)))
-    check("VITS 列表是 5 个人", len(V.catalog("vits", 5)) == 5)
-
-    print()
-    print("=== VITS 的 5 个角色音有名字 ===")
-    names = [V.name("vits", i) for i in range(5)]
-    check("名字来自模型自带的 speakers 字段",
-          names == ["suyingxue", "gunian", "fushiyu", "bingjiao", "bazong"],
-          "、".join(names))
-    check("标签里带性别和音高", "女声" in V.label("vits", 0) and "Hz" in V.label("vits", 0),
-          V.label("vits", 0))
+    print("=== 越界值要被夹回来，而且要说明 ===")
+    got, note = V.sanitize("vits", 9)
+    check("vits 越界夹回 4", got == 4 and bool(note), str(got))
+    got, note = V.sanitize("vits", 3)
+    check("vits 正常值不动", got == 3 and not note)
+    got, note = V.sanitize("chattts", 99999999)
+    check("chattts 种子越界夹回默认", got == V.CHATTTS_DEFAULT and bool(note), str(got))
+    got, note = V.sanitize("chattts", 777)
+    check("自定义种子放行", got == 777 and not note)
 
     print()
     print("=== styles 不许把引擎解析好的音色盖回去 ===")
@@ -110,24 +99,23 @@ def main() -> int:
 
     cfg = TtsCfg(speaker_id=7, speed=1.0, styles={"reply": {"speed": 1.1}})
     style = cfg.style("reply")
-    check("没写 speaker_id 的语气不带 speaker_id", "speaker_id" not in style,
-          str(style))
+    check("没写 speaker_id 的语气不带 speaker_id", "speaker_id" not in style, str(style))
     check("语速仍然按语气覆盖", style["speed"] == 1.1)
     cfg2 = TtsCfg(speaker_id=7, styles={"reply": {"speaker_id": 3}})
     check("显式写了 speaker_id 就照办", cfg2.style("reply").get("speaker_id") == 3)
 
     print()
-    print("=== 配置里写 voice 名字能读出来 ===")
+    print("=== 配置里写 voice 名字 / 种子能读出来 ===")
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "config.yaml"
-        path.write_text("tts:\n  engine: kokoro\n  voice: zf_003\n", encoding="utf-8")
+        path.write_text("tts:\n  engine: chattts\n  voice: seed42\n", encoding="utf-8")
         loaded = Config.load(path)
-        check("tts.voice 解析正确", loaded.tts.voice == "zf_003", loaded.tts.voice)
-        check("音色能被解析成下标", V.resolve("kokoro", loaded.tts.voice) == 5)
-        path.write_text("tts:\n  engine: kokoro\n  speaker_id: 0\n", encoding="utf-8")
+        check("tts.voice 解析正确", loaded.tts.voice == "seed42", loaded.tts.voice)
+        check("引擎解析成 chattts", V.engine_of(loaded.tts.engine) == "chattts")
+        check("种子能被解析成下标", V.resolve("chattts", loaded.tts.voice) == 42)
+        path.write_text("tts:\n  engine: vits\n  voice: bazong\n", encoding="utf-8")
         loaded = Config.load(path)
-        got, note = V.sanitize("kokoro", loaded.tts.speaker_id, 103)
-        check("只写 speaker_id: 0 也会被纠正过来", V.is_chinese("kokoro", got), V.name("kokoro", got))
+        check("vits 按名字选", V.resolve("vits", loaded.tts.voice) == 4, loaded.tts.voice)
 
     print()
     if FAILED:

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
@@ -296,67 +297,30 @@ class Asr:
 class Tts:
     """语音合成 + 分句流式播放，支持随时打断。
 
-    两种引擎，用 tts.engine 选：
-    - kokoro：100 个中文音色（3~57 女声、58~102 男声），可挑的余地大
-    - vits  ：vits-zh-ll 的 5 人角色音，体积小、速度快
+    两个引擎，用 tts.engine 选：
 
-    两个坑都在"下标"上，代码里兜住：
-    - Kokoro 的 0~2 号是**英文音色**，念中文会发闷发粗还带电流声，_pick_speaker
-      会自动换成中文音色（配置写名字更稳，例如 voice: zf_070）；
-    - 合成出来的原始波形峰值只有 0.2~0.5，按峰值硬拉到 0.9 会把底噪一起抬上来，
-      所以响度用 RMS 定，再软限幅收尾。
+    - **vits**（默认）：vits-zh-ll 的 5 人角色音，纯 CPU、快、模型只有 130 MB。
+    - **chattts**：ChatTTS，对话式中文，自然度高得多；跑在显卡上，
+      显存约 2 GB，首次加载要十几秒，合成速度大约是 1 倍实时 ——
+      靠 speak() 里的预取线程（第一块短、后面边播边合成）把等待压到可接受。
+
+    还有一条与引擎无关的：合成出来的原始波形峰值只有 0.2~0.5，按峰值硬拉到 0.9
+    会把底噪一起抬上来，所以响度按 RMS 定，再用软限幅收尾。
     """
 
     def __init__(self, cfg: Config) -> None:
-        import sherpa_onnx  # noqa: PLC0415
-
         self.cfg = cfg
         self._lock = threading.Lock()
         self.engine, self.engine_note = self._pick_engine(cfg)
-        threads = cfg.speech.num_threads(cfg.tts.num_threads)
+        self._chat = None
+        self._embeddings: dict[int, object] = {}
+        self._tts = None
 
-        def build(provider: str):
-            if self.engine == "kokoro":
-                paths = cfg.require("kokoro_model", "kokoro_voices", "kokoro_tokens")
-                kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
-                    model=str(paths["kokoro_model"]),
-                    voices=str(paths["kokoro_voices"]),
-                    tokens=str(paths["kokoro_tokens"]),
-                    data_dir=str(cfg.kokoro_dir / "espeak-ng-data"),
-                    dict_dir=str(cfg.kokoro_dir / "dict")
-                    if (cfg.kokoro_dir / "dict").is_dir() else "",
-                    lexicon=",".join(
-                        str(cfg.kokoro_dir / name) for name in
-                        ("lexicon-us-en.txt", "lexicon-zh.txt")
-                        if (cfg.kokoro_dir / name).is_file()
-                    ),
-                    length_scale=1.0,
-                )
-                model_cfg = sherpa_onnx.OfflineTtsModelConfig(
-                    kokoro=kokoro, num_threads=threads, provider=provider, debug=False
-                )
-            else:
-                paths = cfg.require("tts_model", "tts_tokens", "tts_lexicon")
-                vits = sherpa_onnx.OfflineTtsVitsModelConfig(
-                    model=str(paths["tts_model"]),
-                    lexicon=str(paths["tts_lexicon"]),
-                    tokens=str(paths["tts_tokens"]),
-                    data_dir="",
-                    dict_dir=str(cfg.tts_dict_dir) if cfg.tts_dict_dir.is_dir() else "",
-                )
-                model_cfg = sherpa_onnx.OfflineTtsModelConfig(
-                    vits=vits, num_threads=threads, provider=provider, debug=False
-                )
-            return sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(
-                model=model_cfg,
-                max_num_sentences=1,
-                rule_fsts=",".join(str(p) for p in cfg.tts_rule_fsts),
-                # 标点处的停顿：VITS 需要 1.15 才有"人味"；
-                # Kokoro 本身停顿就长，再加就拖沓了。
-                silence_scale=1.0 if self.engine == "kokoro" else 1.15,
-            ))
+        if self.engine == "chattts":
+            self._load_chattts()
+        else:
+            self._load_vits()
 
-        self._tts = _with_provider_fallback(build, cfg, "语音合成")
         audio_io.warm_resampler()  # 重采样要用的 scipy 提前导入，别卡在第一次播报上
         self.speaker_id, self.speaker_note = self._pick_speaker(cfg)
         # 分块策略：
@@ -365,25 +329,111 @@ class Tts:
         #   切得越碎语气越假，接缝还越多（接缝处有淡入淡出，听感上会一顿一顿）。
         #   之所以敢把块放大，是因为 speak() 里开了预取线程：播第一块时，
         #   后面的块已经在合成了。
-        self.first_chars = 16 if self.engine == "kokoro" else 24
-        self.sentence_chars = 46 if self.engine == "kokoro" else 60
+        # ChatTTS 更慢，第一块再切小一点，"第一声"才不会等太久。
+        if self.engine == "chattts":
+            # ChatTTS 每次调用有 1.5~2 秒的固定开销，块太小就全花在开销上了。
+            # 第一块留短（只为"快点出声"），后面尽量一整句一次合成。
+            self.first_chars = 14
+            self.sentence_chars = 60
+        else:
+            self.first_chars = 24
+            self.sentence_chars = 60
         self.split_chars = "。！？；\n!?;"
         self.comma_chars = "，、,:："
         self.calls = 0
         self.total_audio_ms = 0.0
         self.total_synth_ms = 0.0
+        # 出声情况的计数：跳过（没内容可念）、失败（播不出来）、被打断
+        self.skipped = 0
+        self.failed = 0
+        self.interrupted = 0
         self.device = None
         print("[tts] 引擎：" + self.engine + " — " + self.engine_note
               + "；音色：" + self.voice_label
-              + "；算力：" + cfg.speech.provider_text, file=sys.stderr, flush=True)
+              + "；算力：" + self.provider_text, file=sys.stderr, flush=True)
         if self.speaker_note:
             print("[tts] 注意：" + self.speaker_note, file=sys.stderr, flush=True)
 
-    def _pick_speaker(self, cfg: Config) -> tuple[int, str]:
-        """定音色：配置里写名字（zf_070 / suyingxue）比写数字好，写数字也认。
+    # ── 两个后端 ──
+    def _load_vits(self) -> None:
+        import sherpa_onnx  # noqa: PLC0415
 
-        这里兜住最常见的一个坑：Kokoro 的 0~2 号是英文音色，拿它念中文会发闷、
-        发粗、带电流声。配置写了英文音色就自动换中文音色，并在启动日志里说明。
+        cfg = self.cfg
+        threads = cfg.speech.num_threads(cfg.tts.num_threads)
+
+        def build(provider: str):
+            paths = cfg.require("tts_model", "tts_tokens", "tts_lexicon")
+            vits = sherpa_onnx.OfflineTtsVitsModelConfig(
+                model=str(paths["tts_model"]),
+                lexicon=str(paths["tts_lexicon"]),
+                tokens=str(paths["tts_tokens"]),
+                data_dir="",
+                dict_dir=str(cfg.tts_dict_dir) if cfg.tts_dict_dir.is_dir() else "",
+            )
+            model_cfg = sherpa_onnx.OfflineTtsModelConfig(
+                vits=vits, num_threads=threads, provider=provider, debug=False
+            )
+            return sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(
+                model=model_cfg,
+                max_num_sentences=1,
+                rule_fsts=",".join(str(p) for p in cfg.tts_rule_fsts),
+                silence_scale=1.15,   # 标点处留点停顿才有"人味"
+            ))
+
+        self._tts = _with_provider_fallback(build, cfg, "语音合成")
+        self.provider_text = cfg.speech.provider_text
+
+    def _load_chattts(self) -> None:
+        """加载 ChatTTS。缺包或缺模型时明确报错，不回退 —— 用户是特意选的它。"""
+        # ChatTTS 推理时会往 stderr 刷一整屏进度条，和我们的日志混在一起没法看
+        os.environ.setdefault("TQDM_DISABLE", "1")
+        try:
+            import ChatTTS  # noqa: PLC0415
+        except ImportError as exc:
+            raise RuntimeError(
+                "选择了 ChatTTS 但没有它。两种情况："
+                "① 打包版（exe）刻意不带 ChatTTS，请把合成引擎换回 vits；"
+                "② 源码运行的话装一下：python -m pip install ChatTTS"
+                "（约 2 GB，含 torch 依赖）。界面上「语音与算力 → 合成引擎」可以直接改。"
+            ) from exc
+        import torch  # noqa: PLC0415
+
+        want = str(self.cfg.tts.device or "auto").strip().lower()
+        if want == "cpu":
+            device = "cpu"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
+            if want in ("cuda", "gpu", "auto"):
+                print("[tts] 没检测到可用的 CUDA 显卡，ChatTTS 退回 CPU（会很慢）",
+                      file=sys.stderr, flush=True)
+        self.device_name = device
+        chat = ChatTTS.Chat()
+        try:
+            ok = chat.load(compile=bool(self.cfg.tts.compile), source="huggingface", device=device)
+        except TypeError:
+            ok = chat.load(compile=False, source="huggingface")
+        if not ok:
+            raise RuntimeError("ChatTTS 模型没加载起来（首次运行需要联网下载约 1 GB 权重）")
+        self._chat = chat
+        self.provider_text = ("GPU " + torch.cuda.get_device_name(0)) if device == "cuda" else "CPU"
+
+    def _embedding(self, sid: int):
+        """按种子取说话人向量。同一个种子永远是同一个人，结果缓存下来。"""
+        if self._chat is None:
+            return None
+        if sid not in self._embeddings:
+            import torch  # noqa: PLC0415
+
+            torch.manual_seed(int(sid))
+            self._embeddings[sid] = self._chat.sample_random_speaker()
+        return self._embeddings[sid]
+
+    def _pick_speaker(self, cfg: Config) -> tuple[int, str]:
+        """定音色：vits 写名字（suyingxue）或编号，chattts 写种子（seed42 或 42）。
+
+        越界的值会被夹回合法范围，并在启动日志里说明改成了什么。
         """
         total = self.num_speakers
         want = voice_table.resolve(self.engine, cfg.tts.voice, total)
@@ -398,21 +448,22 @@ class Tts:
 
     @staticmethod
     def _pick_engine(cfg: Config) -> tuple[str, str]:
-        """决定用哪个合成引擎；请求了 kokoro 但模型不全时明确回退。"""
-        want = (cfg.tts.engine or "vits").strip().lower()
-        has_kokoro = cfg.has("kokoro_model", "kokoro_voices", "kokoro_tokens")
-        if want == "kokoro" and has_kokoro:
-            return "kokoro", "Kokoro 多语种（音色更多）"
-        if want == "kokoro":
-            return "vits", "VITS（配置要求 Kokoro，但模型不全，已回退）"
-        return "vits", "VITS（配置指定）"
+        """决定用哪个合成引擎。"""
+        want = voice_table.engine_of(cfg.tts.engine)
+        if want == "chattts":
+            return "chattts", "ChatTTS 对话式（显卡，慢但自然）"
+        return "vits", "VITS 角色音（CPU，快）"
 
     @property
     def sample_rate(self) -> int:
+        if self._chat is not None:
+            return 24000
         return int(self._tts.sample_rate)
 
     @property
     def num_speakers(self) -> int:
+        if self._chat is not None:
+            return voice_table.CHATTTS_MAX_SEED + 1
         return int(self._tts.num_speakers)
 
     def synthesize(self, text: str, kind: str = "reply") -> tuple[np.ndarray, int]:
@@ -432,10 +483,8 @@ class Tts:
         speed = float(style.get("speed", self.cfg.tts.speed))
         started = time.perf_counter()
         with self._lock:
-            generated = self._tts.generate(clean, sid=speaker, speed=speed)
+            samples, rate = self._generate(clean, speaker, speed)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        samples = np.asarray(generated.samples, dtype=np.float32).reshape(-1)
-        rate = int(generated.sample_rate)
         if self.cfg.tts.volume != 1.0:
             samples = samples * float(self.cfg.tts.volume)
         samples = self._polish(samples, rate)
@@ -443,6 +492,28 @@ class Tts:
         self.total_audio_ms += 1000.0 * samples.size / max(1, rate)
         self.total_synth_ms += elapsed_ms
         return samples, rate
+
+    def _generate(self, text: str, speaker: int, speed: float) -> tuple[np.ndarray, int]:
+        """真正去合成。两个引擎的调用方式完全不同，在这里分开。"""
+        if self._chat is not None:
+            import ChatTTS  # noqa: PLC0415
+
+            params = ChatTTS.Chat.InferCodeParams(
+                spk_emb=self._embedding(speaker),
+                # 采样温度调低：语音助手的回答要稳，不要每次都换个腔调
+                temperature=0.3,
+                top_P=0.7,
+                top_K=20,
+            )
+            try:
+                wavs = self._chat.infer([text], params_infer_code=params, show_tqdm=False)
+            except TypeError:   # 老版本没有 show_tqdm
+                wavs = self._chat.infer([text], params_infer_code=params)
+            audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+            return audio, 24000
+        generated = self._tts.generate(text, sid=speaker, speed=speed)
+        return (np.asarray(generated.samples, dtype=np.float32).reshape(-1),
+                int(generated.sample_rate))
 
     def _polish(self, samples: np.ndarray, rate: int) -> np.ndarray:
         """响度与底噪：去直流 -> 按 RMS 定响度 -> 轻下扩张 -> 软限幅。
@@ -517,18 +588,36 @@ class Tts:
         """
         pieces = self.chunks(text)
         if not pieces:
-            return True
+            # 正常清洗把整段话洗没了（例如模型只回了一个代码块）。
+            # 以前这里直接 return，用户只看到"助手不吭声"，日志里什么都没有。
+            rescue = self._rescue_text(text)
+            if rescue:
+                print("[tts] 清洗后为空，改用兜底文本念出来：" + rescue[:40],
+                      file=sys.stderr, flush=True)
+                pieces = self.chunks(rescue)
+            if not pieces:
+                if str(text or "").strip():
+                    self.skipped += 1
+                    print("[tts] 这段没有可朗读的内容，跳过：" + str(text).strip()[:50],
+                          file=sys.stderr, flush=True)
+                return True
         target = device if device is not None else self.device
 
         # 只有一块：直接合成直接播，省掉线程切换
         if len(pieces) == 1:
             if stop_event is not None and stop_event.is_set():
+                self.interrupted += 1
                 return False
             samples, rate = self.synthesize(pieces[0], kind=kind)
             if samples.size == 0:
+                self.skipped += 1
+                print("[tts] 合成结果是空的，没得可播", file=sys.stderr, flush=True)
                 return True
             # 总音量由 audio.play() 统一乘，这里不再乘一遍（会变成音量平方）
-            return audio_io.play(samples, rate, device=target, stop_event=stop_event)
+            ok = audio_io.play(samples, rate, device=target, stop_event=stop_event)
+            if not ok:
+                self._note_playback_failure(stop_event)
+            return ok
 
         out: queue.Queue = queue.Queue(maxsize=2)
         done = object()
@@ -576,11 +665,30 @@ class Tts:
                     finished = False
                     break
                 if not audio_io.play(samples, rate, device=target, stop_event=stop_event):
+                    self._note_playback_failure(stop_event)
                     finished = False
                     break
         finally:
             cancel.set()
         return finished
+
+    @staticmethod
+    def _rescue_text(text: str) -> str:
+        """正常清洗把整段话洗没了时的兜底。
+
+        只有"兜底结果里真的有能读的字"才用 —— 一串 emoji 兜出来还是 emoji，
+        念不出声也听不懂，不如不念。
+        """
+        rescued = textutil.clean_minimal(text)
+        return rescued if any(ch.isalnum() for ch in rescued) else ""
+
+    def _note_playback_failure(self, stop_event: threading.Event | None) -> None:
+        """播放没成功时记一笔：被打断是正常的，设备出错才要查。"""
+        if stop_event is not None and stop_event.is_set():
+            self.interrupted += 1
+            return
+        self.failed += 1
+        print("[tts] 播放没成功（声卡被占用？）—— 这条回复没能出声", file=sys.stderr, flush=True)
 
     def chunks(self, text: str) -> list[str]:
         """把要念的话切成合成单元：第一块短（快点出声），其余按整句。"""

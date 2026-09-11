@@ -95,7 +95,7 @@ def live_server() -> None:
 
     try:
         status, html = http(base + "/")
-        check("首页可访问", status == 200 and "语音 Agent" in html, "HTTP " + str(status))
+        check("首页可访问", status == 200 and "大肥鲸" in html, "HTTP " + str(status))
         token = (re.search(r'window\.VOICE_TOKEN = "([^"]+)"', html) or [None, ""])[1]
         check("首页注入了访问令牌", len(token) >= 16, "长度 " + str(len(token)))
         check("首页没有残留占位符", "__VOICE_TOKEN__" not in html)

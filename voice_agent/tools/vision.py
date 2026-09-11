@@ -164,9 +164,29 @@ def app_map_tool(action: str = "list", name: str = "", target: str = "") -> str:
         if not key or not value:
             return "要同时给出名字和目标，例如：把「我的项目」指向 D:\\code"
         mapping = module.load_app_map()
-        mapping[key] = value
+        existing = mapping.get(key) or {}
+        # 已经在表里就只补 target，别把用户设过的别名和参数冲掉
+        entry = dict(existing)
+        entry["target"] = value
+        mapping[key] = entry
         module.save_app_map(mapping)
         return "好的，以后说「打开" + key + "」就打开 " + value
+    if what in ("alias", "别名", "加个别名"):
+        key = str(name or "").strip()
+        extra = str(target or "").strip()
+        if not key or not extra:
+            return "要同时给出名字和别名，例如：给「微信」加个别名「威信」"
+        mapping = module.load_app_map()
+        entry = mapping.get(key)
+        if entry is None:
+            return "映射表里没有「" + key + "」，先添加它再起别名"
+        aliases = list(entry.get("aliases") or [])
+        if extra not in aliases:
+            aliases.append(extra)
+        entry["aliases"] = aliases
+        mapping[key] = entry
+        module.save_app_map(mapping)
+        return "好的，以后说「打开" + extra + "」也能打开 " + str(entry.get("target"))
     if what in ("remove", "delete", "删除"):
         key = str(name or "").strip()
         mapping = module.load_app_map()
@@ -176,7 +196,7 @@ def app_map_tool(action: str = "list", name: str = "", target: str = "") -> str:
                 module.save_app_map(mapping)
                 return "已经从映射表里删掉「" + existing + "」"
         return "映射表里没有「" + key + "」"
-    return "不支持的 action：" + what + "（只支持 list / add / remove）"
+    return "不支持的 action：" + what + "（只支持 list / add / alias / remove）"
 
 
 _VISION_HANDLER: list = [None]

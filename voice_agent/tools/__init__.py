@@ -26,6 +26,7 @@ from dataclasses import replace as _replace
 from pathlib import Path
 from typing import Any, Callable
 
+from ._shared import TURN, reset_turn
 from .apps import open_app, open_url, web_search
 from .files import list_files, read_file, recall, remember, search_files
 from .system_info import get_time, system_info

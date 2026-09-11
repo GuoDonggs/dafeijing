@@ -38,6 +38,11 @@ __all__ = ["VoiceAgent"]
 # 状态：idle 待命 / listen 正在听 / think 正在干活 / wait 处理中 / speaking 播报
 _IDLE, _LISTEN, _THINK, _WAIT = "idle", "listen", "think", "wait"
 
+# 刚开始播报的这一小段里，不认「喊唤醒词打断」。
+# 原因：没有回声消除，扬声器的起音最容易被自己的 KWS 当成唤醒词，
+# 一打断整句回复就没了 —— 用户听到的正是"它回复了却没出声"。
+BARGE_IN_GRACE_S = 0.8
+
 
 class VoiceAgent:
     def __init__(self, cfg: Config, log: Callable[[str], None] = print) -> None:
@@ -72,6 +77,8 @@ class VoiceAgent:
         self.voiceprint = Voiceprint(cfg)
         self._speaking = threading.Event()     # 正在通过扬声器说话
         self._stop_speak = threading.Event()   # 立刻停播
+        # 这一轮播报是什么时候开始的：用来挡掉"自己把自己打断"
+        self._speaking_since = 0.0
         self._interrupt = threading.Event()    # 立刻取消当前任务
         self._confirm_q: queue.Queue[str] = queue.Queue()
         self._worker: threading.Thread | None = None
@@ -239,11 +246,15 @@ class VoiceAgent:
             "last_reply": self.last_reply,
             "transcript": list(self.transcript)[-24:],
             "follow_up_ms": int(self.cfg.agent.follow_up_ms),
+            "follow_up_mode": str(self.cfg.agent.follow_up_mode),
             "listen_timeout_ms": int(self.cfg.agent.listen_timeout_ms),
             "turns": self.turns,
             "mic_level": round(float(self.mic.level), 4) if self.mic else 0.0,
             "asr_rtf": round(self.asr.rtf, 4) if self.asr else 0.0,
             "tts_rtf": round(self.tts.rtf, 4) if self.tts else 0.0,
+            # 出声情况：跳过（没内容）/ 失败（播不出来）/ 被打断
+            "tts_skipped": int(getattr(self.tts, "skipped", 0)) if self.tts else 0,
+            "tts_failed": int(getattr(self.tts, "failed", 0)) if self.tts else 0,
             "input_device": self._in_device,
             "output_device": self._out_device,
         }
@@ -282,7 +293,12 @@ class VoiceAgent:
         # 播报期间：只跑唤醒词，用于打断
         if self._speaking.is_set():
             if self.cfg.agent.barge_in_wake and self.wake.feed(block):
-                self._barge_in()
+                # 刚开口的一小段里不认打断：扬声器的起音最容易被自己的 KWS
+                # 当成唤醒词，一打断整句回复就没了 —— 用户听到的就是"它没理我"。
+                if time.monotonic() - self._speaking_since < BARGE_IN_GRACE_S:
+                    self.log("[agent] 播报刚开始，忽略这次唤醒词（防自打断）")
+                else:
+                    self._barge_in()
             return
 
         if self._state in (_IDLE, _THINK):
@@ -509,13 +525,35 @@ class VoiceAgent:
             return
         # 追问窗口：答完之后继续收音一小会儿，用户不用再喊一次唤醒词。
         # 这是「像人」和「像命令行」之间最关键的一处差别。
-        follow_up = int(self.cfg.agent.follow_up_ms)
-        if follow_up > 0:
-            self.log("[agent] 追问窗口 " + str(follow_up) + "ms")
-            self._begin_listen("command", timeout_ms=follow_up, follow_up=True)
+        window, why = self._follow_up_window(reply)
+        if window > 0:
+            self.log("[agent] 追问窗口 " + str(window) + "ms" + why)
+            self._begin_listen("command", timeout_ms=window, follow_up=True)
             self._arm_listening()
         else:
             self._state = _IDLE
+
+    def _follow_up_window(self, reply: str) -> tuple[int, str]:
+        """答完这句要不要继续听，听多久。返回（毫秒，原因）。
+
+        老版本只看 follow_up_ms：设了就一直留窗口，助手于是"赖着不走"，
+        用户不接着问也得干等它超时。现在默认 auto，由 LLM 决定：
+
+        - 模型调了 keep_listening（它反问了、或还要用户补充）→ 留；
+        - 回复本身是个问句（漏调工具时的兜底）→ 留；
+        - 其余（汇报完就完事）→ 回待命。
+        """
+        mode = str(self.cfg.agent.follow_up_mode or "auto").strip().lower()
+        window = int(self.cfg.agent.follow_up_ms)
+        if mode == "off" or window <= 0:
+            return 0, ""
+        if mode == "always":
+            return window, "（配置要求每次都留）"
+        if getattr(self.brain, "wants_followup", False):
+            return window, "（模型说要接着听）"
+        if reply.strip().endswith(("？", "?")):
+            return window, "（刚反问了用户一句）"
+        return 0, ""
 
     def _ask_confirm(self, question: str) -> bool:
         """敏感操作前的语音确认：问一句，听一句，再判断同意与否。"""
@@ -579,8 +617,18 @@ class VoiceAgent:
                 self.log("[tts-off] " + text)
             return
         self._speaking.set()
+        self._speaking_since = time.monotonic()
         try:
-            self.tts.speak(text, kind=kind, stop_event=self._stop_speak, device=self._out_device)
+            ok = self.tts.speak(text, kind=kind, stop_event=self._stop_speak,
+                                device=self._out_device)
+            if not ok and not self._stop_speak.is_set():
+                # 不是被打断，那就是声卡没打开（被独占、设备刚切过）——
+                # 再试一次；还不行就把这件事明确写进日志，别让它静悄悄地没了
+                time.sleep(0.15)
+                ok = self.tts.speak(text, kind=kind, stop_event=self._stop_speak,
+                                    device=self._out_device)
+                if not ok and not self._stop_speak.is_set():
+                    self.log("[tts] 这条回复两次都没播出来：" + text[:40])
         except Exception as exc:  # noqa: BLE001
             self.log("[tts] 播报失败：" + str(exc))
         finally:

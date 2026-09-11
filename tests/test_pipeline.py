@@ -90,6 +90,32 @@ def find_command_audio(agent: VoiceAgent, text: str, expect: str,
     return None, ""
 
 
+def replay_for(agent: VoiceAgent, text: str, expect_word: str, want: str,
+               spoken: list, tries: int = 4, rearm=None) -> str:
+    """挑一段合成音频喂进状态机，直到听到想要的那句话。
+
+    为什么不能只挑一次：「识别器单独读得对」不等于「走完整条链路还读得对」——
+    喂进去时 VAD 会再切一次、收音保护期还会吃掉开头一小段。再加上 VITS 合成
+    自带随机噪声，同一句「谢谢」偶尔会被读成别的。这是测试环境的事实，不是
+    被测代码的问题，所以这里重试几次，而不是让测试随机变红。
+
+    返回最后一次听到的回复。
+    """
+    heard_reply = ""
+    for _try in range(tries):
+        if rearm is not None and agent._state != "listen":
+            rearm()
+        spoken.clear()
+        audio, _heard = find_command_audio(agent, text, expect_word)
+        if audio is None:
+            continue
+        feed(agent, np.concatenate([silence(0.3), audio, silence(1.2)]))
+        heard_reply = spoken[-1][1] if spoken else ""
+        if heard_reply == want:
+            return heard_reply
+    return heard_reply
+
+
 def find_wake_audio(agent: VoiceAgent, word: str, attempts: int = 5) -> np.ndarray | None:
     """挑一段「确实能触发唤醒词」的合成音频。
 
@@ -248,6 +274,9 @@ def main() -> int:
     check("对用户说明被拒绝了", reply == tools_mod.CANCEL_REPLY, repr(reply[:40]))
 
     print("\n场景 7：追问窗口内不用再喊唤醒词")
+    # 这一步验的是"窗口机制"本身，所以强制每次都留；
+    # "由 LLM 决定要不要留"在场景 7b 里单独验
+    agent.cfg.agent.follow_up_mode = "always"
     agent.cfg.agent.follow_up_ms = 1200
     agent.cfg.agent.cues = True          # 这一步要覆盖提示音的播放路径
     agent.mic = None
@@ -259,17 +288,35 @@ def main() -> int:
     check("回复后进入追问窗口", agent._state == "listen", agent._state)
     check("追问窗口时长被写入状态", agent.status()["follow_up_ms"] == 1200)
 
-    spoken.clear()
-    thanks_audio, _heard = find_command_audio(agent, "谢谢", "谢")
-    if thanks_audio is not None:
-        feed(agent, np.concatenate([silence(0.3), thanks_audio, silence(1.2)]))
-    second = spoken[-1][1] if spoken else ""
+    def rearm() -> None:
+        agent._begin_listen("command", timeout_ms=1200, follow_up=True)
+        agent._arm_listening()
+
+    second = replay_for(agent, "谢谢", "谢", "不客气。", spoken, rearm=rearm)
     check("窗口内可以直接说下一句（无需唤醒词）", second == "不客气。", repr(second))
 
     time.sleep(1.5)
     agent._check_timeout()
     check("窗口超时后回到待命", agent._state == "idle", agent._state)
     agent.cfg.agent.cues = False
+
+    print("\n场景 7b：要不要接着听，由 LLM（本处用追问标记模拟）决定")
+    agent.cfg.agent.follow_up_mode = "auto"
+    agent.cfg.agent.follow_up_ms = 4000
+    agent.brain.wants_followup = False
+    window, _why = agent._follow_up_window("好的，已经打开了浏览器。")
+    check("只是汇报结果 -> 不留窗口", window == 0, str(window))
+    window, why = agent._follow_up_window("要打开哪一个浏览器？")
+    check("反问了用户一句 -> 留窗口", window == 4000, str(window) + " " + why)
+    agent.brain.wants_followup = True
+    window, why = agent._follow_up_window("好的，已经打开了浏览器。")
+    check("模型调了 keep_listening -> 留窗口", window == 4000, why)
+    agent.brain.wants_followup = False
+    agent.cfg.agent.follow_up_mode = "off"
+    window, _why = agent._follow_up_window("要打开哪一个浏览器？")
+    check("关掉之后一律不留窗口", window == 0, str(window))
+
+    agent.cfg.agent.follow_up_mode = "auto"
     agent.cfg.agent.follow_up_ms = 0
 
     print("\n场景 8：对话记录")

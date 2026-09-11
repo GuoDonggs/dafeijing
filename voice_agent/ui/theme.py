@@ -44,6 +44,10 @@ ACCENT_PRESSED = "#0A6FD8"
 ACCENT_DISABLED_BG = "#1B3A5C"
 ACCENT_DISABLED_FG = "#6E88A6"
 ACCENT_GLOW = "rgba(10, 132, 255, 0.28)"
+# 这几个也由 set_accent() 更新，见下
+PANEL_BORDER = "#1B1B24"
+CARD_BORDER = "#22222C"
+ROW_HOVER = "rgba(10, 132, 255, 0.10)"
 
 
 def rgba(color: str, alpha: float) -> str:
@@ -84,6 +88,12 @@ def set_accent(color: str) -> str:
     ACCENT_GLOW = rgba(ACCENT, 0.28)
     # 待命态用的就是主色。这个字典是模块级的，不跟着改的话圆球还是旧颜色。
     STATE_COLORS["idle"] = ACCENT
+    # 面板描边、卡片描边也带一点主色：换主色时整块窗口都会变，
+    # 而不是"只有按钮换了颜色"（这正是之前的毛病）
+    global PANEL_BORDER, CARD_BORDER, ROW_HOVER
+    PANEL_BORDER = mix(ACCENT, SEPARATOR, 0.62)
+    CARD_BORDER = mix(ACCENT, SEPARATOR, 0.86)
+    ROW_HOVER = rgba(ACCENT, 0.10)
     return ACCENT
 
 
@@ -151,7 +161,14 @@ def qss() -> str:
     #SidebarSubtitle {{ color: {DIM}; font-size: 11px; }}
 
     /* 卡片 */
-    #Card {{ background: {CARD}; border-radius: {RADIUS_CARD}px; }}
+    #Card {{
+        background: {CARD};
+        border: 1px solid {CARD_BORDER};
+        border-radius: {RADIUS_CARD}px;
+    }}
+    #ListRow {{ border-radius: {RADIUS_CONTROL}px; }}
+    #ListRow:hover {{ background: {ROW_HOVER}; }}
+    #SectionBar {{ background: {ACCENT}; border-radius: 2px; }}
     #CardTitle {{ color: {TEXT}; font-size: 14px; font-weight: 600; }}
     #CardSubtitle {{ color: {MUTED}; font-size: 12px; }}
     #RowTitle {{ color: {TEXT}; font-size: 13px; }}
@@ -196,7 +213,11 @@ def qss() -> str:
     QPushButton:hover:enabled {{ background: #2E2E3B; }}
     QPushButton:pressed {{ background: #383846; }}
     QPushButton:disabled {{ color: {DIM}; background: {CARD}; }}
-    QPushButton#Primary {{ background: {ACCENT}; color: #FFFFFF; font-weight: 600; }}
+    QPushButton#Primary {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 {ACCENT_HOVER}, stop:1 {ACCENT});
+        color: #FFFFFF; font-weight: 600;
+    }}
     QPushButton#Primary:hover:enabled {{ background: {ACCENT_HOVER}; }}
     QPushButton#Primary:pressed {{ background: {ACCENT_PRESSED}; }}
     QPushButton#Primary:disabled {{ background: {ACCENT_DISABLED_BG}; color: {ACCENT_DISABLED_FG}; }}
@@ -228,16 +249,28 @@ def qss() -> str:
     #BannerText {{ color: {TEXT}; font-size: 12px; }}
     #BannerHint {{ color: {MUTED}; font-size: 11px; }}
 
+    /* 对话气泡（照着 iMessage 的样子来的） */
+    #BubbleMine {{ background: {ACCENT}; border-radius: 16px; }}
+    #BubbleTheirs {{ background: {CARD_ACTIVE}; border-radius: 16px; }}
+    #BubbleSystem {{ background: transparent; border-radius: 12px; }}
+    #BubbleWho {{ color: {MUTED}; font-size: 11px; }}
+    #BubbleText {{ color: {TEXT}; font-size: 13px; }}
+    #BubbleMine #BubbleWho {{ color: {rgba("#FFFFFF", 0.72)}; }}
+    #BubbleMine #BubbleText {{ color: #FFFFFF; }}
+    #BubbleSystem #BubbleWho {{ color: {DIM}; }}
+    #BubbleSystem #BubbleText {{ color: {MUTED}; }}
+
     /* 滚动条：细、无箭头 */
     QScrollArea {{ border: none; background: transparent; }}
     QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
     QScrollBar::handle:vertical {{ background: #33333F; border-radius: 4px; min-height: 32px; }}
-    QScrollBar::handle:vertical:hover {{ background: #45455A; }}
+    QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
     QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
         background: none; height: 0; width: 0;
     }}
     QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 2px; }}
     QScrollBar::handle:horizontal {{ background: #33333F; border-radius: 4px; min-width: 32px; }}
+    QScrollBar::handle:horizontal:hover {{ background: {ACCENT}; }}
 
     QToolTip {{
         background: {CARD_ACTIVE}; color: {TEXT};

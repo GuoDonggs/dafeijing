@@ -23,6 +23,7 @@ _CMD_SYNTAX = re.compile(r'[&|<>^"\']')
 __all__ = [
     "type_text", "press_keys", "volume", "media_control", "window",
     "lock_screen", "power", "run_command", "clipboard", "screenshot",
+    "list_windows", "focus_window", "list_processes", "kill_process", "wait",
 ]
 
 def _ps(script: str, timeout: float = 20.0, stdin_text: str | None = None) -> str:
@@ -43,10 +44,14 @@ def _ps(script: str, timeout: float = 20.0, stdin_text: str | None = None) -> st
         return ""
 
 
-def _launch(target: str) -> bool:
+def _launch(target: str, args: list[str] | None = None) -> bool:
     """用系统默认方式打开一个 exe / .lnk / 文档 / URL，不阻塞。"""
+    extra = " ".join(str(a) for a in (args or []) if str(a).strip())
     try:
-        os.startfile(target)  # noqa: S606 - Windows 专用，正是我们要的
+        if extra:
+            os.startfile(target, arguments=extra)  # noqa: S606 - Windows 专用
+        else:
+            os.startfile(target)  # noqa: S606 - Windows 专用，正是我们要的
         return True
     except Exception:
         pass
@@ -242,6 +247,117 @@ def window(action: str = "minimize_all") -> str:
     if any(key in what for key in ("switch", "切换", "next")):
         return press_keys("alt+tab") + "，已经切换窗口"
     return "不知道该做什么窗口操作"
+
+
+def list_windows(filter: str = "") -> str:
+    """列出当前打开的窗口标题。
+
+    只列"有标题、且看得见"的顶层窗口 —— 一棵窗口树里绝大多数是隐藏的辅助窗口，
+    念给用户听毫无意义。
+    """
+    script = (
+        "Get-Process | Where-Object { $_.MainWindowTitle -ne '' } | "
+        "Select-Object -ExpandProperty MainWindowTitle"
+    )
+    try:
+        out = _ps(script, timeout=15.0)
+    except Exception as exc:  # noqa: BLE001
+        return "读不到窗口列表：" + str(exc)[:60]
+    titles = [line.strip() for line in str(out or "").splitlines() if line.strip()]
+    key = (filter or "").strip().lower()
+    if key:
+        titles = [t for t in titles if key in t.lower()]
+    if not titles:
+        return ("没有匹配的窗口" if key else "现在没有打开的窗口")
+    head = titles[:8]
+    more = ("，还有 " + str(len(titles) - len(head)) + " 个") if len(titles) > len(head) else ""
+    return "打开着 " + str(len(titles)) + " 个窗口：" + "、".join(head) + more
+
+
+def focus_window(title: str = "") -> str:
+    """把某个窗口切到最前面。"""
+    key = (title or "").strip()
+    if not key:
+        return "没说要切到哪个窗口"
+    script = (
+        "$w = Get-Process | Where-Object { $_.MainWindowTitle -like '*" + key.replace("'", "''") + "*' } | "
+        "Select-Object -First 1; "
+        "if ($w) { "
+        "$sig = '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h);"
+        "[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h, int c);'; "
+        "$t = Add-Type -MemberDefinition $sig -Name W -Namespace N -PassThru; "
+        "$t::ShowWindow($w.MainWindowHandle, 9) | Out-Null; "
+        "$t::SetForegroundWindow($w.MainWindowHandle) | Out-Null; $w.MainWindowTitle }"
+    )
+    try:
+        out = _ps(script, timeout=15.0)
+    except Exception as exc:  # noqa: BLE001
+        return "切换窗口失败了：" + str(exc)[:60]
+    found = str(out or "").strip().splitlines()
+    found = found[-1].strip() if found else ""
+    if found:
+        return "已经把「" + found + "」切到前面了"
+    return "没找到标题里有「" + key + "」的窗口"
+
+
+def list_processes(filter: str = "", top: int = 5) -> str:
+    """列出吃资源最多的进程。"""
+    key = (filter or "").strip()
+    count = max(1, min(int(top or 5), 15))
+    where = ("$_.ProcessName -like '*" + key.replace("'", "''") + "*'") if key else "$true"
+    script = (
+        "Get-Process | Where-Object { " + where + " } | "
+        "Sort-Object -Property WorkingSet64 -Descending | Select-Object -First " + str(count) + " | "
+        "ForEach-Object { '{0}|{1:N0}' -f $_.ProcessName, ($_.WorkingSet64/1MB) }"
+    )
+    try:
+        out = _ps(script, timeout=15.0)
+    except Exception as exc:  # noqa: BLE001
+        return "读不到进程列表：" + str(exc)[:60]
+    rows = [line.strip() for line in str(out or "").splitlines() if "|" in line]
+    if not rows:
+        return ("没有名字里带「" + key + "」的进程" if key else "没读到进程")
+    parts = []
+    for row in rows:
+        name, _, size = row.partition("|")
+        parts.append(name.strip() + " 占 " + size.strip() + " MB")
+    return ("匹配到的进程：" if key else "最占内存的进程：") + "，".join(parts)
+
+
+def kill_process(name: str = "", force: bool = True) -> str:
+    """结束一个进程（敏感操作，需要确认）。"""
+    key = (name or "").strip()
+    if not key:
+        return "没说要结束哪个进程"
+    safe = key.replace("'", "''")
+    script = (
+        "$p = Get-Process -Name '" + safe + "' -ErrorAction SilentlyContinue; "
+        "if (-not $p) { $p = Get-Process | Where-Object { $_.MainWindowTitle -like '*" + safe + "*' } }; "
+        "if (-not $p) { 'NONE' } else { "
+        "$n = ($p | Measure-Object).Count; "
+        "$p | Stop-Process" + (" -Force" if force else "") + " -ErrorAction SilentlyContinue; "
+        "'OK ' + $n }"
+    )
+    try:
+        out = str(_ps(script, timeout=20.0) or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        return "结束进程失败了：" + str(exc)[:60]
+    if out.startswith("NONE"):
+        return "没有找到叫「" + key + "」的进程"
+    if out.startswith("OK"):
+        count = out.split()[-1]
+        return "已经结束 " + key + ("（" + count + " 个进程）" if count != "1" else "")
+    return "结束进程的结果看不懂：" + out[:60]
+
+
+def wait(seconds: int = 1) -> str:
+    """等一会儿再做下一步。"""
+    try:
+        span = max(0.1, min(float(seconds or 1), 30.0))
+    except (TypeError, ValueError):
+        span = 1.0
+    time.sleep(span)
+    return "等了 " + str(round(span, 1)) + " 秒"
 
 
 def lock_screen() -> str:

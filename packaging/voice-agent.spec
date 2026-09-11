@@ -106,6 +106,13 @@ EXCLUDES = [
     # 只排我们不用的那几个 GUI 框架（Tkinter 也已经不用了）。
     "PyQt5", "PySide2", "PySide6", "wx", "tkinter",
     "torch", "torchvision", "torchaudio", "torchgen",
+    # ChatTTS 及其依赖链（transformers / vocos / encodec …）。
+    # 它是「想更好听才装」的可选引擎，本体加依赖两个多 GB，不该进这个包。
+    # 排掉之后 exe 里的 ChatTTS 会 import 失败，speech.py 会给出明确提示，
+    # 让人换回 vits —— 这比打一个 3 GB 的包好。
+    "ChatTTS", "chattts", "transformers", "tokenizers", "vocos", "encodec",
+    "vector_quantize_pytorch", "einx", "pybase16384", "sentencepiece",
+    "huggingface_hub", "safetensors", "hf_xet",
     "tensorflow", "keras", "sklearn", "sympy",
     "numba", "llvmlite", "cupy", "pyarrow", "dask",
     "pytest", "_pytest", "sphinx", "docutils",

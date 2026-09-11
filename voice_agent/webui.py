@@ -319,7 +319,7 @@ def serve(config_path: Path | None = None, host: str = "127.0.0.1", port: int = 
         return 1
 
     url = "http://" + host + ":" + str(server.server_address[1]) + "/"
-    print("语音 Agent 控制台已启动：" + url)
+    print("大肥鲸 控制台已启动：" + url)
     print("  · 引擎默认不启动，在页面上点「启动监听」即可")
     print("  · 配置：" + str(console.config_path))
     print("  · 技能目录：" + "、".join(str(d) for d in SKILL_DIRS))
@@ -342,7 +342,7 @@ def serve(config_path: Path | None = None, host: str = "127.0.0.1", port: int = 
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="语音 Agent 网页控制台")
+    parser = argparse.ArgumentParser(description="大肥鲸 网页控制台")
     parser.add_argument("--config", help="配置文件路径")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8760)

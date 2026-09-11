@@ -86,11 +86,11 @@ def build_keywords_file(
     out_path: str | Path,
     extra_pinyin: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[Path, list[str]]:
-    """把「小爱同学」这类中文唤醒词写成 KWS 模型要的 keywords.txt。
+    """把「大肥鲸」这类中文唤醒词写成 KWS 模型要的 keywords.txt。
 
     格式为每一行 拼音音素 + 空格 + @原文，例如::
 
-        x iǎo ài t óng x ué @小爱同学
+        x iǎo ài t óng x ué @大肥鲸
 
     返回 (生成的文件路径, 问题列表)。
     """
@@ -214,6 +214,25 @@ def spell_letters(text: str) -> str:
     return _SINGLE_LETTER.sub(_letter, out)
 
 
+def clean_minimal(text: str) -> str:
+    """兜底清洗：只去掉 Markdown 记号，正文一律留着。
+
+    什么时候用：正常清洗把整段话洗没了（例如模型只回了一个代码块，
+    内容全在 ``` 里面）。这时候宁可念得糙一点，也不能一句话都不说 ——
+    "回复了但没声音"是最难排查的一类问题。
+    """
+    out = _EMPHASIS.sub(r"\2", str(text or ""))
+    out = _HEADING.sub("", out)
+    out = _INLINE_CODE.sub(r"\1", out)
+    out = _FENCE.sub(lambda m: m.group(1) or " ", out)
+    out = _WS_BETWEEN_CJK.sub(r"\1", out)
+    out = _SPACES.sub(" ", out)
+    out = _BLANKS.sub("\n", out).strip()
+    if out and out[-1] not in "。！？…!?.;；，,、:：":
+        out += "。"
+    return out
+
+
 def clean_for_tts(text: str) -> str:
     """把 Markdown / 代码 / 链接 / emoji 去掉，只留适合朗读的纯文本。
 
@@ -255,7 +274,7 @@ def split_sentences(text: str, max_chars: int = 60,
     """按标点切句，再把过短的句子合并，避免一句一顿的机械感。
 
     split_chars 决定「哪些标点算断句点」：VITS 快，可以整句合成；
-    Kokoro 慢（约 1 倍实时），需要切得更碎才能在 1~2 秒内出声，
+    慢的引擎（约 1 倍实时，比如 ChatTTS）需要切得更碎才能在 1~2 秒内出声，
     这时会额外把逗号、顿号也算作断句点。
     """
     text = (text or "").strip()

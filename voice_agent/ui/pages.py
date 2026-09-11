@@ -234,23 +234,38 @@ class HomePage(Page):
         return "喊「" + (words[0] if words else "唤醒词") + "」叫我" + extra
 
 
-# ─────────────────────────────── 对话 ───────────────────────────────
+# ─────────────────────────── 对话与指令 ───────────────────────────
 
 
 class ChatPage(Page):
-    """对话记录 + 文字指令输入。"""
+    """一条时间线：语音说的、界面敲的，都在这里，也都在这里发指令。
+
+    以前"对话记录"和"文字指令"是两个菜单项，点开来却是同一个页面 —— 合并掉。
+    """
 
     def __init__(self, console: Console, parent: QWidget | None = None) -> None:
         super().__init__(console, parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 16, 24, 20)
         layout.setSpacing(12)
-        layout.addWidget(page_header("对话记录", "语音说过的、界面上敲过的，都在这里"))
+        layout.addWidget(page_header("对话与指令", "语音说过的、界面上敲过的，都在这里"))
 
-        self.view = QPlainTextEdit()
-        self.view.setReadOnly(True)
-        self.view.setPlaceholderText("还没有对话。在下面输入一句，或者喊一声唤醒词。")
-        layout.addWidget(self.view, 1)
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        holder = QWidget()
+        self.timeline = QVBoxLayout(holder)
+        self.timeline.setContentsMargins(2, 2, 10, 12)
+        self.timeline.setSpacing(10)
+        self.timeline.addStretch(1)
+        self.area.setWidget(holder)
+        layout.addWidget(self.area, 1)
+
+        self.placeholder = QLabel("还没有对话。在下面输入一句，或者喊一声唤醒词。")
+        self.placeholder.setObjectName("Hint")
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.timeline.insertWidget(0, self.placeholder)
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -258,14 +273,20 @@ class ChatPage(Page):
         self.entry.setPlaceholderText("输入指令，回车派发（例如：看看 C 盘还剩多少空间）")
         self.entry.returnPressed.connect(self.send)
         row.addWidget(self.entry, 1)
-        row.addWidget(ui.primary_button("派遣"))
-        row.addWidget(ui.plain_button("只播报"))
-        row.itemAt(2).widget().clicked.connect(self.say)
+        self.btn_send = ui.primary_button("派发")
+        self.btn_send.clicked.connect(self.send)
+        row.addWidget(self.btn_send)
+        self.btn_say = ui.plain_button("只播报")
+        self.btn_say.clicked.connect(self.say)
+        row.addWidget(self.btn_say)
         layout.addLayout(row)
 
+        self._bubbles: list = []
+        self._turns_text: list = []
         self._rendered = 0
         self._last_key = ""
 
+    # ── 发送 ──
     def send(self) -> None:
         text = self.entry.text().strip()
         if not text:
@@ -281,6 +302,7 @@ class ChatPage(Page):
             self.console.log("[ui] " + reply)
         else:
             agent.dispatch(text)
+        self._sync()
 
     def say(self) -> None:
         text = self.entry.text().strip()
@@ -292,35 +314,47 @@ class ChatPage(Page):
             agent.load()
         agent.speak(text)
 
+    # ── 渲染 ──
+    def transcript_text(self) -> str:
+        """整段对话的纯文本（测试与复制用）。"""
+        return "\n".join(str(t.get("text", "")) for t in self._turns_text)
+
+    def _append(self, turn: dict) -> None:
+        bubble = ui.ChatBubble(str(turn.get("role", "system")),
+                               str(turn.get("text", "")),
+                               str(turn.get("ts", "")))
+        self.timeline.insertWidget(self.timeline.count() - 1, bubble)
+        if not self._bubbles:
+            self.placeholder.setVisible(False)
+        self._bubbles.append(bubble)
+        ui.fade_in(bubble, 160)
+
+    def _sync(self) -> None:
+        turns = (self.console.snapshot().get("status") or {}).get("transcript") or []
+        self.on_tick({"status": {"transcript": turns}}, "")
+
     def on_tick(self, snapshot: dict, state: str) -> None:
         turns = (snapshot.get("status") or {}).get("transcript") or []
-        key = (str(turns[-1].get("ts")) + str(turns[-1].get("text"))) if turns else ""
+        key = self._key_of(turns[-1]) if turns else ""
         if len(turns) == self._rendered and key == self._last_key:
             return
         if len(turns) < self._rendered or (
             self._rendered and self._key_of(turns[self._rendered - 1]) != self._last_key
         ):
-            self.view.clear()
+            for bubble in self._bubbles:
+                bubble.setParent(None)
+                bubble.deleteLater()
+            self._bubbles.clear()
+            self._turns_text.clear()
             self._rendered = 0
-        cursor = self.view.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
+            self.placeholder.setVisible(True)
         for turn in turns[self._rendered:]:
-            role = str(turn.get("role", "system"))
-            who, color = {
-                "user": ("你", theme.TEAL),
-                "assistant": ("助手", theme.PURPLE),
-                "system": ("系统", theme.DIM),
-            }.get(role, (role, theme.DIM))
-            cursor.insertHtml(
-                '<div style="margin-top:12px;color:' + color + ';font-size:11px;">'
-                + who + " · " + str(turn.get("ts", "")) + "</div>")
-            body = (str(turn.get("text", ""))
-                    .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-            cursor.insertHtml('<div style="color:' + theme.TEXT + ';font-size:13px;">'
-                              + body + "</div>")
+            self._append(turn)
+            self._turns_text.append(turn)
         self._rendered = len(turns)
         self._last_key = key
-        self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().maximum())
+        bar = self.area.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     @staticmethod
     def _key_of(turn: dict) -> str:
@@ -375,7 +409,10 @@ class ToolsPage(Page):
             card.body.addWidget(self._row(tool))
         self.list_layout.addWidget(card)
         if extra:
-            self.list_layout.addWidget(ui.section_title("技能提供的工具 · " + str(len(extra)) + " 个"))
+            custom = sum(1 for t in extra if t.get("source") == "tool")
+            self.list_layout.addWidget(ui.section_title(
+                "你自己的工具与技能 · " + str(len(extra)) + " 个"
+                + ("（其中自定义工具 " + str(custom) + " 个）" if custom else "")))
             card2 = ui.Card()
             for tool in extra:
                 card2.body.addWidget(self._row(tool))
@@ -391,7 +428,9 @@ class ToolsPage(Page):
         badges_layout.setSpacing(6)
         if tool["confirm"]:
             badges_layout.addWidget(ui.Pill("需确认", theme.ORANGE))
-        if not tool["builtin"]:
+        if tool.get("source") == "tool":
+            badges_layout.addWidget(ui.Pill("自定义", theme.ACCENT))
+        elif not tool["builtin"]:
             badges_layout.addWidget(ui.Pill("技能", theme.PURPLE))
         name = QLabel(tool["name"])
         name.setObjectName("Mono")
@@ -464,26 +503,32 @@ class SkillsPage(Page):
         layout.setSpacing(12)
 
         head = QHBoxLayout()
-        head.addWidget(page_header("技能", "往 skills/ 丢一个 YAML 或 Python 文件，助手就多一项能力"))
+        head.addWidget(page_header(
+            "技能与工具",
+            "tools/ 里放自定义工具，skills/ 里放技能 —— 同一个写法，写完就有"))
         head.addStretch(1)
-        new = ui.primary_button("新建", "plus")
-        new.clicked.connect(self.create)
+        new_tool = ui.primary_button("新建工具", "plus")
+        new_tool.clicked.connect(lambda: self.create("tool"))
+        new_skill = ui.plain_button("新建技能", "plus")
+        new_skill.clicked.connect(lambda: self.create("skill"))
         reload_button = ui.plain_button("重新加载", "refresh")
         reload_button.clicked.connect(self.reload)
-        head.addWidget(new, 0, Qt.AlignmentFlag.AlignBottom)
-        head.addWidget(reload_button, 0, Qt.AlignmentFlag.AlignBottom)
+        for widget in (new_tool, new_skill, reload_button):
+            head.addWidget(widget, 0, Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(head)
 
         self.area, self.list_layout = scroll_page()
         layout.addWidget(self.area, 1)
         self.items: list[dict] = []
         self.template = ""
+        self.tool_template = ""
         self.reload()
 
     def reload(self) -> None:
         payload = self.console.skills_payload()
         self.items = payload.get("items", [])
         self.template = payload.get("template", "")
+        self.tool_template = payload.get("tool_template", "")
         self.render()
 
     def render(self) -> None:
@@ -506,11 +551,15 @@ class SkillsPage(Page):
         ok = not skill.get("error")
         title = str(skill.get("title") or skill.get("name") or "")
         subtitle = str(skill.get("error") or skill.get("description") or "（没有写描述）")
-        row = ui.ListRow("skills" if ok else "alert", title, subtitle)
+        row = ui.ListRow("tools" if skill.get("kind") == "tool" else "skills" if ok else "alert",
+                         title, subtitle)
         tools_box = QWidget()
         box = QHBoxLayout(tools_box)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(6)
+        if ok:
+            box.addWidget(ui.Pill("自定义工具" if skill.get("kind") == "tool" else "技能",
+                                  theme.ACCENT if skill.get("kind") == "tool" else theme.PURPLE))
         box.addWidget(ui.Pill("正常" if ok else "加载失败",
                               theme.GREEN if ok else theme.RED))
         edit = ui.plain_button("编辑")
@@ -523,8 +572,12 @@ class SkillsPage(Page):
         row.add_trailing(tools_box)
         return row
 
-    def create(self) -> None:
-        SkillDialog(self, "新建技能", "my_skill.yaml", self.template).exec()
+    def create(self, kind: str = "skill") -> None:
+        if kind == "tool":
+            SkillDialog(self, "新建工具", "my_tool.yaml", self.tool_template,
+                        kind="tool").exec()
+        else:
+            SkillDialog(self, "新建技能", "my_skill.yaml", self.template).exec()
         self.reload()
 
     def edit(self, skill: dict) -> None:
@@ -558,13 +611,15 @@ class SkillsPage(Page):
 class SkillDialog(QDialog):
     """技能源码编辑器。"""
 
-    def __init__(self, parent: QWidget, title: str, name: str, content: str) -> None:
+    def __init__(self, parent: QWidget, title: str, name: str, content: str,
+                 kind: str = "skill") -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(760, 640)
         self.setStyleSheet(theme.qss())
         self.console = parent.console
         self.name = name
+        self.kind = "tool" if str(kind).lower() == "tool" else "skill"
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
@@ -595,7 +650,8 @@ class SkillDialog(QDialog):
 
     def save(self) -> None:
         result = self.console.save_skill(self.name_edit.text().strip(),
-                                         self.editor.toPlainText())
+                                         self.editor.toPlainText(),
+                                         kind=self.kind)
         if result.get("ok"):
             self.accept()
             return
@@ -624,8 +680,9 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
         ("speech.device", "推理算力", "有可用显卡时可切 cuda；改完要重启引擎", "choice",
          ["auto", "cpu", "cuda"]),
         ("tts.enabled", "语音播报", "关掉之后只显示文字", "bool", None),
-        ("tts.engine", "合成引擎", "vits 快（5 个角色音）；kokoro 音色多但慢 3~4 倍", "choice",
-         ["vits", "kokoro"]),
+        ("tts.engine", "合成引擎",
+         "vits：纯 CPU、快，5 个角色音（默认）；chattts：更自然，但要显卡、慢、首次加载十几秒",
+         "choice", ["vits", "chattts"]),
         ("tts.voice", "音色", "选中即用，点「试听」当场听；也可以命令行换", "voice", None),
         ("tts.speed", "语速", "", "choice", ["0.9", "1.0", "1.1", "1.2"]),
     ]),
@@ -680,6 +737,9 @@ class SettingsPage(Page):
     # ── 构建 ──
     def build(self) -> None:
         values = self.console.settings()
+        warning = self._engine_warning(values)
+        if warning is not None:
+            self.body.addWidget(warning)
         self.body.addWidget(self._voiceprint_card(values))
         for title, fields in SETTING_SECTIONS:
             self.body.addWidget(ui.section_title(title))
@@ -737,6 +797,36 @@ class SettingsPage(Page):
             lambda k=key, w=control: self._save_text(k, w))
         self.widgets[key] = ("text", control)
         return setting_row(label, hint, control)
+
+    def _engine_warning(self, values: dict) -> ui.Card | None:
+        """选了 ChatTTS 就在最上面摆一张警告卡。
+
+        它和 VITS 不是一个量级的东西：要显卡、吃 2 GB 显存、首次加载十几秒、
+        合成速度大约 1 倍实时。这些事不提前说清楚，用户只会觉得"助手变卡了"。
+        """
+        if str(values.get("tts.engine") or "").strip().lower() != "chattts":
+            return None
+        card = ui.Card()
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(theme.pixmap("alert", theme.ORANGE, 18))
+        head.addWidget(icon)
+        title = QLabel("ChatTTS 需要独显")
+        title.setObjectName("CardTitle")
+        head.addWidget(title)
+        head.addStretch(1)
+        card.body.addLayout(head)
+        note = QLabel(
+            "· 约 2 GB 显存、首次加载十几秒（要联网下 1 GB 权重）\n"
+            "· 合成速度大约是 1 倍实时：一句话要等 1~2 秒才开口\n"
+            "· 没装 ChatTTS 包或没有 N 卡时，启动会直接报错；"
+            "想立刻恢复就把它改回 vits\n"
+            "· 改完要重启引擎（主界面会弹提示）"
+        )
+        note.setObjectName("RowSubtitle")
+        note.setWordWrap(True)
+        card.body.addWidget(note)
+        return card
 
     def _volume_row(self, label: str, hint: str, value: Any) -> QWidget:
         """输出音量：拖动即时生效，松手才写配置。
@@ -809,7 +899,7 @@ class SettingsPage(Page):
     def _voice_row(self, label: str, hint: str) -> QWidget:
         """音色这一行得自己搭：下拉框是动态填的，旁边还要一个试听按钮。
 
-        为什么要给名字而不是只给编号：两个引擎都只认数字下标，而 Kokoro 的
+        为什么要给名字而不是只给编号：vits 只认数字下标，ChatTTS 只认种子，
         0~2 号是英文音色 —— 拿它念中文就是发闷发粗加电流声。列表里只放中文
         音色，选错了也听得出区别，点一下试听就知道。
         """
@@ -856,6 +946,14 @@ class SettingsPage(Page):
         self.voice_note.setWordWrap(True)
         self.voice_note.setVisible(bool(note))
         box.addWidget(self.voice_note)
+
+        # 试听的反馈：以前只往运行日志里写一行，用户点了按钮什么也看不到
+        self._audition_hint = QLabel("")
+        self._audition_hint.setObjectName("Value")
+        self._audition_hint.setWordWrap(True)
+        self._audition_hint.setVisible(False)
+        box.addWidget(self._audition_hint)
+
         self.widgets["tts.voice"] = ("voice", combo)
         return wrap
 
@@ -870,14 +968,24 @@ class SettingsPage(Page):
             self.voice_note.setVisible(False)
 
     def _audition(self, combo: QComboBox) -> None:
+        """试听。失败必须弹出来 —— 只写运行日志等于没反馈。"""
         name = combo.currentData()
         if not name:
             return
         result = self.console.audition_voice(name)
         if not result.get("ok"):
-            self._toast("试听失败：" + str(result.get("error")))
+            box = QMessageBox(self)
+            box.setWindowTitle("试听失败")
+            box.setText(str(result.get("error")))
+            box.setInformativeText("运行日志里有更详细的说明。")
+            box.exec()
+            self._audition_hint.setVisible(False)
             return
-        self._toast("正在试听 " + str(result.get("voice")))
+        text = "正在试听 " + str(result.get("voice"))
+        if result.get("loading"):
+            text += "　·　首次要先加载合成模型，等几秒"
+        self._audition_hint.setText(text)
+        self._audition_hint.setVisible(True)
 
     @staticmethod
     def _choice_value(shown: str, options: list[str] | None) -> Any:
@@ -1175,7 +1283,7 @@ class AboutPage(Page):
         self._paint_logo()
         text = QVBoxLayout()
         text.setSpacing(2)
-        name = QLabel("语音 Agent")
+        name = QLabel("大肥鲸")
         name.setObjectName("CardTitle")
         text.addWidget(name)
         self.subtitle = QLabel("版本 —")

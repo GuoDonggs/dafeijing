@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import platform
 import threading
 import time
@@ -28,7 +29,7 @@ from typing import Any, Callable
 
 from . import rules
 from . import tools
-from .config import Config
+from .config import PROJECT_ROOT, Config
 from .llm import Llm, LlmError
 
 __all__ = ["Brain"]
@@ -44,6 +45,10 @@ _TOOL_HINT = """你可以调用本机工具来完成任务，规则：
 # 800 字大约对应一两句话的朗读量，再长用户也听不完，却要按最多 6 轮重复付费。
 RESULT_BUDGET = 800
 HISTORY_BUDGET = 4000
+# 记住多少条历史消息（一问一答算 2 条）
+HISTORY_TURNS = 24
+# 上一次对话多久之内还算"同一场"（秒）。隔夜还记得随口一说，比忘掉更吓人。
+CONTEXT_TTL_S = 2 * 60 * 60
 
 
 class Brain:
@@ -56,10 +61,15 @@ class Brain:
         # 本轮是否已经真的动过工具。模型中途断线时靠它决定「能不能退回规则重试」：
         # 已经执行过的指令再走一遍规则，等于把关机、执行命令这类操作做两次。
         self.used_tools = False
+        # 这一轮模型有没有要求「别走，我还要接着说」（它调 keep_listening 就会置位）
+        self.wants_followup = False
+        # 最近做过什么。用户说「再打开一次」「把它关掉」时要靠它把指代接上。
+        self.recent_actions: list[str] = []
         self._llm_backoff_until = 0.0
         self._clients: dict[str, Llm | None] = {}
         self._prompt_cache: str | None = None
         self._clock_stamp = ""
+        self._load_context()
 
         tools.set_vision_handler(self._answer_with_vision)
         self._clients["chat"] = self._build_client("chat")
@@ -154,6 +164,8 @@ class Brain:
         if not user_text:
             return "我没听清，再说一遍好吗？"
         self.used_tools = False
+        self.wants_followup = False
+        tools.reset_turn()   # 每轮开头清空「要不要接着听」
         if self.llm is not None and time.monotonic() >= self._llm_backoff_until:
             try:
                 return self._respond_llm(user_text, confirm, interrupt)
@@ -284,6 +296,9 @@ class Brain:
             # 放在用户消息之后：前面整段（系统提示 + 工具声明 + 历史）保持字节稳定，
             # 服务端的前缀缓存才有机会命中
             messages.append({"role": "system", "content": clock})
+        context = self._context_line()
+        if context:
+            messages.append({"role": "system", "content": context})
 
         failures = 0
         for _round in range(max(1, self.cfg.llm.max_rounds)):
@@ -297,6 +312,10 @@ class Brain:
                     # 用户没有屏幕可看：先把「没成功」说出来，再念结果
                     reply = "刚才有一步没成功，结果可能不准。" + reply
                 self._remember(user_text, reply)
+                # 模型这一轮有没有要求"接着听"（调 keep_listening 就会置位）
+                self.wants_followup = bool(tools.TURN.get("follow_up"))
+                if self.wants_followup:
+                    self.log("[brain] 模型要求继续听：" + str(tools.TURN.get("reason") or "未说明"))
                 return reply or "我做完了，但没什么要说的。"
 
             messages.append({
@@ -318,6 +337,8 @@ class Brain:
                 else:
                     failures += 1
                     self.log("[brain] 工具失败(" + outcome.code + ")：" + outcome.text[:120])
+                # 记进「最近的动作」：用户接着问「再打开一次」时，模型得知道刚才开了什么
+                self._note_action(name, arguments, outcome.text)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id") or name,
@@ -331,10 +352,84 @@ class Brain:
     def _remember(self, user_text: str, reply: str) -> None:
         self.history.append({"role": "user", "content": user_text})
         self.history.append({"role": "assistant", "content": reply})
-        self.history = self.history[-24:]
+        self.history = self.history[-HISTORY_TURNS:]
+        self._save_context()
+
+    # -- 跨轮上下文 -------------------------------------------------------
+    def _context_path(self) -> Path:
+        return PROJECT_ROOT / "build" / "conversation.json"
+
+    def _load_context(self) -> None:
+        """把上一次的对话捞回来。
+
+        只认「两小时内」的上一段：隔夜还记得昨天随口说的话，比忘记更吓人。
+        但最近的动作（打开过什么）留久一点，用户第二天说「再打开一次」也接得上。
+        """
+        path = self._context_path()
+        if not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        actions = data.get("actions")
+        if isinstance(actions, list):
+            self.recent_actions = [str(a) for a in actions][-6:]
+        saved = float(data.get("saved") or 0.0)
+        fresh = (time.time() - saved) < CONTEXT_TTL_S
+        history = data.get("history")
+        if fresh and isinstance(history, list):
+            self.history = [
+                item for item in history[-HISTORY_TURNS:]
+                if isinstance(item, dict) and item.get("role") in ("user", "assistant")
+            ][-HISTORY_TURNS:]
+
+    def _save_context(self) -> None:
+        path = self._context_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "history": self.history[-HISTORY_TURNS:],
+                "actions": self.recent_actions[-6:],
+                "saved": time.time(),
+            }, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass   # 存不下就算了，不该影响对话
+
+    def _note_action(self, name: str, arguments: Any, text: str) -> None:
+        """记一句「刚才干了什么」。带参数，指代才接得上。"""
+        detail = ""
+        if isinstance(arguments, dict):
+            detail = str(next((v for v in arguments.values() if str(v).strip()), "") or "")[:24]
+        elif isinstance(arguments, str) and arguments.strip() not in ("", "{}"):
+            try:
+                parsed = json.loads(arguments)
+                if isinstance(parsed, dict):
+                    detail = str(next((v for v in parsed.values() if str(v).strip()), "") or "")[:24]
+            except ValueError:
+                detail = arguments[:24]
+        head = name + ("(" + detail + ")" if detail else "")
+        self.recent_actions.append(head + " → " + str(text)[:48])
+        self.recent_actions = self.recent_actions[-6:]
+
+    def _context_line(self) -> str:
+        """最近做过什么，作为一条 system 消息跟在用户话后面。
+
+        和时钟一样放在最后：前面整段（系统提示 + 工具声明 + 历史）保持字节稳定，
+        服务端的前缀缓存才有机会命中。
+        """
+        if not self.recent_actions:
+            return ""
+        return "最近的动作（从旧到新）：" + "；".join(self.recent_actions[-4:])
 
     def reset(self) -> None:
         self.history.clear()
+        self.recent_actions.clear()
+        self.wants_followup = False
+        tools.reset_turn()
+        self._save_context()
 
     # -- 离线规则路径 -----------------------------------------------------
     def _respond_rules(self, user_text: str, confirm: Callable[[str], bool] | None) -> str:

@@ -51,10 +51,18 @@ import yaml
 
 from .config import PROJECT_ROOT
 
-__all__ = ["SkillLoader", "SkillInfo", "SKILL_DIRS", "skill_template", "USER_SKILL_DIR"]
+__all__ = ["SkillLoader", "SkillInfo", "SKILL_DIRS", "skill_template", "tool_template",
+           "USER_SKILL_DIR", "USER_TOOL_DIR", "PROJECT_TOOL_DIR"]
+
 
 USER_SKILL_DIR = Path.home() / ".voice-agent" / "skills"
-SKILL_DIRS: tuple[Path, ...] = (PROJECT_ROOT / "skills", USER_SKILL_DIR)
+# 「自定义工具」和「技能」是同一套文件格式、同一个加载器，区别只在放在哪个目录、
+# 界面上怎么称呼：tools/ 放"给助手加一个能力"，skills/ 放"教它一套说法"。
+# 两者最终都变成工具表里的一条，LLM 与离线规则都能用。
+USER_TOOL_DIR = Path.home() / ".voice-agent" / "tools"
+PROJECT_TOOL_DIR = PROJECT_ROOT / "tools"
+SKILL_DIRS: tuple[Path, ...] = (PROJECT_ROOT / "skills", USER_SKILL_DIR,
+                                PROJECT_TOOL_DIR, USER_TOOL_DIR)
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
@@ -340,21 +348,31 @@ class SkillLoader:
     def load_dir(self, directory: Path) -> list[SkillInfo]:
         if not directory.is_dir():
             return []
+        # 放在 tools/ 里的按「自定义工具」展示，skills/ 里的按「技能」展示；
+        # 加载方式完全一样
+        from_tools = directory.name.lower() == "tools"
         infos: list[SkillInfo] = []
         for path in sorted(directory.iterdir()):
             if path.suffix.lower() in (".yaml", ".yml"):
-                infos.append(self._load_yaml(path))
+                info = self._load_yaml(path)
             elif path.suffix.lower() == ".py" and not path.name.startswith("_"):
-                infos.append(self._load_python(path))
+                info = self._load_python(path)
+            else:
+                continue
+            if from_tools:
+                info.kind = "tool"
+            infos.append(info)
         return infos
 
-    def ensure_user_dir(self) -> Path:
-        """保证用户技能目录存在，并放一个说明文件与示例。"""
-        USER_SKILL_DIR.mkdir(parents=True, exist_ok=True)
-        readme = USER_SKILL_DIR / "README.md"
+    def ensure_user_dir(self, kind: str = "skill") -> Path:
+        """保证用户目录存在，并放一个说明文件与示例。"""
+        directory = USER_TOOL_DIR if kind == "tool" else USER_SKILL_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        readme = directory / "README.md"
         if not readme.is_file():
-            readme.write_text(skill_template(), encoding="utf-8")
-        return USER_SKILL_DIR
+            readme.write_text(tool_template() if kind == "tool" else skill_template(),
+                              encoding="utf-8")
+        return directory
 
     # -- YAML -----------------------------------------------------------
     def _load_yaml(self, path: Path) -> SkillInfo:
@@ -518,9 +536,71 @@ def _registry_names() -> list[str]:
     return list(tools_mod.REGISTRY)
 
 
+def tool_template() -> str:
+    """新工具的模板（UI 的「新建工具」和用户 tools 目录的 README 都用它）。
+
+    格式和技能完全一样 —— 本来就是同一个加载器。放 tools/ 里，
+    在界面上就显示成「自定义工具」，和内置工具并排站。
+    """
+    return """# 大肥鲸 自定义工具
+
+把 .yaml 或 .py 丢进这个目录，就能给助手加一个**属于你自己的工具**。
+它和内置工具是平等的：模型能自动发现、能调，离线规则模式也能用触发词喊出来。
+
+## YAML 写法（推荐）
+
+```yaml
+name: backup_docs          # 工具名：小写字母开头，英文/数字/下划线
+title: 备份文档             # 给人看的名字，语音确认时会念出来
+description: >-             # 这句是写给模型看的，说清楚"什么时候该用它"
+  把「文档」目录打包备份到 D 盘。用户说「备份一下文档」时调用。
+parameters:                # 参数表；{} 里写 required: true 表示必填
+  target:
+    type: string
+    description: 备份到哪里
+    required: false
+action:
+  type: shell              # say / shell / open / url / app / sequence
+  command: robocopy "%USERPROFILE%\\Documents" "{target}" /MIR
+  confirm: true            # 有副作用的默认就要确认；确认过再执行更安全
+triggers:                  # 离线模式（没配 API Key）靠它喊得动
+  - 备份文档
+  - 备份一下文档
+```
+
+## 支持的 action
+
+| type | 必填字段 | 说明 |
+| --- | --- | --- |
+| say | text | 直接返回这句话（可含 {参数}） |
+| shell | command | 执行系统命令并返回输出；**默认需要语音确认** |
+| open / url | target | 用浏览器打开网址 |
+| app | target | 打开本机应用 |
+| sequence | steps | 依次调用已有工具，如 steps: [{tool: get_time, args: {}}] |
+
+## Python 写法（需要任意逻辑时）
+
+```python
+def handler(city: str = "") -> str:
+    return city + " 今天晴，25 度"
+
+TOOLS = [{
+    "name": "weather",
+    "title": "天气",
+    "description": "查询某个城市的天气。",
+    "parameters": {"city": {"type": "string", "description": "城市名"}},
+    "handler": handler,
+}]
+```
+
+> 工具出错只会让这一个工具不可用，不会影响助手启动。
+> 改完在界面上点「重新加载」，不用重启。
+"""
+
+
 def skill_template() -> str:
     """新技能的模板（UI 的「新建技能」和用户目录的 README 都用它）。"""
-    return """# 语音 Agent 技能目录
+    return """# 大肥鲸 技能目录
 
 把 .yaml 或 .py 文件丢进这个目录，重启助手（或在界面里点「重新加载技能」）即可生效。
 

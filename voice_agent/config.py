@@ -34,8 +34,8 @@ KWS_DIR = "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
 ASR_DIR = "sherpa-onnx-paraformer-zh-2023-09-14"
 PUNCT_DIR = "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8"
 TTS_DIR = "sherpa-onnx-vits-zh-ll"
-# 更好听的合成模型（可选）：Kokoro 多语种，音色更多、停顿更自然
-KOKORO_DIR = "kokoro-int8-multi-lang-v1_1"
+# ChatTTS 不走 sherpa-onnx，权重由 ChatTTS 自己的包从 HuggingFace 拉，
+# 所以这里没有对应的 MODEL_FILES 条目。
 
 # 每个模型需要的文件：{逻辑名: 相对 models 的路径}
 MODEL_FILES: dict[str, str] = {
@@ -50,14 +50,10 @@ MODEL_FILES: dict[str, str] = {
     "tts_model": TTS_DIR + "/model.onnx",
     "tts_tokens": TTS_DIR + "/tokens.txt",
     "tts_lexicon": TTS_DIR + "/lexicon.txt",
-    # Kokoro 是可选的：缺了会自动回退到 VITS
-    "kokoro_model": KOKORO_DIR + "/model.int8.onnx",
-    "kokoro_voices": KOKORO_DIR + "/voices.bin",
-    "kokoro_tokens": KOKORO_DIR + "/tokens.txt",
 }
 
 # 这些缺了不影响运行（有回退方案），所以不参与「模型不齐」的判定
-OPTIONAL_MODELS = ("kokoro_model", "kokoro_voices", "kokoro_tokens", "punct_model")
+OPTIONAL_MODELS = ("punct_model",)
 
 
 def sherpa_gpu_built() -> bool:
@@ -145,7 +141,7 @@ def _str_list(value: Any, default: list[str]) -> list[str]:
     用户在 YAML 里很容易把列表写成单个字符串：
 
         wake:
-          keywords: 小爱同学        # 少了方括号
+          keywords: 大肥鲸        # 少了方括号
 
     直接 for 循环会逐字符迭代，得到 ['小','爱','同','学'] —— 相当于配了四个
     单字唤醒词，后果是满屋子的误唤醒。所以这里统一兼容「字符串 / 列表」两种写法，
@@ -177,16 +173,16 @@ def _get(mapping: Any, key: str, default: Any) -> Any:
 
 
 # 三档预设：直接决定「占多少资源」和「合成好不好听」。
-# 实测（本机 CPU）：VITS 合成 3.9 秒音频用 1.0 秒；Kokoro 合成 7.9 秒音频用 7.4 秒。
-# 也就是 Kokoro 好听但慢 3~4 倍，几乎贴着实时跑 —— 所以默认给"够快"的 VITS，
-# 想要更好音质的人自己切到 quality。
+# 实测（本机 RTX 4060 Ti）：VITS 合成 3.9 秒音频用 1.0 秒（纯 CPU）；
+# ChatTTS 合成 4~5 秒音频要 4.5~7 秒（显卡），自然度高得多但慢。
+# 所以默认给"够快"的 VITS，想要更好听的人自己切到 quality。
 SPEECH_PROFILES: dict[str, dict] = {
     "fast": {"threads": 2, "tts_engine": "vits",
              "note": "低占用：线程最少、用最快的合成，适合后台常驻"},
     "balanced": {"threads": 4, "tts_engine": "vits",
                  "note": "默认：速度和资源平衡"},
-    "quality": {"threads": 8, "tts_engine": "kokoro", "tts_speed": 1.08,
-                "note": "高质量：Kokoro 多语种音色，明显更好听，但慢 3~4 倍"},
+    "quality": {"threads": 6, "tts_engine": "chattts",
+                "note": "高质量：ChatTTS 对话式合成，明显更自然，但要显卡、更慢"},
 }
 
 
@@ -286,7 +282,7 @@ class UiCfg:
 @dataclass
 class WakeCfg:
     enabled: bool = True
-    keywords: list[str] = field(default_factory=lambda: ["小爱同学"])
+    keywords: list[str] = field(default_factory=lambda: ["大肥鲸"])
     threshold: float = 0.25
     score: float = 1.5
     cooldown_ms: int = 1500
@@ -306,14 +302,16 @@ class AsrCfg:
 @dataclass
 class TtsCfg:
     enabled: bool = True
-    # kokoro：100 个中文音色（3~57 女声 / 58~102 男声），挑的余地大
-    # vits：vits-zh-ll 的 5 人角色音，体积小、速度快
+    # vits（默认）：vits-zh-ll 的 5 人角色音，纯 CPU、快、模型 130 MB
+    # chattts     ：ChatTTS 对话式中文，自然得多；要显卡、显存约 2 GB、慢
     engine: str = "vits"
     num_threads: int = 2
     provider: str = "cpu"
-    # 音色：写名字最省事（kokoro 写 zf_070，vits 写 suyingxue），也认数字。
-    # 两边都留空时用 speaker_id。Kokoro 的 0~2 号是英文音色，填了会被自动
-    # 换成中文音色 —— 拿英文音色念中文会发闷发粗还带电流声。
+    # ChatTTS 专用：用哪块设备，以及要不要 torch.compile 加速
+    device: str = "auto"
+    compile: bool = False
+    # 音色：vits 写名字（suyingxue）或编号；chattts 写种子（seed42 或直接 42）。
+    # 留空则用 speaker_id。
     voice: str = ""
     speaker_id: int = 0
     speed: float = 1.0
@@ -332,8 +330,8 @@ class TtsCfg:
         """某种语气下的合成参数。
 
         只并进「这个语气显式改了」的项。以前这里无条件塞 speaker_id，结果
-        引擎侧解析好的音色（例如把 Kokoro 的英文音色换成中文音色）会被配置里
-        的原始下标盖掉 —— 想换音色怎么都换不动，就是这么来的。
+        引擎侧解析好的音色会被配置里的原始下标盖掉 ——
+        想换音色怎么都换不动，就是这么来的。
         要让某种语气用不同音色，在 styles 里显式写 speaker_id 即可。
         """
         base: dict = {"speed": self.speed}
@@ -446,10 +444,17 @@ class ConfirmCfg:
 class AgentCfg:
     barge_in_wake: bool = True
     listen_timeout_ms: int = 8000
-    # 播报结束后是否继续收音（追问窗口）。默认 0 = 关闭：
-    # 一次任务做完就回到「等待唤醒」，除非某个任务自己需要多轮，否则不接着聊。
-    # 想让助手能连续追问，就把它设成 3000~8000。
-    follow_up_ms: int = 0
+    # ── 连续对话（追问窗口）──
+    # 一次任务做完之后，要不要继续收音一小会儿，让用户不用再喊一次唤醒词。
+    # 这是「像人」和「像命令行」之间最关键的一处差别。
+    #
+    # auto（默认）：由 LLM 决定 —— 它反问了、或者主动调了 keep_listening，
+    #               才留窗口；只是汇报个结果就回待命。
+    # always      ：只要窗口 > 0 就每次都留（老行为）。
+    # off         ：从不留窗口，说完就回待命。
+    follow_up_mode: str = "auto"
+    # 窗口长度（毫秒）；<= 0 视为不留窗口
+    follow_up_ms: int = 6000
     # 收音/确认/结束的提示音，让用户知道什么时候该说话
     cues: bool = True
     max_utterance_ms: int = 15000
@@ -457,7 +462,8 @@ class AgentCfg:
     min_speech_ms: int = 250
     vad_threshold: float = 0.5
     exit_words: list[str] = field(default_factory=lambda: ["退下", "再见"])
-    persona: str = "你是运行在用户电脑上的语音助手。回答会被朗读，所以要短、要口语化。"
+    persona: str = ("你是运行在用户电脑上的语音助手，名字叫「大肥鲸」。"
+                    "回答会被朗读，所以要短、要口语化，不要罗列 Markdown。")
     confirm: ConfirmCfg = field(default_factory=ConfirmCfg)
 
 
@@ -477,7 +483,7 @@ class Config:
     missing_models: list[str]
     tts_rule_fsts: list[Path]
     tts_dict_dir: Path
-    kokoro_dir: Path
+
     speech: SpeechCfg
     speaker: SpeakerCfg
     audio: AudioCfg
@@ -568,7 +574,7 @@ class Config:
         tts_engine = (str(engine_raw).strip().lower() if engine_raw
                       else str(preset["tts_engine"]))
         speed_raw = _get(raw, "tts.speed", None)
-        # Kokoro 的语流偏慢，quality 档位默认快 8% 抵消掉；用户显式写了就以用户为准
+        # quality 档位（ChatTTS）语流偏慢，预设里会提一点速；用户显式写了就以用户为准
         tts_speed = float(speed_raw) if speed_raw else float(preset.get("tts_speed", 1.0))
 
         return cls(
@@ -578,7 +584,7 @@ class Config:
             missing_models=missing,
             tts_rule_fsts=[p for p in (models_dir / f for f in TTS_RULE_FSTS) if p.is_file()],
             tts_dict_dir=models_dir / TTS_DIR / "dict",
-            kokoro_dir=models_dir / KOKORO_DIR,
+
             speech=speech,
             speaker=SpeakerCfg(
                 enabled=bool(_get(raw, "speaker.enabled", False)),
@@ -596,7 +602,7 @@ class Config:
             ),
             wake=WakeCfg(
                 enabled=bool(_get(raw, "wake.enabled", True)),
-                keywords=_str_list(_get(raw, "wake.keywords", None), ["小爱同学"]),
+                keywords=_str_list(_get(raw, "wake.keywords", None), ["大肥鲸"]),
                 threshold=float(_get(raw, "wake.threshold", 0.25)),
                 score=float(_get(raw, "wake.score", 1.5)),
                 cooldown_ms=int(_get(raw, "wake.cooldown_ms", 1500)),
@@ -619,6 +625,8 @@ class Config:
                 engine=tts_engine or "vits",
                 num_threads=int(_get(raw, "tts.num_threads", 2)),
                 provider=str(_get(raw, "tts.provider", "cpu")),
+                device=str(_get(raw, "tts.device", "auto") or "auto"),
+                compile=bool(_get(raw, "tts.compile", False)),
                 voice=str(_get(raw, "tts.voice", "") or ""),
                 speaker_id=int(_get(raw, "tts.speaker_id", 0)),
                 speed=tts_speed,
@@ -649,7 +657,8 @@ class Config:
             agent=AgentCfg(
                 barge_in_wake=bool(_get(raw, "agent.barge_in_wake", True)),
                 listen_timeout_ms=int(_get(raw, "agent.listen_timeout_ms", 8000)),
-                follow_up_ms=int(_get(raw, "agent.follow_up_ms", 0)),
+                follow_up_mode=str(_get(raw, "agent.follow_up_mode", "auto") or "auto").strip().lower(),
+                follow_up_ms=int(_get(raw, "agent.follow_up_ms", 6000)),
                 cues=bool(_get(raw, "agent.cues", True)),
                 max_utterance_ms=int(_get(raw, "agent.max_utterance_ms", 15000)),
                 min_silence_ms=int(_get(raw, "agent.min_silence_ms", 700)),
@@ -690,6 +699,6 @@ def _resolve_models(root: Path) -> tuple[dict[str, Path], list[str]]:
         if path.is_file():
             found[name] = path
         elif name not in OPTIONAL_MODELS:
-            # 可选模型（Kokoro 音色包、标点模型）有回退方案，缺了不算错误
+            # 可选模型（标点模型）有回退方案，缺了不算错误
             missing.append(name)
     return found, missing

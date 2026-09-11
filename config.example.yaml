@@ -73,19 +73,23 @@ asr:
 # ── 语音合成 ───────────────────────────────────────────────────────────────
 tts:
   enabled: true
-  # vits = 快（默认）；kokoro = 更好听、100+ 种音色，但慢 3~4 倍。
-  # 留空则跟随 speech.profile。换引擎要重启（主界面会提示）。
+  # vits    = 纯 CPU、快，5 个角色音（默认，推荐常驻用这个）
+  # chattts = 对话式中文，自然得多；但要独显（约 2 GB 显存）、首次加载十几秒、
+  #           合成速度大约 1 倍实时。没装 ChatTTS 包时启动会直接报错。
+  # 留空则跟随 speech.profile。换引擎要重启引擎（主界面会弹提示）。
   engine: vits
-  # 音色：写名字最省事，也认数字。选完可以 voice_agent voices <名字> 当场试听，
-  # voice_agent voices --set <名字> 直接写回这里。
-  #   kokoro（100 个中文音色）：zf_003 清亮女声（默认）/ zf_092、zf_074 更高更亮
-  #                              / zf_006 沉稳女声 / zm_016、zm_052 男声
-  #   vits（5 个角色音）：suyingxue 标准女声 / fushiyu 女声 / bingjiao 低柔女声
-  #                       / gunian、bazong 男声
-  # 注意：Kokoro 的 0~2 号是英文音色，拿它念中文会发闷发粗还带电流声，
-  #       所以填 0~2 会被自动换成中文音色（启动日志里会说明）。
+  # ChatTTS 专用：auto / cuda / cpu；compile 打开 torch.compile（首次编译更慢）
+  device: auto
+  compile: false
+  # 音色：
+  #   vits    —— 写角色名或编号（0~4）：
+  #              suyingxue 标准女声(0) / gunian 男声(1) / fushiyu 女声(2)
+  #              / bingjiao 低柔女声(3) / bazong 男声(4)
+  #   chattts —— 写种子（seed42 或直接 42）。同一个种子永远是同一个人，
+  #              换个数就换个人；挑过的种子：0 42 1111 2024 3407 6666 8888 12345
+  # 先试听再定：voice_agent voices --audition，或者界面上点「试听」。
   voice: ""
-  speaker_id: 0             # 没写 voice 时才用它；vits 是 0~4，kokoro 是 0~102
+  speaker_id: 0             # 没写 voice 时才用它；vits 是 0~4，chattts 是种子号
   speed: 1.0
   volume: 1.0
   # 响度：按 RMS 定（0.10 约等于正常说话）。早先按峰值归一化，等于把底噪一起

@@ -26,10 +26,17 @@ def open_app(name: str = "") -> str:
 
         found = screen_mod.resolve_app(lowered)
         if found.get("hit"):
-            mapped = str(found["target"])
-            if "://" in mapped:
+            entry = found.get("entry") or {}
+            mapped = str(entry.get("target") or found.get("target") or "")
+            args = [str(a) for a in (entry.get("args") or [])]
+            kind = str(entry.get("type") or "")
+            if kind == "url" or "://" in mapped:
                 return open_url(mapped)
-            ok = _launch(mapped) or _launch(shutil.which(mapped) or "")
+            if kind == "command":
+                # 命令类（脚本、带参数的调用）走 shell，才认得到参数和管道
+                ok = _launch(mapped, args) or _launch("cmd", ["/c", mapped] + args)
+            else:
+                ok = _launch(mapped, args) or _launch(shutil.which(mapped) or "")
             return ("已经打开" + target_name + "（来自应用映射表）") if ok else (
                 "映射表里「" + str(found["key"]) + "」指向 " + mapped + "，但打不开它")
     except Exception:  # noqa: BLE001 - 映射表坏了就按内置规则走

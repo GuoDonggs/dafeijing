@@ -144,8 +144,17 @@ def window_smoke() -> None:
             dialog = window._page_for("chat", __import__(
                 "voice_agent.ui.pages", fromlist=["ChatPage"]).ChatPage, "对话记录", 660, 620)
             dialog._tick()
-            body = dialog.page.view.toPlainText()
+            pump(app, 300)
+            body = dialog.page.transcript_text()
             check("对话窗口能建起来并渲染内容", "现在几点了" in body, body[:40])
+            # 一条消息一个气泡：以前用 QPlainTextEdit 拼 HTML，div 会被拍平，
+            # 几十条消息糊成一坨，这是"观感差"的根因
+            check("每条消息各自成泡", len(dialog.page._bubbles) == 2,
+                  str(len(dialog.page._bubbles)) + " 个气泡")
+            check("气泡里带说话人", "我" in dialog.page._bubbles[0].findChildren(
+                __import__("PyQt6.QtWidgets", fromlist=["QLabel"]).QLabel)[0].text(),
+                dialog.page._bubbles[0].findChildren(
+                    __import__("PyQt6.QtWidgets", fromlist=["QLabel"]).QLabel)[0].text())
             check("对话窗口也是无边框圆角",
                   bool(dialog.windowFlags() & Qt.WindowType.FramelessWindowHint))
             dialog.deleteLater()
@@ -250,25 +259,28 @@ def window_smoke() -> None:
             check("重启完提示条收起", window.notice.isHidden())
             settings.deleteLater()
 
-            # Kokoro 那份配置写的是 speaker_id: 0（英文音色），界面必须显示中文音色
+            # 换引擎之后，音色下拉框要跟着换一套（vits 是角色音，chattts 是种子）
             from voice_agent.console import Console
             from voice_agent.ui.pages import SettingsPage
 
-            kokoro_cfg = Path(tmp) / "kokoro.yaml"
-            kokoro_cfg.write_text("tts:\n  engine: kokoro\n  speaker_id: 0\n", encoding="utf-8")
-            kokoro_page = SettingsPage(Console(kokoro_cfg))
+            chat_cfg = Path(tmp) / "chattts.yaml"
+            chat_cfg.write_text("tts:\n  engine: chattts\n  voice: seed42\n", encoding="utf-8")
+            chat_page = SettingsPage(Console(chat_cfg))
             try:
-                _, kcombo = kokoro_page.widgets.get("tts.voice", ("", None))
-                check("Kokoro 下给出 100 个中文音色",
-                      kcombo is not None and kcombo.count() == 100,
-                      str(kcombo.count() if kcombo else 0) + " 项")
-                picked = str(kcombo.currentData() or "")
-                check("配置里的 0 号英文音色被换掉了", picked.startswith(("zf_", "zm_")), picked)
-                check("下拉框里没有英文音色",
-                      not any(str(kcombo.itemData(i)).startswith(("af_", "bf_"))
-                              for i in range(kcombo.count())))
+                _, ccombo = chat_page.widgets.get("tts.voice", ("", None))
+                check("ChatTTS 下给出预设种子",
+                      ccombo is not None and ccombo.count() >= 4,
+                      str(ccombo.count() if ccombo else 0) + " 项")
+                picked = str(ccombo.currentData() or "")
+                check("选中的是配置里的种子", picked == "seed42", picked)
+                check("选中项是种子写法", picked.startswith("seed"), picked)
+                # 选了 ChatTTS 要在最上面摆一张警告卡（要显卡、慢）
+                texts = [w.text() for w in chat_page.findChildren(
+                    __import__("PyQt6.QtWidgets", fromlist=["QLabel"]).QLabel)]
+                check("ChatTTS 会显示显卡警告",
+                      any("显存" in t for t in texts), str(len(texts)) + " 个标签")
             finally:
-                kokoro_page.deleteLater()
+                chat_page.deleteLater()
         finally:
             window.close()
             window.deleteLater()

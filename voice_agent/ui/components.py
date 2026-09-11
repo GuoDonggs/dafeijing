@@ -348,9 +348,10 @@ class ListRow(QFrame):
     def __init__(self, icon_name: str = "", title: str = "", subtitle: str = "",
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("ListRow { background: transparent; }")
+        # 背景交给全局 QSS 的 #ListRow:hover（带一点主色），这里只留内边距
+        self.setObjectName("ListRow")
         row = QHBoxLayout(self)
-        row.setContentsMargins(0, 6, 0, 6)
+        row.setContentsMargins(6, 6, 6, 6)
         row.setSpacing(12)
 
         if icon_name:
@@ -384,10 +385,24 @@ class ListRow(QFrame):
         self.subtitle.setVisible(bool(text))
 
 
-def section_title(text: str) -> QLabel:
+def section_title(text: str) -> QWidget:
+    """小节标题：左边一小段主色竖条 + 文字。
+
+    竖条用主色，换主题时整页的"分节感"一起变色 —— 比只换按钮显眼得多。
+    """
+    box = QWidget()
+    layout = QHBoxLayout(box)
+    layout.setContentsMargins(0, 10, 0, 2)
+    layout.setSpacing(8)
+    bar = QFrame()
+    bar.setObjectName("SectionBar")
+    bar.setFixedSize(3, 12)
+    layout.addWidget(bar)
     label = QLabel(text)
     label.setObjectName("SectionTitle")
-    return label
+    layout.addWidget(label)
+    layout.addStretch(1)
+    return box
 
 
 def icon_button(icon_name: str, tooltip: str = "", color: str = theme.MUTED,
@@ -554,6 +569,61 @@ class FadeLabel(QLabel):
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
         self._animation.start()
+
+
+# ─────────────────────── 聊天气泡 ───────────────────────
+
+
+class ChatBubble(QFrame):
+    """一条对话气泡。
+
+    为什么不用 QPlainTextEdit 拼 HTML：它本质是纯文本编辑器，insertHtml 只能
+    尽力而为 —— <div> 会被拍平，于是几十条消息糊成一坨，读起来非常糟。
+    这里改成"一个气泡一个控件"，圆角、换行、对齐全由 QSS 控制。
+    """
+
+    def __init__(self, role: str, text: str, stamp: str = "",
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.role = str(role)
+        mine = self.role == "user"
+        system = self.role == "system"
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        card = QFrame()
+        card.setObjectName("BubbleSystem" if system else
+                           ("BubbleMine" if mine else "BubbleTheirs"))
+        card.setMaximumWidth(430)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(12, 8, 12, 10)
+        inner.setSpacing(3)
+
+        who = {"user": "我", "assistant": "大肥鲸"}.get(self.role, "系统")
+        head = QLabel(who + ("　" + stamp if stamp else ""))
+        head.setObjectName("BubbleWho")
+        inner.addWidget(head)
+
+        body = QLabel(str(text))
+        body.setObjectName("BubbleText")
+        body.setWordWrap(True)
+        # 纯文本：指令里的 < & 原样显示，换行也不会被吃掉
+        body.setTextFormat(Qt.TextFormat.PlainText)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        inner.addWidget(body)
+
+        if system:
+            outer.addStretch(1)
+            outer.addWidget(card)
+            outer.addStretch(1)
+        elif mine:
+            outer.addStretch(1)
+            outer.addWidget(card)
+        else:
+            outer.addWidget(card)
+            outer.addStretch(1)
 
 
 # ─────────────────────── 音量条 ───────────────────────

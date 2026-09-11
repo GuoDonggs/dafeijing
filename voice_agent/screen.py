@@ -299,14 +299,60 @@ def save_for_vision(image: str | Path | None = None, max_width: int = 1280,
 
 
 # ── 本地应用映射表 ───────────────────────────────────────────────
+#
+# 这张表只干一件事：把「一个程序 / 脚本 / 启动方式」映射成一个**名字**，
+# 于是用户说「打开 XXX」时能对上号。写法两种都认：
+#
+#   微信: C:\Program Files\Tencent\WeChat\WeChat.exe     # 简写：名字 -> 目标
+#
+#   我的备份:                                              # 完整写法
+#     target: D:\scripts\backup.bat
+#     aliases: [备份脚本, backup]                          # 同一个目标可以有多个叫法
+#     type: command                                       # exe / path / url / command
+#     args: ["--fast"]                                    # 可选启动参数
+
+_APP_TYPES = ("exe", "path", "url", "command")
 
 
 def app_map_path() -> Path:
     return APP_MAP_FILE
 
 
-def load_app_map() -> dict[str, str]:
-    """读用户自定义的应用映射表（apps.yaml）。缺文件时给一份内置默认。"""
+def _guess_app_type(target: str) -> str:
+    low = target.lower()
+    if "://" in target:
+        return "url"
+    if low.endswith((".exe", ".lnk", ".bat", ".cmd", ".com")):
+        return "path"
+    if low.endswith((".com", ".cn", ".net", ".org")) and " " not in target:
+        return "url"
+    return "command"
+
+
+def _normalize_entry(value: Any) -> dict:
+    """把一条映射统一成 {target, aliases, type, args}。"""
+    if isinstance(value, dict):
+        target = str(value.get("target") or value.get("path")
+                     or value.get("command") or "").strip()
+        raw_aliases = value.get("aliases") or value.get("alias") or []
+        raw_args = value.get("args") or []
+        kind = str(value.get("type") or "").strip().lower()
+    else:
+        target = str(value or "").strip()
+        raw_aliases, raw_args, kind = [], [], ""
+    if isinstance(raw_aliases, str):
+        raw_aliases = [raw_aliases]
+    if isinstance(raw_args, str):
+        raw_args = [raw_args]
+    aliases = [str(a).strip() for a in raw_aliases if str(a).strip()]
+    args = [str(a) for a in raw_args if str(a).strip()]
+    if kind not in _APP_TYPES:
+        kind = _guess_app_type(target)
+    return {"target": target, "aliases": aliases, "type": kind, "args": args}
+
+
+def load_app_map() -> dict[str, dict]:
+    """读用户自定义的应用映射表（apps.yaml）。缺文件时就是空的。"""
     if not APP_MAP_FILE.is_file():
         return {}
     try:
@@ -317,48 +363,91 @@ def load_app_map() -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(key): str(value) for key, value in data.items() if str(key).strip()}
+    mapping: dict[str, dict] = {}
+    for key, value in data.items():
+        name = str(key).strip()
+        if not name or name.startswith("#"):
+            continue
+        entry = _normalize_entry(value)
+        if entry["target"]:
+            mapping[name] = entry
+    return mapping
 
 
-def save_app_map(mapping: dict[str, str]) -> Path:
+def save_app_map(mapping: dict[str, Any]) -> Path:
+    """写回映射表。只给 target 的条目写成简写，有别名/参数的写完整形式。"""
     import yaml  # noqa: PLC0415
 
     APP_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
     header = ("# 本地应用映射表：说「打开 XXX」时优先查这里\n"
-              "# 左：你对它说的话；右：程序名 / 完整路径 / 网址\n")
+              "# 左边是名字（可以有多个叫法），右边是程序名 / 完整路径 / 网址。\n"
+              "# 也可以写成完整形式：\n"
+              "#   我的备份:\n"
+              "#     target: D:\\scripts\\backup.bat\n"
+              "#     aliases: [备份脚本, backup]\n"
+              "#     type: command\n")
+    clean: dict[str, Any] = {}
+    for key, value in sorted(mapping.items()):
+        name = str(key).strip()
+        if not name:
+            continue
+        entry = _normalize_entry(value)
+        if not entry["target"]:
+            continue
+        if entry["aliases"] or entry["args"]:
+            item = {"target": entry["target"], "type": entry["type"]}
+            if entry["aliases"]:
+                item["aliases"] = entry["aliases"]
+            if entry["args"]:
+                item["args"] = entry["args"]
+            clean[name] = item
+        else:
+            clean[name] = entry["target"]
     APP_MAP_FILE.write_text(
-        header + yaml.safe_dump(dict(sorted(mapping.items())), allow_unicode=True,
-                                sort_keys=False),
+        header + yaml.safe_dump(clean, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
     return APP_MAP_FILE
 
 
 def resolve_app(name: str) -> dict:
-    """在映射表里找这个说法对应的目标。"""
+    """在映射表里找这个说法对应的目标。
+
+    匹配顺序：名字完全一致 > 别名完全一致 > 互相包含（「打开微信」能对上「微信」）。
+    """
     key = str(name or "").strip().lower()
     mapping = load_app_map()
     if not key:
         return {"hit": False, "mapping": mapping}
-    if key in {k.lower() for k in mapping}:
-        for original, target in mapping.items():
-            if original.lower() == key:
-                return {"hit": True, "key": original, "target": target, "exact": True,
-                        "mapping": mapping}
-    for original, target in mapping.items():
-        low = original.lower()
-        if low and (low in key or key in low):
-            return {"hit": True, "key": original, "target": target, "exact": False,
-                    "mapping": mapping}
+
+    def matched(entry_key: str, entry: dict) -> bool:
+        return entry_key.lower() == key or any(a.lower() == key for a in entry["aliases"])
+
+    for entry_key, entry in mapping.items():
+        if matched(entry_key, entry):
+            return {"hit": True, "key": entry_key, "entry": entry,
+                    "target": entry["target"], "exact": True, "mapping": mapping}
+    for entry_key, entry in mapping.items():
+        names = [entry_key.lower()] + [a.lower() for a in entry["aliases"]]
+        if any(n and (n in key or key in n) for n in names):
+            return {"hit": True, "key": entry_key, "entry": entry,
+                    "target": entry["target"], "exact": False, "mapping": mapping}
     return {"hit": False, "mapping": mapping}
 
 
 def describe_app_map() -> str:
     mapping = load_app_map()
     if not mapping:
-        return ("还没有自定义映射。用法：说「添加应用 XXX 指向 C:\\路径\\程序.exe」，"
-                "或者直接编辑 " + str(APP_MAP_FILE))
-    return "；".join(name + " → " + str(target) for name, target in list(mapping.items())[:12])
+        return ("还没有自定义映射。可以直接说「添加应用 我的项目 指向 D:\\code」，"
+                "或者编辑 " + str(APP_MAP_FILE))
+    parts = []
+    for name, entry in list(mapping.items())[:12]:
+        text = name
+        if entry["aliases"]:
+            text += "（" + "/".join(entry["aliases"][:3]) + "）"
+        parts.append(text + " → " + entry["target"])
+    return "；".join(parts)
+
 
 
 def dump_json(payload: Any) -> str:

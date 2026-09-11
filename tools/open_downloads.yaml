@@ -1,0 +1,13 @@
+# 这是一个「自定义工具」的例子 —— 和内置工具是平等的：
+# 模型能自动发现并调用它，没配 API Key 时也能靠 triggers 喊出来。
+#
+# 你可以照这个文件改，也可以删掉它。更多说明见同目录的 README.md。
+name: open_downloads
+title: 打开下载文件夹
+description: 打开当前用户的「下载」文件夹。用户说「打开下载文件夹」「我的下载」时调用。
+action:
+  type: app
+  target: "%USERPROFILE%\\Downloads"
+triggers:
+  - 打开下载文件夹
+  - 我的下载

@@ -158,7 +158,7 @@ def _audition(cfg, engine: str, sids: list[int], text: str | None) -> int:
         return 1
     if tts.engine != engine:
         print("提示：现在跑的是 " + tts.engine + " 引擎，配置里要写 tts.engine: " + engine)
-    line = text or "你好，我是小爱同学，今天天气不错，有什么可以帮你的吗？"
+    line = text or "你好，我是大肥鲸，今天天气不错，有什么可以帮你的吗？"
     total = max(1, tts.num_speakers)
     for n, sid in enumerate(sids):
         if not (0 <= sid < total):
@@ -174,13 +174,11 @@ def _audition(cfg, engine: str, sids: list[int], text: str | None) -> int:
 def cmd_voices(args) -> int:
     """列音色表、试听、改配置。
 
-    这张表存在的意义：两个引擎都只认数字下标，而 Kokoro 的 0~2 号是英文音色，
-    选错了念中文就是发闷发粗外加电流声 —— 所以给出名字，让人能按名字挑。
+    vits 有 5 个固定角色音，ChatTTS 的音色是一个随机种子 ——
+    两种都不是能猜出来的东西，所以这里给出名字，让人按名字挑、点一下试听。
     """
     cfg = _load(args)
-    engine = (args.engine or cfg.tts.engine or "vits").strip().lower()
-    if engine not in ("kokoro", "vits"):
-        engine = "vits"
+    engine = voice_table.engine_of(args.engine or cfg.tts.engine)
 
     if args.save:
         sid = voice_table.resolve(engine, args.save)
@@ -366,8 +364,8 @@ def cmd_doctor(args) -> int:
           + "；档位 " + cfg.speech.profile + "（" + cfg.speech.profile_note + "）"
           + "；线程 " + str(cfg.speech.num_threads()))
     print("语音合成引擎：" + cfg.tts.engine
-          + ("（Kokoro 模型" + ("已有" if cfg.has("kokoro_model") else "缺失，会回退 VITS") + "）"
-             if cfg.tts.engine == "kokoro" else ""))
+          + ("（ChatTTS：要显卡，首次加载十几秒）"
+             if voice_table.engine_of(cfg.tts.engine) == "chattts" else "（VITS：纯 CPU）"))
     # 声纹要说得直白：开了但没录，等于没开
     from .speaker import Voiceprint
 
@@ -503,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_voices = sub.add_parser("voices", parents=[common], help="列出 / 试听 / 切换音色")
     p_voices.add_argument("voice", nargs="?", help="试听这个音色，名字或编号都行")
-    p_voices.add_argument("--engine", choices=["kokoro", "vits"], help="看哪个引擎的音色")
+    p_voices.add_argument("--engine", choices=["vits", "chattts"], help="看哪个引擎的音色")
     p_voices.add_argument("--set", dest="save", metavar="VOICE", help="把音色写进配置文件")
     p_voices.add_argument("--audition", action="store_true", help="连着念一遍，方便挑")
     p_voices.add_argument("--male", action="store_true", help="只看 / 只听男声")

@@ -12,8 +12,20 @@
 from __future__ import annotations
 
 from . import Tool, _I, _S, _S_REQ, _params, _register
+from ._shared import keep_listening
 from .apps import open_app, open_url, web_search
-from .files import list_files, read_file, recall, remember, search_files
+from .files import (
+    edit_file,
+    find_files,
+    grep_files,
+    list_files,
+    open_path,
+    read_file,
+    recall,
+    remember,
+    search_files,
+    write_file,
+)
 from .system_info import get_time, system_info
 from .vision import (
     app_map_tool,
@@ -29,6 +41,10 @@ from .vision import (
 )
 from .windows import (
     clipboard,
+    focus_window,
+    kill_process,
+    list_processes,
+    list_windows,
     lock_screen,
     media_control,
     power,
@@ -37,8 +53,24 @@ from .windows import (
     screenshot,
     type_text,
     volume,
+    wait,
     window,
 )
+
+# ─────────────────────────── 交互类 ───────────────────────────
+
+_register(Tool(
+    name="keep_listening",
+    title="继续听你说",
+    description="你希望用户接着说下去时才调用：你刚反问了一句、需要用户补充信息，"
+                "或者任务要分几步、下一步还等着用户开口。"
+                "只是汇报结果、不需要用户回话时**不要**调用，否则助手会一直等着，像没听懂一样。",
+    parameters=_params(
+        reason={"type": "string", "description": "一句话说明为什么还要等用户说话"},
+    ),
+    handler=keep_listening,
+))
+
 
 # ─────────────────────────── 信息类 ───────────────────────────
 
@@ -57,6 +89,123 @@ _register(Tool(
     ),
     handler=system_info,
 ))
+
+# ─────────────────────── 窗口与进程 ───────────────────────
+
+_register(Tool(
+    name="list_windows",
+    title="看看开了哪些窗口",
+    description="列出当前打开的窗口。用户问「我开了哪些窗口」「浏览器开了吗」时调用。",
+    parameters=_params(
+        filter={"type": "string", "description": "只看标题里含这个词的窗口，可留空"},
+    ),
+    handler=list_windows,
+))
+
+_register(Tool(
+    name="focus_window",
+    title="切换窗口",
+    description="把标题匹配的窗口切到最前面。用户说「切到浏览器」「把记事本调出来」时调用。",
+    parameters=_params(
+        title={"type": "string", "description": "窗口标题的一部分，例如「浏览器」「记事本」", "_required": True},
+    ),
+    handler=focus_window,
+))
+
+_register(Tool(
+    name="list_processes",
+    title="看看谁在占资源",
+    description="按内存占用列出正在运行的进程。用户问「什么东西这么卡」「看看进程」时调用。",
+    parameters=_params(
+        filter={"type": "string", "description": "只看名字里含这个词的进程，可留空"},
+        top={"type": "integer", "description": "列几个，默认 5"},
+    ),
+    handler=list_processes,
+))
+
+_register(Tool(
+    name="kill_process",
+    title="结束进程",
+    description="按名字结束一个进程（例如卡死的程序）。用户说「把那个程序关掉」「结束 xxx 进程」时调用。"
+                "属于敏感操作，调用前应先跟用户确认。",
+    parameters=_params(
+        name={"type": "string", "description": "进程名或窗口标题的一部分，例如 notepad", "_required": True},
+        force={"type": "boolean", "description": "是否强制结束，默认是"},
+    ),
+    handler=kill_process,
+    confirm=True,
+))
+
+_register(Tool(
+    name="wait",
+    title="等一会儿",
+    description="等待若干秒再继续。用户说「等 5 秒再做」或者某个操作需要缓冲时调用。",
+    parameters=_params(
+        seconds={"type": "number", "description": "等多少秒，最多 30"},
+    ),
+    handler=wait,
+))
+
+
+# ─────────────────────── 文件读写 ───────────────────────
+
+_register(Tool(
+    name="write_file",
+    title="写文件",
+    description="把一段文字写进一个文本文件（可以覆盖或追加）。用户说「把这句话记到 xxx.txt」时调用。",
+    parameters=_params(
+        path={"type": "string", "description": "文件路径，支持「桌面」「文档」这类说法", "_required": True},
+        content={"type": "string", "description": "要写入的内容", "_required": True},
+        mode={"type": "string", "description": "overwrite（覆盖，默认）或 append（追加）"},
+    ),
+    handler=write_file,
+))
+
+_register(Tool(
+    name="edit_file",
+    title="改文件里的一段",
+    description="把文件里已有的某段文字替换成新的。用户说「把文件里的 xxx 改成 yyy」时调用。",
+    parameters=_params(
+        path={"type": "string", "description": "文件路径", "_required": True},
+        old={"type": "string", "description": "要被替换掉的原文", "_required": True},
+        new={"type": "string", "description": "替换成什么"},
+    ),
+    handler=edit_file,
+))
+
+_register(Tool(
+    name="find_files",
+    title="按通配符找文件",
+    description="用 *.pdf、报表*.xlsx 这类通配符找文件，比按名字搜更精确。",
+    parameters=_params(
+        pattern={"type": "string", "description": "通配符，例如 *.pdf", "_required": True},
+        root={"type": "string", "description": "从哪个目录开始找，默认用户目录"},
+    ),
+    handler=find_files,
+))
+
+_register(Tool(
+    name="grep_files",
+    title="在文件内容里搜",
+    description="在文件内容里搜一段文字，返回命中的文件名和行号。用户问「哪个文件里写过 xxx」时调用。",
+    parameters=_params(
+        pattern={"type": "string", "description": "要找的文字", "_required": True},
+        root={"type": "string", "description": "从哪个目录开始找，默认用户目录"},
+        include={"type": "string", "description": "只看这类文件，默认 *.txt"},
+    ),
+    handler=grep_files,
+))
+
+_register(Tool(
+    name="open_path",
+    title="打开文件或文件夹",
+    description="用系统默认程序打开一个具体的文件或文件夹（不是应用名）。用户说「打开这个文档」时调用。",
+    parameters=_params(
+        path={"type": "string", "description": "文件或文件夹路径", "_required": True},
+    ),
+    handler=open_path,
+))
+
 
 # ─────────────────────── 应用与网页 ───────────────────────
 

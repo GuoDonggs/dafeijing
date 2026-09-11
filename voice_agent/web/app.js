@@ -1,4 +1,4 @@
-/* 语音 Agent 控制台前端 —— 无框架、无构建，只用原生 DOM 与 fetch */
+/* 大肥鲸 控制台前端 —— 无框架、无构建，只用原生 DOM 与 fetch */
 (function () {
   'use strict';
 
@@ -421,7 +421,8 @@
     { key: 'speech.threads', label: '线程数（0 = 按档位自动）', type: 'number' },
     { key: 'tts.enabled', label: '开启语音播报', type: 'bool' },
     { key: 'audio.output_gain', label: '输出音量（拖动实时生效）', type: 'volume' },
-    { key: 'tts.engine', label: '合成引擎（vits 快 / kokoro 好听）', type: 'choice', options: ['vits', 'kokoro'] },
+    { key: 'tts.engine', label: '合成引擎（vits 快；chattts 更自然但要显卡）', type: 'choice',
+      options: ['vits', 'chattts'] },
     { key: 'tts.voice', label: '音色', type: 'voice' },
     { key: 'tts.speed', label: '语速', type: 'number', step: 0.05 },
     { key: 'llm.enabled', label: '启用 LLM 大脑', type: 'bool' },

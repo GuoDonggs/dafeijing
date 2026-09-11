@@ -185,7 +185,7 @@ class MainWindow(QWidget):
 
         # 主题色来自配置：必须在建界面之前设好，图标是按颜色渲染的
         theme.set_accent(self.console.cfg.ui.accent_hex())
-        self.setWindowTitle("语音 Agent")
+        self.setWindowTitle("大肥鲸")
         self.setWindowIcon(app_icon())
         self.setStyleSheet(theme.qss())
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
@@ -215,7 +215,8 @@ class MainWindow(QWidget):
     def _build(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)     # 留白给圆角与描边
-        self.panel = ui.RoundedPanel(self, radius=20, color=theme.BG, border=theme.SEPARATOR)
+        self.panel = ui.RoundedPanel(self, radius=20, color=theme.BG,
+                                     border=theme.PANEL_BORDER)
         outer.addWidget(self.panel)
 
         inner = QVBoxLayout(self.panel)
@@ -295,8 +296,8 @@ class MainWindow(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(theme.qss())
         entries = [
-            ("chat", "对话记录", "Ctrl+R", self.show_chat),
-            ("edit", "文字指令", "Ctrl+K", self.show_command),
+            # 「对话记录」和「文字指令」本来就是同一个页面，合并成一条
+            ("chat", "对话与指令", "Ctrl+K", self.show_chat),
             (None, None, None, None),
             ("tools", "工具", "Ctrl+T", self.show_tools),
             ("skills", "技能", "", self.show_skills),
@@ -322,9 +323,10 @@ class MainWindow(QWidget):
     # ───────────────── 各页面 ─────────────────
 
     def show_chat(self) -> None:
-        self._page_for("chat", pages_mod.ChatPage, "对话记录", 660, 620).show()
+        self._page_for("chat", pages_mod.ChatPage, "对话与指令", 660, 640).show()
 
     def show_command(self) -> None:
+        """兼容旧调用（Ctrl+R 等）：打开的就是对话页。"""
         self.show_chat()
 
     def show_tools(self) -> None:
@@ -379,6 +381,8 @@ class MainWindow(QWidget):
         """
         color = theme.set_accent(value)
         self.setStyleSheet(theme.qss())
+        # 面板描边也带主色：换色时整块窗口一起变，而不是只有按钮变
+        self.panel.set_colors(theme.BG, theme.PANEL_BORDER)
         # 已经建过的页面也刷一遍（设置页就是发信号的那个）。
         # 这里刻意不关窗口：用户点一下色点，设置窗口就自己消失，很突兀。
         for page in self.pages.values():
@@ -518,7 +522,7 @@ class LogDialog(FramelessDialog):
 def run(config_path: Path | None = None, autostart: bool = True) -> int:
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName("语音 Agent")
+    app.setApplicationDisplayName("大肥鲸")
     app.setStyleSheet(theme.qss())
     window = MainWindow(config_path, autostart=autostart)
     window.show()

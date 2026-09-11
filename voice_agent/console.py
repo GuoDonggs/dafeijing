@@ -32,7 +32,13 @@ from .config import (
     ConfigError,
     normalize_keys,
 )
-from .skills import SKILL_DIRS, SkillLoader, skill_template
+from .skills import (
+    PROJECT_TOOL_DIR,
+    SKILL_DIRS,
+    SkillLoader,
+    skill_template,
+    tool_template,
+)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 PROJECT_SKILL_DIR = PROJECT_ROOT / "skills"
@@ -48,8 +54,9 @@ class Console:
         self.host = host
         self.port = port
         self.token = secrets.token_urlsafe(24)
-        # 新建技能写到哪里；测试可以指到临时目录，避免污染真实的 ./skills
+        # 新建技能/工具写到哪里；测试可以指到临时目录，避免污染真实的 ./skills
         self.skill_dir = PROJECT_SKILL_DIR
+        self.tool_dir = PROJECT_TOOL_DIR
         self.logs: deque[dict] = deque(maxlen=LOG_LIMIT)
         self._subscribers: list[queue.Queue] = []
         self._sub_lock = threading.Lock()
@@ -375,21 +382,15 @@ class Console:
     def voices_payload(self) -> dict:
         """当前引擎的音色清单，给界面下拉框用。
 
-        Kokoro 的 0~2 号是英文音色，念中文会发闷发粗，所以列表里只给中文音色，
-        并把「配置里写的那个」和「实际会用的那个」都算出来 —— 免得界面上显示
-        0 号、耳朵里听到的却是 37 号。
+        两个引擎的"音色"含义不一样：vits 是 5 个固定角色音，ChatTTS 是一个
+        随机种子（同一个种子永远是同一个人）。这里统一成 (id, 标签) 给界面。
         """
         cfg = self.cfg
-        engine = (cfg.tts.engine or "vits").strip().lower()
-        if engine not in ("kokoro", "vits"):
-            engine = "vits"
+        engine = voice_table.engine_of(cfg.tts.engine)
         current = voice_table.resolve(engine, cfg.tts.voice) if cfg.tts.voice else None
         note = ""
         if current is None:
             current, note = voice_table.sanitize(engine, cfg.tts.speaker_id)
-        if not voice_table.is_chinese(engine, current):
-            fixed, why = voice_table.sanitize(engine, current)
-            current, note = fixed, why
         return {
             "engine": engine,
             "current": current,
@@ -398,34 +399,52 @@ class Console:
             "note": note,
             "rows": [{"id": sid, "label": label, "name": voice_table.name(engine, sid)}
                      for sid, label in voice_table.catalog(engine)],
+            # ChatTTS 的种子不止下拉框里那几个，用户可以自己填
+            "freeform": engine == "chattts",
         }
 
+    # 试听念的这句话：短一点，能听出音色就够了
+    AUDITION_TEXT = "你好，我是大肥鲸。今天天气不错，有什么可以帮你的吗？"
+
     def audition_voice(self, value: Any) -> dict:
-        """试听一个音色：后台线程里合成并播出来，不卡界面。"""
+        """试听一个音色：后台线程里合成并播出来，不卡界面。
+
+        引擎没启动时，以前这里直接返回「合成引擎还没就绪」——而界面只把它写进
+        运行日志，用户点了「试听」什么都没发生，也没有任何提示。现在按需把模型
+        加载起来，并且把「要等几秒」这件事明确告诉界面。
+        """
         cfg = self.cfg
         engine = (cfg.tts.engine or "vits").strip().lower()
         sid = voice_table.resolve(engine, value)
         if sid is None:
             return {"ok": False, "error": "认不出这个音色：" + str(value)}
+        if not cfg.tts.enabled:
+            return {"ok": False, "error": "语音播报已关闭（tts.enabled 改成 true 再试）"}
         try:
             agent = self.agent or self.ensure_agent()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": "引擎起不来：" + str(exc)[:120]}
-        tts = getattr(agent, "tts", None)
-        if tts is None:
-            return {"ok": False, "error": "合成引擎还没就绪"}
         label = voice_table.label(engine, sid)
+        needs_load = getattr(agent, "tts", None) is None
 
         def work() -> None:
             try:
+                if getattr(agent, "tts", None) is None:
+                    self.log("[试听] 正在加载合成模型……")
+                    agent.load()
+                tts = getattr(agent, "tts", None)
+                if tts is None:
+                    self.log("[试听] 合成模型没起来，看看模型文件齐不齐（doctor）")
+                    return
                 tts.speaker_id = sid
-                tts.speak("你好，我是小爱同学，今天天气不错，有什么可以帮你的吗？")
-            except Exception as exc:  # 试听失败不该影响主流程
-                self.log("[试听] " + label + " 播放失败：" + str(exc)[:120])
+                tts.speak(self.AUDITION_TEXT)
+            except Exception as exc:  # noqa: BLE001 - 试听失败不该影响主流程
+                self.log("[试听] " + label + " 播放失败：" + str(exc)[:160])
 
-        self.log("[试听] " + label)
+        self.log("[试听] " + label + ("（首次要先加载模型，等几秒）" if needs_load else ""))
         threading.Thread(target=work, name="audition-voice", daemon=True).start()
-        return {"ok": True, "id": sid, "voice": label, "engine": engine}
+        return {"ok": True, "id": sid, "voice": label, "engine": engine,
+                "loading": needs_load}
 
     def update_config(self, updates: dict) -> dict:
         """按 a.b.c 的形式改若干项，其余内容原样保留（注释会丢，所以先备份）。"""
@@ -507,10 +526,11 @@ class Console:
     # ───────────────── 技能 ─────────────────
 
     def skill_dirs(self) -> tuple[Path, ...]:
-        """技能搜索目录：默认两个，外加可注入的目标目录（测试用）。"""
+        """技能与自定义工具的搜索目录，外加可注入的目标目录（测试用）。"""
         dirs = list(SKILL_DIRS)
-        if self.skill_dir not in dirs:
-            dirs.append(self.skill_dir)
+        for extra in (self.skill_dir, self.tool_dir):
+            if extra not in dirs:
+                dirs.append(extra)
         return tuple(dirs)
 
     def reload_skills(self, announce: bool = True) -> list:
@@ -536,17 +556,22 @@ class Console:
                      + ("其中 " + str(len(bad)) + " 个有问题" if bad else "全部正常"))
         return self.skills
 
-    def save_skill(self, filename: str, content: str) -> dict:
+    def save_skill(self, filename: str, content: str, kind: str = "skill") -> dict:
+        """保存一个自定义技能 / 工具。
+
+        kind="tool" 写到 tools/ 目录 —— 文件格式、加载方式完全一样，
+        只是界面上归类成「自定义工具」，和内置工具并排站。
+        """
         name = Path(str(filename or "")).name
         if not name.endswith((".yaml", ".yml")):
             name += ".yaml"
-        target = self.skill_dir / name
+        target = (self.tool_dir if str(kind).lower() == "tool" else self.skill_dir) / name
         try:
             data = yaml.safe_load(content) or {}
         except yaml.YAMLError as exc:
             return {"ok": False, "error": "YAML 语法错误：" + str(exc)[:200]}
         if not isinstance(data, dict) or not data.get("name"):
-            return {"ok": False, "error": "技能必须至少有 name 字段"}
+            return {"ok": False, "error": "至少要有一个 name 字段"}
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         self.reload_skills()
@@ -649,6 +674,7 @@ class Console:
                 "description": tool.description,
                 "confirm": tool.confirm,
                 "source": tool.source,
+                # builtin / skill / tool（tools/ 目录里的自定义工具）
                 "builtin": tool.source == "builtin",
                 "params": list((tool.parameters.get("properties") or {}).keys()),
             }
@@ -656,12 +682,14 @@ class Console:
         ]
 
     def skills_payload(self) -> dict:
-        """技能页需要的一份数据：清单 + 目录 + 新建模板。"""
+        """技能 / 自定义工具页需要的数据：清单 + 目录 + 两个新建模板。"""
         return {
             "dirs": [str(d) for d in self.skill_dirs()],
             "project_dir": str(self.skill_dir),
+            "project_tool_dir": str(self.tool_dir),
             "items": [s.as_dict() for s in self.skills],
             "template": skill_template(),
+            "tool_template": tool_template(),
         }
 
     def record_once(self, timeout: float = 12.0) -> dict:
