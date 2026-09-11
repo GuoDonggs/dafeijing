@@ -30,6 +30,8 @@ build/tpl*.jpg
 
 # 跨轮上下文：里面有你说过的话，不入库
 build/conversation.json
+# 提交信息临时文件（git commit -F 用）
+build/commit-msg*.txt
 # 探测/调试留下的音频
 build/_*.wav
 build/_*.mp3
