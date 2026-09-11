@@ -61,6 +61,10 @@ class Console:
         self.skill_dir = PROJECT_SKILL_DIR
         self.tool_dir = PROJECT_TOOL_DIR
         self.logs: deque[dict] = deque(maxlen=LOG_LIMIT)
+        # 每条日志一个单调递增的序号。界面靠它判断"哪几条是新的" ——
+        # 用下标是不行的：deque 一旦写满就开始从头丢，下标会永远追不上，
+        # 日志窗口会静悄悄地不再更新（这正是以前的毛病）。
+        self._log_seq = 0
         self._subscribers: list[queue.Queue] = []
         self._sub_lock = threading.Lock()
         self._engine_lock = threading.RLock()
@@ -114,7 +118,9 @@ class Console:
         return Config.load(self.config_path)
 
     def log(self, message: str) -> None:
-        item = {"type": "log", "ts": time.strftime("%H:%M:%S"), "text": str(message)}
+        self._log_seq += 1
+        item = {"type": "log", "ts": time.strftime("%H:%M:%S"), "text": str(message),
+                "seq": self._log_seq}
         self.logs.append(item)
         self._broadcast(item)
 
@@ -341,6 +347,7 @@ class Console:
             "audio.volume_percent": int(round(audio_io.get_output_gain() * 100)),
             "ui.accent": cfg.ui.accent,
             "ui.accent_hex": cfg.ui.accent_hex(),
+            "ui.show_turn": cfg.ui.show_turn,
             "llm.reasoning_effort": cfg.llm.reasoning_effort,
             "llm.extra_body": "（高级：直接编辑 YAML）" if cfg.llm.extra_body else "",
             # 只读信息：让用户一眼看到最后跑在什么算力、什么引擎上

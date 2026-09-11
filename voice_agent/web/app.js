@@ -433,6 +433,8 @@
     { key: 'llm.api_key', label: 'API Key（留空表示不改动）', type: 'password' },
     { key: 'agent.listen_timeout_ms', label: '唤醒后等待说话时长（毫秒）', type: 'number' },
     { key: 'agent.follow_up_ms', label: '追问窗口（毫秒，0 = 任务做完就回待命）', type: 'number' },
+    { key: 'ui.show_turn', label: '主界面显示本轮问答', type: 'bool' },
+    { key: 'ui.show_stats', label: '主界面底部显示速览四格', type: 'bool' },
     { key: 'agent.subagent_enabled', label: '开启子代理（多步任务丢到后台去做）', type: 'bool' },
     { key: 'agent.subagent_max', label: '同时最多几个子代理', type: 'number' },
     { key: 'agent.subagent_rounds', label: '每个子代理最多做几步', type: 'number' },

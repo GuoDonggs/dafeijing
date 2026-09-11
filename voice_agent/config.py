@@ -274,6 +274,9 @@ class UiCfg:
     accent: str = ""
     # 主界面底部是否显示速览四格（小屏想更清爽可以关掉）
     show_stats: bool = True
+    # 主界面是否显示"本轮问答"（刚才听到的提问 + 助手的回复）。
+    # 开着的好处是不用点开菜单就知道它听成了什么 —— 识别错了能当场发现。
+    show_turn: bool = True
 
     def accent_hex(self) -> str:
         return resolve_accent(self.accent)
@@ -691,6 +694,7 @@ class Config:
             ui=UiCfg(
                 accent=str(_get(raw, "ui.accent", "") or ""),
                 show_stats=bool(_get(raw, "ui.show_stats", True)),
+                show_turn=bool(_get(raw, "ui.show_turn", True)),
             ),
             raw=raw,
         )

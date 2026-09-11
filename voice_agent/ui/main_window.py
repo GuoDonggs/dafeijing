@@ -561,10 +561,21 @@ class LogDialog(FramelessDialog):
         self._timer.start(400)
 
     def _dump(self) -> None:
+        """把还没显示过的日志追加进去。
+
+        按**序号**而不是下标来算"新的"：日志缓冲区是个 deque(maxlen=600)，
+        写满之后从头丢，长度永远是 600 —— 用下标的话 _seen 会一直等于 600，
+        从此再也捞不到新内容，日志窗口看起来就像"卡住了"。
+        """
         logs = list(self.console.logs)
-        for item in logs[self._seen:]:
+        if not logs:
+            return
+        new = [item for item in logs if int(item.get("seq") or 0) > self._seen]
+        if not new:
+            return
+        for item in new:
             self.view.appendPlainText(str(item.get("text", "")))
-        self._seen = len(logs)
+        self._seen = int(new[-1].get("seq") or self._seen)
 
 
 def run(config_path: Path | None = None, autostart: bool = True) -> int:

@@ -50,6 +50,12 @@ def scroll_page() -> tuple[QScrollArea, QVBoxLayout]:
     return area, layout
 
 
+def _clip(text: str, limit: int) -> str:
+    """截断成一眼能看完的一小段（主面板不是阅读器）。"""
+    value = " ".join(str(text or "").split())
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
 def page_header(title: str, subtitle: str = "") -> QWidget:
     box = QWidget()
     layout = QVBoxLayout(box)
@@ -132,7 +138,27 @@ class HomePage(Page):
         layout.addSpacing(6)
         layout.addWidget(self.hint_label)
 
-        layout.addSpacing(22)
+        # 本轮问答：刚才听成了什么、答了什么。
+        # 放在主界面而不是只藏在菜单里 —— 识别错的时候，用户第一眼就能看出来
+        # （"我说的是关灯，它听成开灯了"），不用点开对话记录去比对。
+        self.turn_card = QWidget()
+        self.turn_card.setObjectName("TurnCard")
+        turn_box = QVBoxLayout(self.turn_card)
+        turn_box.setContentsMargins(12, 10, 12, 10)
+        turn_box.setSpacing(4)
+        self.turn_heard = QLabel()
+        self.turn_heard.setObjectName("TurnHeard")
+        self.turn_heard.setWordWrap(True)
+        self.turn_reply = QLabel()
+        self.turn_reply.setObjectName("TurnReply")
+        self.turn_reply.setWordWrap(True)
+        turn_box.addWidget(self.turn_heard)
+        turn_box.addWidget(self.turn_reply)
+        self.turn_card.setVisible(False)
+        layout.addSpacing(14)
+        layout.addWidget(self.turn_card)
+
+        layout.addSpacing(18)
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         buttons.addStretch(1)
@@ -199,6 +225,21 @@ class HomePage(Page):
         self.btn_start.setEnabled(not running and not starting)
         self.btn_stop.setEnabled(running)
         self.btn_cancel.setEnabled(running)
+
+        # 本轮问答：可以在设置里关掉（想要"只有一个圆球"的极简观感时）
+        show_turn = bool(getattr(self.console.cfg.ui, "show_turn", True))
+        heard = str(status.get("last_heard") or "").strip()
+        reply = str(status.get("last_reply") or "").strip()
+        if show_turn and (heard or reply):
+            # 主面板高度是固定的，太长的回复会把按钮挤出屏幕 —— 截断，
+            # 想看全文去「对话与指令」页
+            self.turn_heard.setText("我：" + _clip(heard, 64) if heard else "")
+            self.turn_heard.setVisible(bool(heard))
+            self.turn_reply.setText("大肥鲸：" + _clip(reply, 140) if reply else "")
+            self.turn_reply.setVisible(bool(reply))
+            self.turn_card.setVisible(True)
+        else:
+            self.turn_card.setVisible(False)
 
         # 底部速览可以在设置里关掉，小屏或想要更清爽时用
         show_stats = bool(getattr(self.console.cfg.ui, "show_stats", True))
@@ -291,6 +332,16 @@ class ChatPage(Page):
         self._turns_text: list = []
         self._rendered = 0
         self._last_key = ""
+        # 「跟着新消息走到底部」是一个**用户意图**，不是每次刷新都做的事：
+        # 用户滚上去看历史时不能把他拽回来，而自己发消息时又必须跟到底。
+        self._stick = True
+        self._settling = False
+        bar = self.area.verticalScrollBar()
+        # 关键：新气泡插进来之后，可滚动范围是**布局跑完**才更新的。
+        # 在 on_tick 里直接 setValue(bar.maximum()) 拿到的还是插之前的旧范围，
+        # 于是每次刷新都跳回最顶上 —— 这正是"每次都要手动滚到底"的原因。
+        bar.rangeChanged.connect(self._on_range_changed)
+        bar.valueChanged.connect(self._on_scrolled)
 
     # ── 发送 ──
     def send(self) -> None:
@@ -298,6 +349,8 @@ class ChatPage(Page):
         if not text:
             return
         self.entry.clear()
+        # 自己发出去的消息当然要看到：即使刚才在翻历史，也跟到底部
+        self._stick = True
         agent = self.console.ensure_agent()
         if not agent.running:
             from ..tools import CANCEL_REPLY
@@ -354,13 +407,32 @@ class ChatPage(Page):
             self._turns_text.clear()
             self._rendered = 0
             self.placeholder.setVisible(True)
+        # 先把"要不要跟到底"定下来再插入：插入之后范围会变，
+        # 那时候再判断就已经不是用户当初的位置了
+        stick = self._at_bottom() or not self._bubbles
         for turn in turns[self._rendered:]:
             self._append(turn)
             self._turns_text.append(turn)
         self._rendered = len(turns)
         self._last_key = key
+        self._stick = stick
+
+    def _at_bottom(self, slack: int = 48) -> bool:
+        """现在是不是贴着底部（留一点余量，免得差几像素就判定"用户滚上去了"）。"""
         bar = self.area.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        return bar.maximum() - bar.value() <= slack
+
+    def _on_scrolled(self, _value: int) -> None:
+        """用户自己拖动滚动条 → 他要看历史，别再把他拽回底部。"""
+        if not self._settling:
+            self._stick = self._at_bottom()
+
+    def _on_range_changed(self, _minimum: int, maximum: int) -> None:
+        """内容变高（范围变大）时，如果该跟着走就补一次到底。"""
+        if self._stick:
+            self._settling = True
+            self.area.verticalScrollBar().setValue(maximum)
+            self._settling = False
 
     @staticmethod
     def _key_of(turn: dict) -> str:
@@ -750,6 +822,7 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
     ("外观", [
         ("ui.accent", "主题色", "换主色，整个界面跟着变；不用重启", "accent", None),
         ("ui.show_stats", "底部速览", "主界面底部的唤醒 / 算力 / 合成 / 声纹四格", "bool", None),
+        ("ui.show_turn", "显示本轮问答", "主界面上显示刚才听到的提问和它的回复", "bool", None),
     ]),
     ("子代理", [
         ("agent.subagent_enabled", "启用子代理",

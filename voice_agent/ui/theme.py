@@ -198,6 +198,9 @@ def qss() -> str:
     #ListRow {{ border-radius: {RADIUS_CONTROL}px; }}
     #ListRow:hover {{ background: {ROW_HOVER}; }}
     #SectionBar {{ background: {ACCENT}; border-radius: 2px; }}
+    #TurnCard {{ background: {CARD}; border: 1px solid {CARD_BORDER}; border-radius: 12px; }}
+    #TurnHeard {{ color: {MUTED}; font-size: 12px; }}
+    #TurnReply {{ color: {TEXT}; font-size: 13px; }}
     #Badge {{ background: {BADGE_BG}; border-radius: 8px; }}
     #Pill {{ background: {PILL_BG}; border-radius: 9px; padding: 2px 10px; font-size: 11px; }}
     #CardTitle {{ color: {TEXT}; font-size: 14px; font-weight: 600; }}

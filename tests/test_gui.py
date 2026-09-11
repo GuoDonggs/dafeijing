@@ -72,6 +72,7 @@ def fake_snapshot(config: Path, **overrides) -> dict:
         "follow_up_ms": 0, "provider_text": "CPU（自动）", "tts_engine": "vits",
         "voiceprint": {"enabled": True, "ready": True, "text": "已开启，阈值 0.55",
                        "threshold": 0.55, "accepted": 1, "rejected": 0, "last_score": 0.7},
+        "last_heard": "现在几点了", "last_reply": "现在是十点整",
         "transcript": [
             {"role": "user", "text": "现在几点了", "ts": "10:00:01"},
             {"role": "assistant", "text": "现在是十点整", "ts": "10:00:02"},
@@ -166,6 +167,44 @@ def window_smoke() -> None:
                   home.info_labels["声纹"].text())
             check("启动按钮变灰", not home.btn_start.isEnabled())
 
+            # 本轮问答：听成了什么、答了什么，直接摆主面板上（识别错了当场就能发现）
+            check("主界面显示本轮提问", "现在几点了" in home.turn_heard.text(),
+                  home.turn_heard.text())
+            check("主界面显示本轮回复", "十点整" in home.turn_reply.text(),
+                  home.turn_reply.text())
+            check("问答卡片默认是显示的", not home.turn_card.isHidden())
+            from voice_agent.ui.pages import _clip
+
+            check("太长的内容会截断成一眼能看完的一段",
+                  len(_clip("啊" * 500, 140)) == 140 and _clip("短的", 140) == "短的")
+
+            window.console.cfg.ui.show_turn = False
+            window._tick()
+            pump(app, 150)
+            check("设置里关掉之后问答卡片收起", home.turn_card.isHidden())
+            window.console.cfg.ui.show_turn = True
+            window._tick()
+            pump(app, 150)
+            check("再打开又显示出来", not home.turn_card.isHidden())
+
+            # 主面板高度是死的：很长的一轮问答不能把按钮挤出屏幕
+            window.console.snapshot = lambda: fake_snapshot(
+                config,
+                last_heard="帮我看看 C 盘还剩多少空间，顺便看看内存占用高不高",
+                last_reply="C 盘还剩 42 G，内存用了 18 G，都还宽裕。" * 6)
+            window._tick()
+            pump(app, 250)
+            button_bottom = home.btn_start.mapTo(
+                window, home.btn_start.rect().bottomLeft()).y()
+            check("很长的一轮问答不会把按钮挤出面板",
+                  button_bottom < window.height() and not home.turn_reply.text() == "",
+                  str(button_bottom) + " < " + str(window.height()))
+            check("过长的回复被截断", home.turn_reply.text().endswith("…"),
+                  home.turn_reply.text()[-12:])
+            window.console.snapshot = live_snapshot   # type: ignore[assignment]
+            window._tick()
+            pump(app, 150)
+
             # 菜单里的页面：按需创建，装进独立窗口
             dialog = window._page_for("chat", __import__(
                 "voice_agent.ui.pages", fromlist=["ChatPage"]).ChatPage, "对话记录", 660, 620)
@@ -183,7 +222,78 @@ def window_smoke() -> None:
                     __import__("PyQt6.QtWidgets", fromlist=["QLabel"]).QLabel)[0].text())
             check("对话窗口也是无边框圆角",
                   bool(dialog.windowFlags() & Qt.WindowType.FramelessWindowHint))
+
+            # 滚动条：新消息要自动跟到底部，但用户翻历史时不许把他拽回来。
+            # 这个 bug 的成因很隐蔽 —— 插入新气泡之后，可滚动范围要等布局跑完才
+            # 更新，在 on_tick 里直接 setValue(maximum()) 拿到的还是旧范围（0），
+            # 于是每次都跳到最顶上。
+            page = dialog.page
+            # 必须真的把窗口显示出来：QScrollArea 的可滚动范围是布局跑完才算出来的，
+            # 不显示的话 maximum() 恒为 0，这个测试会变成"永远通过"
+            dialog.show()
+            pump(app, 250)
+            # 而且内容要走**同一条数据源**：页面自己每 300ms 会按 console.snapshot()
+            # 重画一次，只往 on_tick 里塞几十条、不同时改快照的话，
+            # 下一次 tick 就会按"没有对话"把它全部清掉。
+            many = [{"role": "user" if i % 2 else "assistant",
+                     "text": "第 " + str(i) + " 条消息，故意写长一点，好把时间线撑到需要滚动。",
+                     "ts": "12:00:" + str(i).zfill(2)} for i in range(40)]
+
+            def show_turns(turns):
+                window.console.snapshot = lambda: fake_snapshot(config, transcript=turns)
+
+            show_turns(many)
+            pump(app, 500)
+            bar = page.area.verticalScrollBar()
+            check("消息够多时时间线可以滚动", bar.maximum() > 0, "maximum=" + str(bar.maximum()))
+            check("新增消息后自动滚到底部", bar.value() == bar.maximum(),
+                  str(bar.value()) + "/" + str(bar.maximum()))
+
+            more = many + [{"role": "assistant", "text": "又追加了一条新消息。", "ts": "12:01:00"}]
+            show_turns(more)
+            pump(app, 500)
+            check("继续追加仍然停在底部", bar.value() == bar.maximum(),
+                  str(bar.value()) + "/" + str(bar.maximum()))
+
+            bar.setValue(0)                       # 用户手动往上翻，看历史
+            pump(app, 60)
+            newest = more + [{"role": "user", "text": "翻历史时来的新消息。", "ts": "12:02:00"}]
+            show_turns(newest)
+            pump(app, 500)
+            check("用户翻历史时新消息不抢滚动条", bar.value() < bar.maximum(),
+                  str(bar.value()) + "/" + str(bar.maximum()))
+
+            # 自己发出去的消息当然要看到：即使刚才在翻历史，也跟到底部
+            mine = newest + [{"role": "user", "text": "我自己发一条", "ts": "12:03:00"}]
+            show_turns(mine)
+            page.entry.setText("我自己发一条")
+            page.send()
+            pump(app, 500)
+            check("自己发消息后跟到底部", bar.value() == bar.maximum(),
+                  str(bar.value()) + "/" + str(bar.maximum()))
+            # 还回原来的假快照：后面的用例要靠它拿 restart_needed 那两项
+            window.console.snapshot = live_snapshot   # type: ignore[assignment]
             dialog.deleteLater()
+
+            # 运行日志窗口：控制台的日志缓冲是 deque(maxlen=600)，写满之后从头丢。
+            # 判断"哪些是新的"如果按下标算，_seen 会永远等于 600，
+            # 从此一条都捞不到 —— 表现就是日志窗口看着像卡死了。
+            from voice_agent.ui.main_window import LogDialog
+
+            logs_window = LogDialog(window.console, window)
+            window.console.log("第一条测试日志")
+            logs_window._dump()
+            check("日志窗口能显示新日志",
+                  "第一条测试日志" in logs_window.view.toPlainText())
+            for index in range(700):
+                window.console.log("灌日志 " + str(index))
+            logs_window._dump()
+            window.console.log("满仓之后的新日志")
+            logs_window._dump()
+            last_line = logs_window.view.toPlainText().strip().splitlines()[-1]
+            check("日志缓冲写满之后仍然继续追加",
+                  last_line.endswith("满仓之后的新日志"), last_line[:40])
+            logs_window.deleteLater()
 
             tools_dialog = window._page_for("tools", __import__(
                 "voice_agent.ui.pages", fromlist=["ToolsPage"]).ToolsPage, "工具", 760, 660)
