@@ -29,6 +29,12 @@ from typing import Any, Callable
 from ._shared import TURN, reset_turn
 from .apps import open_app, open_url, web_search
 from .files import list_files, read_file, recall, remember, search_files
+from .selfctl import (
+    new_session_tool,
+    quit_self_tool,
+    restart_self_tool,
+    set_self_handler,
+)
 from .subagents import (
     cancel_subagent_tool,
     set_subagent_handler,
@@ -50,6 +56,13 @@ from .vision import (
     mouse_scroll_tool,
     resize_image_tool,
     set_vision_handler,
+    set_vision_max_side,
+)
+from .watches import (
+    list_watches_tool,
+    set_watch_handler,
+    start_watch_tool,
+    stop_watch_tool,
 )
 from .windows import (
     clipboard,
@@ -342,6 +355,12 @@ _BUILTIN_TITLES = {
     "spawn_subagent": "派子代理",
     "subagent_status": "子代理进度",
     "cancel_subagent": "取消子代理",
+    "new_session": "开新会话",
+    "restart_self": "重启程序",
+    "quit_self": "退出程序",
+    "start_watch": "盯着看",
+    "list_watches": "看进度",
+    "stop_watch": "别盯了",
 }
 SKILL_INFOS: list = []
 _SKILLS_LOADED = False

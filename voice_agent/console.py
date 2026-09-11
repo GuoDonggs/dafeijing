@@ -60,6 +60,9 @@ class Console:
         # 新建技能/工具写到哪里；测试可以指到临时目录，避免污染真实的 ./skills
         self.skill_dir = PROJECT_SKILL_DIR
         self.tool_dir = PROJECT_TOOL_DIR
+        #: 界面注册的「重启 / 退出程序」实现（PyQt 窗口接管；
+        #: 命令行和网页版没有，就走 agent 的默认路径）
+        self.app_hook = None
         self.logs: deque[dict] = deque(maxlen=LOG_LIMIT)
         # 每条日志一个单调递增的序号。界面靠它判断"哪几条是新的" ——
         # 用下标是不行的：deque 一旦写满就开始从头丢，下标会永远追不上，
@@ -161,7 +164,7 @@ class Console:
                 if self.agent is None:
                     with self._engine_lock:
                         if self.agent is None:
-                            self.agent = VoiceAgent(self.cfg, log=self.log)
+                            self.agent = self._new_agent()
                 self.log("[ui] 正在加载语音模型……")
                 report = self.agent.load()
                 if token != self._start_token:
@@ -246,8 +249,18 @@ class Console:
         """
         with self._engine_lock:
             if self.agent is None:
-                self.agent = VoiceAgent(self.cfg, log=self.log)
+                self.agent = self._new_agent()
             return self.agent
+
+    def _new_agent(self) -> VoiceAgent:
+        """造一个引擎并接上界面注册的回调。
+
+        「重启 / 退出程序」这类操作最后要落到界面上（它才知道怎么关窗口、
+        怎么把自己拉起来），引擎只负责把请求转发过来。
+        """
+        agent = VoiceAgent(self.cfg, log=self.log)
+        agent.app_hook = self.app_hook
+        return agent
 
     # ───────────────── 配置 ─────────────────
 
@@ -349,6 +362,7 @@ class Console:
             "ui.accent_hex": cfg.ui.accent_hex(),
             "ui.show_turn": cfg.ui.show_turn,
             "llm.reasoning_effort": cfg.llm.reasoning_effort,
+            "llm.vision_max_side": cfg.llm.vision_max_side,
             "llm.extra_body": "（高级：直接编辑 YAML）" if cfg.llm.extra_body else "",
             # 只读信息：让用户一眼看到最后跑在什么算力、什么引擎上
             "speech.provider_text": cfg.speech.provider_text,
@@ -549,6 +563,16 @@ class Console:
             return {"ok": False, "error": str(exc)}
         self.cfg.update_from(fresh)
         self._apply_voice_live()
+        # 看图分辨率是"下次截图时读一次"，改完立刻推给工具层
+        tools.set_vision_max_side(self.cfg.llm.vision_max_side)
+        # 动了 llm.*（多模型档案、密钥、地址）就把客户端重建，不然要重启才生效
+        if any(str(key).startswith("llm.") for key in (keys or [])):
+            brain = getattr(self.agent, "brain", None)
+            if brain is not None:
+                try:
+                    brain.reload_clients()
+                except Exception as exc:  # noqa: BLE001 - 换模型失败不该影响保存
+                    self.log("[ui] 重建模型客户端失败：" + str(exc)[:100])
         audio_io.set_output_gain(self.cfg.audio.output_gain)
 
         # 只把「真的需要重启」的记下来；引擎没在跑就不用提示（下次启动自然是新的）
@@ -810,6 +834,7 @@ class Console:
             "listen_timeout_ms": int(self.cfg.agent.listen_timeout_ms),
             "subagents": {"enabled": bool(self.cfg.agent.subagent_enabled),
                           "total": 0, "running": 0, "text": ""},
+            "watches": {"total": 0, "running": 0, "text": ""},
         }
         good = sum(1 for s in self.skills if s.ok)
         return {

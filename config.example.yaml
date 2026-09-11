@@ -120,6 +120,19 @@ llm:
   api_key: ""
   temperature: 0.3
   max_rounds: 6             # 一次指令最多几轮「思考-调工具」；写 0 = 不限制
+  # 看图（look_at_screen）送给视觉模型的截图最长边。4K 屏一张截图几百万像素，
+  # 又慢又贵而识别效果几乎一样；但界面字小的时候缩太狠会看不清。
+  vision_max_side: 1280
+  # 多模型：routes 决定"哪个用途用哪个档案"，profiles 定义档案。
+  # 设置 → 大脑（LLM）→「配置多模型…」里有图形界面，不用手写这一段。
+  # routes:
+  #   chat: default          # 主对话
+  #   judge: fast            # 判断"确认/取消"，要快
+  #   vision: vlm            # 看图，必须支持图片输入
+  #   subagent: default      # 后台子代理
+  # profiles:
+  #   fast: {model: deepseek-chat, reasoning_effort: off, temperature: 0}
+  #   vlm:  {base_url: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-VL-32B-Instruct", vision: true}
   timeout_s: 30
 
 # ── 交互 ───────────────────────────────────────────────────────────────────

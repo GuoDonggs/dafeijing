@@ -78,7 +78,13 @@ def _send_input(*inputs: "_INPUT") -> None:
     if _user32 is None:
         return
     array = (_INPUT * len(inputs))(*inputs)
-    _user32.SendInput(len(inputs), array, ctypes.sizeof(_INPUT))
+    sent = _user32.SendInput(len(inputs), array, ctypes.sizeof(_INPUT))
+    # 必须检查返回值。SendInput 失败只返回 0（例如结构体大小不对、目标窗口
+    # 权限更高被 UIPI 拦下），静默忽略的话用户只会看到"打了字但屏幕上没有"。
+    if sent != len(inputs):
+        raise RuntimeError("系统拒绝了这次键盘事件（SendInput=" + str(sent) + "/"
+                           + str(len(inputs)) + "，错误码 "
+                           + str(ctypes.get_last_error()) + "）")
 
 
 def _key_input(vk: int, up: bool = False) -> "_INPUT":
@@ -472,8 +478,9 @@ class _KEYBDINPUT(ctypes.Structure):
 
 
 class _INPUTUNION(ctypes.Union):
-    _fields_ = (("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT),
-                ("padding", ctypes.c_byte * 40))
+    # 没有 padding 成员：_INPUT 必须是正好 40 字节（64 位），否则 SendInput
+    # 会整条拒绝并返回 0 —— 不抛异常、不报错，表现就是"打字、快捷键都没反应"。
+    _fields_ = (("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT))
 
 
 class _INPUT(ctypes.Structure):

@@ -29,7 +29,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSettings, Qt, QTimer
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QPoint,
+    QPropertyAnimation,
+    QSettings,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -43,6 +51,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..agent import VoiceAgent
 from ..console import Console
 from . import components as ui
 from . import pages as pages_mod
@@ -196,6 +205,9 @@ def _paint_close(button: QWidget):
 class MainWindow(QWidget):
     """竖长方形的主面板。"""
 
+    #: 助手要求「重启 / 退出程序本身」时发出（带着 "restart" / "quit"）
+    self_control_requested = pyqtSignal(str)
+
     def __init__(self, config_path: Path | None = None, autostart: bool = True) -> None:
         super().__init__()
         self.console = Console(config_path)
@@ -218,6 +230,11 @@ class MainWindow(QWidget):
 
         self._build()
         self._bind_shortcuts()
+
+        # 助手要「重启 / 退出程序本身」时，请求会从这里转回界面线程 ——
+        # 工具是在工作线程里跑的，直接动 Qt 的窗口会崩。
+        self.self_control_requested.connect(self._on_self_control)
+        self.console.app_hook = self.self_control_requested.emit
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -311,6 +328,45 @@ class MainWindow(QWidget):
         self._dialogs[key] = dialog
         return dialog
 
+    # ───────────────── 控制程序自己 ─────────────────
+
+    def _on_self_control(self, action: str) -> None:
+        """语音让助手重启 / 退出（信号从工作线程发过来，这里是界面线程）。"""
+        what = str(action or "").strip().lower()
+        if what == "restart":
+            self.console.log("[ui] 收到重启指令，正在重新启动……")
+            # 先松开麦克风再拉新进程：反过来的话新实例起来时设备还被占着，
+            # 用户看到的是"重启完就不听使唤了"
+            self.console.stop_engine()
+            if not self.relaunch_program():
+                self.console.log("[ui] 重启失败，改为直接退出")
+        else:
+            self.console.log("[ui] 收到退出指令，正在关闭……")
+        # 留一点时间把最后那句话念完、把日志落下去
+        QTimer.singleShot(700, self._quit_now)
+
+    def _quit_now(self) -> None:
+        self._save_position()
+        self.console.stop_engine()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+        else:
+            sys.exit(0)
+
+    @staticmethod
+    def relaunch_program() -> bool:
+        """重新拉起自己（新进程），旧进程随后退出。"""
+        from PyQt6.QtCore import QProcess
+
+        command = VoiceAgent.relaunch_command()
+        try:
+            started, _pid = QProcess.startDetached(command[0], command[1:])
+        except Exception as exc:  # noqa: BLE001
+            print("[ui] 重启失败：" + str(exc), file=sys.stderr)
+            return False
+        return bool(started)
+
     def _bind_shortcuts(self) -> None:
         pairs = [
             ("Ctrl+1", self.start_engine),
@@ -334,6 +390,7 @@ class MainWindow(QWidget):
         entries = [
             # 「对话记录」和「文字指令」本来就是同一个页面，合并成一条
             ("chat", "对话与指令", "Ctrl+K", self.show_chat),
+            ("plus", "开始新会话", "", self.new_session),
             (None, None, None, None),
             ("tools", "工具", "Ctrl+T", self.show_tools),
             ("skills", "技能", "", self.show_skills),
@@ -364,6 +421,13 @@ class MainWindow(QWidget):
     def show_command(self) -> None:
         """兼容旧调用（Ctrl+R 等）：打开的就是对话页。"""
         self.show_chat()
+
+    def new_session(self) -> None:
+        """开一个新会话：清掉上下文，界面上的历史留着。"""
+        agent = self.console.ensure_agent()
+        message = agent.new_session()
+        self.console.log("[ui] " + message)
+        self._tick()          # 立刻刷一次主面板：问答卡片会清空，用户看得出换了会话
 
     def show_tools(self) -> None:
         self._page_for("tools", pages_mod.ToolsPage, "工具", 760, 660).show()

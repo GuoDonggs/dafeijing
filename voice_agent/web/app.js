@@ -430,6 +430,7 @@
     { key: 'llm.model', label: '模型名', type: 'text' },
     { key: 'llm.reasoning_effort', label: '思考程度（越深越慢）', type: 'choice',
       options: ['off', 'low', 'medium', 'high', 'max'] },
+    { key: 'llm.vision_max_side', label: '看图分辨率（截图最长边，像素）', type: 'number' },
     { key: 'llm.api_key', label: 'API Key（留空表示不改动）', type: 'password' },
     { key: 'agent.listen_timeout_ms', label: '唤醒后等待说话时长（毫秒）', type: 'number' },
     { key: 'agent.follow_up_ms', label: '追问窗口（毫秒，0 = 任务做完就回待命）', type: 'number' },

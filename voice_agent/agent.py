@@ -17,8 +17,10 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import random
+import sys
 import threading
 import time
 from collections import deque
@@ -28,6 +30,7 @@ import numpy as np
 
 from . import audio as audio_io
 from . import rules
+from . import tools
 from .brain import Brain
 from .config import Config
 from .speaker import Voiceprint
@@ -54,9 +57,18 @@ class VoiceAgent:
         # 抢在用户正听的回答前面说话，听起来就是助手在自言自语。
         # 所以回调只负责入队，真正的播报交给采集循环择机做。
         self.brain.subagents.on_done = self._on_subagent_done
+        self.brain.watcher.on_hit = self._on_watch_hit
         self._announce: deque = deque(maxlen=5)
         self._announce_lock = threading.Lock()
         self._announce_busy = False
+
+        # 控制「程序自己」：开新会话 / 重启 / 退出。
+        # 界面（PyQt）可以注册一个 app_hook 接管重启和退出 —— 它才知道怎么
+        # 优雅地关掉窗口再把自己拉起来；没注册（命令行、网页版）就走默认路径。
+        self.app_hook: Callable[[str], None] | None = None
+        self.self_action = ""
+        self._self_guard = threading.Event()
+        tools.set_self_handler(self.self_control)
 
         self.wake: WakeWord | None = None
         self.vad: VadSegmenter | None = None
@@ -265,8 +277,9 @@ class VoiceAgent:
             "follow_up_ms": int(self.cfg.agent.follow_up_ms),
             "follow_up_mode": str(self.cfg.agent.follow_up_mode),
             "listen_timeout_ms": int(self.cfg.agent.listen_timeout_ms),
-            # 后台子代理：界面拿它显示「派出去的活还在跑」
+            # 后台子代理 / 定时轮询：界面拿它显示「派出去的活还在跑」
             "subagents": self.brain.subagents.snapshot(),
+            "watches": self.brain.watcher.snapshot(),
             "turns": self.turns,
             "mic_level": round(float(self.mic.level), 4) if self.mic else 0.0,
             "asr_rtf": round(self.asr.rtf, 4) if self.asr else 0.0,
@@ -379,6 +392,85 @@ class VoiceAgent:
             self._note("system", "（没听到你说话）")
             self._cue("timeout")
 
+    # ───────────────────── 控制程序自己 ─────────────────────
+
+    def self_control(self, action: str, reason: str = "") -> str:
+        """开新会话 / 重启 / 退出（工具层调过来的）。
+
+        重启和退出都要**先把话说完**：回复还在合成、播放，立刻 os._exit 就会
+        被听成"它答应了然后就没了"。所以这类动作延迟一秒多再执行。
+        """
+        what = str(action or "").strip().lower()
+        if what in ("new_session", "new", "reset"):
+            return self.new_session(reason)
+        if what in ("restart", "reboot"):
+            self.schedule_self_action("restart")
+            return "好，我这就重启，稍等一下。"
+        if what in ("quit", "exit", "close"):
+            self.schedule_self_action("quit")
+            return "好，我先退下了，需要的时候再叫我。"
+        return "不认识这个操作：" + str(action)
+
+    def new_session(self, reason: str = "") -> str:
+        """开一个新会话：清掉大脑的上下文（界面上的记录留着，那是历史）。"""
+        self.brain.reset()
+        self._note("system", "—— 新会话 ——" + (("（" + str(reason) + "）") if reason else ""))
+        self.last_heard = ""
+        self.last_reply = ""
+        self.log("[agent] 已开启新会话，上下文清空")
+        return "好，之前的先放一边，我们从头说。"
+
+    def schedule_self_action(self, action: str, delay: float = 1.8) -> None:
+        """安排一次对自己的操作；重复请求只认第一次。"""
+        if self._self_guard.is_set():
+            return
+        self._self_guard.set()
+
+        def later() -> None:
+            time.sleep(max(0.0, float(delay)))
+            self.self_action = action
+            self.log("[agent] 执行自身操作：" + action)
+            hook = self.app_hook
+            try:
+                if hook is not None:
+                    # 界面自己会重启 / 退出，我们只要停下麦克风
+                    self.stop()
+                    hook(action)
+                    return
+                if action == "restart":
+                    self._relaunch()
+                self.stop()
+            except Exception as exc:  # noqa: BLE001 - 退不干净也得退
+                self.log("[agent] 自身操作失败：" + str(exc)[:80])
+                self.stop()
+            finally:
+                if hook is None:
+                    # 命令行 / 网页版：没有界面可以接管，直接把进程结束掉。
+                    # 用 os._exit 是有意的 —— 这会儿可能在别的线程里，
+                    # 走正常退出路径会卡在非守护线程上，用户看到的是"它没退"。
+                    os._exit(0)
+
+        threading.Thread(target=later, name="voice-agent-selfctl", daemon=True).start()
+
+    @staticmethod
+    def _relaunch() -> None:
+        """把自己重新拉起来（命令行版）。"""
+        import subprocess
+
+        command = VoiceAgent.relaunch_command()
+        try:
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x00000008
+            subprocess.Popen(command, creationflags=flags, close_fds=True)
+        except Exception as exc:  # noqa: BLE001
+            print("[agent] 重启失败：" + str(exc), file=sys.stderr)
+
+    @staticmethod
+    def relaunch_command() -> list[str]:
+        """重新启动本程序的命令行（打包版和源码版不一样）。"""
+        if getattr(sys, "frozen", False):
+            return [sys.executable, *sys.argv[1:]]
+        return [sys.executable, "-m", "voice_agent", *(sys.argv[1:] or ["ui"])]
+
     # ───────────────────── 子代理汇报 ─────────────────────
 
     def _on_subagent_done(self, item) -> None:
@@ -400,6 +492,19 @@ class VoiceAgent:
             if len(self._announce) == self._announce.maxlen:
                 # 队列满说明积压了好几条没播 —— 说出来，别让它静悄悄地丢
                 self.log("[subagent] 待播汇报积压，最早的一条不再单独播报")
+            self._announce.append((name, text))
+
+    def _on_watch_hit(self, item) -> None:
+        """轮询命中（跑在轮询线程里）：同样只入队，由主循环择机播报。"""
+        name = item.id
+        text = item.last or "条件成立了"
+        self._note("assistant", "【" + name + "】" + text)
+        if not self.cfg.agent.subagent_announce:
+            self.log("[watch] 命中（配置为不播报）：" + text[:40])
+            return
+        with self._announce_lock:
+            if len(self._announce) == self._announce.maxlen:
+                self.log("[watch] 待播汇报积压，最早的一条不再单独播报")
             self._announce.append((name, text))
 
     def _check_announce(self) -> None:
@@ -426,8 +531,8 @@ class VoiceAgent:
 
     def _announce_worker(self, name: str, text: str) -> None:
         try:
-            self.log("[agent] 汇报子代理结果：" + text[:40])
-            self._speak("「" + name + "」那边有结果了：" + text, kind="notice")
+            self.log("[agent] 汇报后台结果：" + text[:40])
+            self._speak(name + "：" + text, kind="notice")
         except Exception as exc:  # noqa: BLE001 - 汇报失败不该影响主循环
             self.log("[agent] 子代理汇报播报失败：" + str(exc)[:80])
         finally:

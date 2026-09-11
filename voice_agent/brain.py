@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import platform
 import threading
 import time
@@ -32,6 +33,7 @@ from . import tools
 from .config import PROJECT_ROOT, Config
 from .llm import Llm, LlmError
 from .subagent import SubAgentManager
+from .watcher import Watcher
 
 __all__ = ["Brain"]
 
@@ -81,11 +83,16 @@ class Brain:
         self._load_context()
 
         tools.set_vision_handler(self._answer_with_vision)
+        tools.set_vision_max_side(getattr(self.cfg.llm, "vision_max_side", 1280))
         # 子代理：把「要跑好几步、中间结果又长又吵」的事丢到后台去做。
         # 放在这里而不是 agent 里，是因为它和「看图」一样属于大脑的能力，
         # 通过 tools.set_subagent_handler 注册后，模型才能调用 spawn_subagent。
         self.subagents = SubAgentManager(cfg, log=log)
         tools.set_subagent_handler(self.subagents)
+        # 定时轮询：盯着某件事，条件成立就汇报。判定用便宜的那个模型，
+        # 每次判定都是一次额外的调用，"每 3 秒看一眼"可经不起用主模型判。
+        self.watcher = Watcher(cfg, log=log, judge=self.judge)
+        tools.set_watch_handler(self.watcher)
         self._clients["chat"] = self._build_client("chat")
         self.llm = self._clients["chat"]
 
@@ -101,6 +108,17 @@ class Brain:
         except LlmError as exc:
             self.last_error = str(exc)
             return None
+
+    def reload_clients(self) -> None:
+        """配置换了（多模型档案 / 密钥 / 地址）就把客户端丢掉重建。
+
+        不重建的话，界面里刚保存的新模型要等下次启动才生效 ——
+        用户会以为"设了没用"。
+        """
+        self._clients.clear()
+        self._prompt_cache = None
+        self._clients["chat"] = self._build_client("chat")
+        self.llm = self._clients["chat"]
 
     def _client(self, purpose: str) -> Llm | None:
         """取某个用途的客户端；没配就回落到主对话模型，再不行返回 None。
@@ -229,7 +247,8 @@ class Brain:
         return content.startswith("是") or content.lower().startswith("yes")
 
     # -- 看图 -------------------------------------------------------------
-    def _answer_with_vision(self, image_path: str, question: str) -> str:
+    def _answer_with_vision(self, image_path: str, question: str,
+                            meta: dict | None = None) -> str:
         """把一张图交给 vision 档案的模型，返回一句可以直接朗读的回答。"""
         client = self._client("vision")
         if client is None:
@@ -238,12 +257,29 @@ class Brain:
             data = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
         except OSError as exc:
             return "读不到刚截的图：" + str(exc)[:60]
+        # 图是被缩过的，而且截图原点是虚拟桌面左上角（多显示器时可能是负数）。
+        # 不告诉模型这两件事，它一旦给出坐标就是错的 —— 用户听到"帮你点一下"，
+        # 结果点到别的屏幕上去了。所以直接把换算关系写进提示里。
+        geometry = ""
+        if meta:
+            size = meta.get("size") or (0, 0)
+            original = meta.get("original") or (0, 0)
+            origin = meta.get("origin") or (0, 0)
+            scale = round((original[0] / size[0]) if size[0] else 1.0, 3)
+            geometry = (
+                "\n这张图是整块桌面缩放到 " + str(size[0]) + "×" + str(size[1])
+                + " 得到的；原图（所有显示器合起来）是 " + str(original[0])
+                + "×" + str(original[1]) + "，原图左上角对应屏幕坐标 ("
+                + str(origin[0]) + ", " + str(origin[1]) + ")。"
+                + "需要给出坐标时请换算成屏幕像素：屏幕x = 图里x × " + str(scale)
+                + " + " + str(origin[0]) + "，y 同理。"
+            )
         try:
             message = client.chat([
                 {
                     "role": "system",
                     "content": "你在看用户电脑屏幕的截图。用一到两句中文说清楚要点，"
-                               "不要罗列、不要念坐标和文件名。",
+                               "不要罗列、不要念文件名。" + geometry,
                 },
                 {
                     "role": "user",
@@ -407,7 +443,11 @@ class Brain:
 
     # -- 跨轮上下文 -------------------------------------------------------
     def _context_path(self) -> Path:
-        return PROJECT_ROOT / "build" / "conversation.json"
+        # 允许用 VOICE_AGENT_BUILD_DIR 把「运行时产生的文件」挪走：
+        # 测试不该往用户真实的对话记录里写东西，装到只读目录里时也用得上。
+        base = os.environ.get("VOICE_AGENT_BUILD_DIR")
+        root = Path(base) if base else PROJECT_ROOT / "build"
+        return root / "conversation.json"
 
     def _load_context(self) -> None:
         """把上一次的对话捞回来。

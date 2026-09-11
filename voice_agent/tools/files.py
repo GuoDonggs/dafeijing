@@ -72,9 +72,14 @@ def search_files(name: str = "", root: str = "", limit: int = 10) -> str:
 
 def read_file(path: str = "", max_chars: int = 800) -> str:
     """读一个文本文件的内容。"""
-    target = _resolve_path((path or "").strip())
+    raw = (path or "").strip()
+    if not raw:
+        # 空路径以前会被解析成"桌面"，于是用户听到的是"找不到这个文件" ——
+        # 听起来像文件真的没了。缺参数就直说缺参数。
+        return "没说要读哪个文件，可以说「读一下桌面的报告.txt」"
+    target = _resolve_path(raw)
     if not target.is_file():
-        return "找不到这个文件"
+        return "找不到这个文件：" + raw
     try:
         content = target.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:

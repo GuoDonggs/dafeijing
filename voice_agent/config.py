@@ -368,6 +368,10 @@ class LlmCfg:
     # 各家网关的专有字段（例如 DeepSeek 的 thinking、Qwen 的 enable_thinking），
     # 直接原样并进请求体，避免为了支持某个厂商去改代码
     extra_body: dict = field(default_factory=dict)
+    # 看图时送给视觉模型的截图最长边（像素）。截图是 4K 的话，
+    # 一张图几百万像素，又慢又贵，而识别效果几乎没区别；
+    # 但字小的界面缩太狠会看不清，所以做成可调。
+    vision_max_side: int = 1280
     # 多模型路由：用途 → profiles 里的名字
     routes: dict = field(default_factory=dict)
     # 多个模型档案：名字 → {base_url, model, api_key, reasoning_effort, ...}
@@ -659,6 +663,7 @@ class Config:
                 max_rounds=int(_get(raw, "llm.max_rounds", 12)),
                 timeout_s=float(_get(raw, "llm.timeout_s", 30)),
                 reasoning_effort=str(_get(raw, "llm.reasoning_effort", "low")),
+                vision_max_side=int(_get(raw, "llm.vision_max_side", 1280)),
                 extra_body=dict(_get(raw, "llm.extra_body", None) or {}),
                 routes=dict(_get(raw, "llm.routes", None) or {}),
                 profiles={

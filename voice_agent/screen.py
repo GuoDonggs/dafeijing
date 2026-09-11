@@ -37,6 +37,9 @@ _LEFT_DOWN, _LEFT_UP = 0x0002, 0x0004
 _RIGHT_DOWN, _RIGHT_UP = 0x0008, 0x0010
 _MIDDLE_DOWN, _MIDDLE_UP = 0x0020, 0x0040
 _WHEEL, _HWHEEL = 0x0800, 0x1000
+# SendInput 的 dx/dy 默认是**相对位移**。要送绝对坐标必须带 ABSOLUTE，
+# 并且用 VIRTUALDESK 说明"坐标是相对整个虚拟桌面的"（多显示器时少一个都不行）。
+_ABSOLUTE, _VIRTUALDESK = 0x8000, 0x4000
 _INPUT_MOUSE = 0
 _KEYEVENTF_KEYUP = 0x0002
 
@@ -58,7 +61,10 @@ class _KEYBDINPUT(ctypes.Structure):
 
 
 class _INPUTUNION(ctypes.Union):
-    _fields_ = (("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("padding", ctypes.c_byte * 40))
+    # 这里**不能**再塞一个 padding 成员：_INPUT 的大小必须正好是 40 字节
+    # （64 位下 4 + 4 对齐 + 32）。多了几个字节，SendInput 会整条拒绝并返回 0，
+    # 而且不报任何错 —— 症状就是"鼠标、键盘点了没反应"。
+    _fields_ = (("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT))
 
 
 class _INPUT(ctypes.Structure):
@@ -81,15 +87,54 @@ def _send_mouse(flags: int, dx: int = 0, dy: int = 0, data: int = 0) -> None:
     item = _INPUT()
     item.type = _INPUT_MOUSE
     item.u.mi = _MOUSEINPUT(dx, dy, ctypes.c_ulong(data & 0xFFFFFFFF).value, flags, 0, None)
-    _user32.SendInput(1, ctypes.byref(item), ctypes.sizeof(_INPUT))
+    # 一定要检查返回值：SendInput 失败时只返回 0，不会抛异常，
+    # 于是"点了没反应"这种问题会一直查不出来（这次就是）。
+    sent = _user32.SendInput(1, ctypes.byref(item), ctypes.sizeof(_INPUT))
+    if sent != 1:
+        raise RuntimeError("系统拒绝了这次鼠标事件（SendInput=" + str(sent)
+                           + "，错误码 " + str(ctypes.get_last_error()) + "）")
+
+
+def _virtual_screen() -> tuple[int, int, int, int]:
+    """虚拟桌面（所有显示器合起来）的左、上、宽、高。"""
+    return (int(_user32.GetSystemMetrics(76)), int(_user32.GetSystemMetrics(77)),
+            int(_user32.GetSystemMetrics(78)), int(_user32.GetSystemMetrics(79)))
+
+
+def _absolute_xy(x: int, y: int) -> tuple[int, int]:
+    """屏幕像素 → SendInput 要的 0~65535 归一化绝对坐标。
+
+    注意是**虚拟桌面**（所有显示器合起来）：第二块屏幕在主屏左边时，
+    虚拟桌面的左边界是负数，直接用主屏尺寸算会整体偏掉一屏。
+    """
+    left, top, width, height = _virtual_screen()
+    nx = int(round((int(x) - left) * 65535 / max(1, width - 1)))
+    ny = int(round((int(y) - top) * 65535 / max(1, height - 1)))
+    return max(0, min(65535, nx)), max(0, min(65535, ny))
+
+
+def _move_to(x: int, y: int) -> None:
+    """把鼠标**绝对**移动到屏幕像素 (x, y)。
+
+    绝对坐标必须归一化：直接把手像素当 dx/dy 发出去，系统会当成"相对位移"，
+    鼠标于是飞到屏幕角落，点哪儿都不对。
+    """
+    nx, ny = _absolute_xy(int(x), int(y))
+    _send_mouse(_MOVE | _ABSOLUTE | _VIRTUALDESK, nx, ny)
 
 
 def mouse_position() -> tuple[int, int]:
-    """当前鼠标位置。"""
+    """当前鼠标位置。
+
+    必须检查返回值：GetCursorPos 在锁屏、切到安全桌面（UAC）、
+    或者当前进程不在输入桌面上时会失败，而失败时 POINT 还是全 0 ——
+    不检查的话会一本正经地返回 (0,0)，调用方根本看不出这是"读不到"。
+    """
     if _user32 is None:
         raise RuntimeError("当前系统不支持读取鼠标位置")
     point = wintypes.POINT()
-    _user32.GetCursorPos(ctypes.byref(point))
+    if not _user32.GetCursorPos(ctypes.byref(point)):
+        raise RuntimeError("读不到鼠标位置（屏幕可能锁了，或者桌面被切走了）")
     return int(point.x), int(point.y)
 
 
@@ -103,7 +148,7 @@ def mouse_move(x: int, y: int, duration_ms: int = 200) -> str:
     for index in range(1, steps + 1):
         nx = int(start_x + (int(x) - start_x) * index / steps)
         ny = int(start_y + (int(y) - start_y) * index / steps)
-        _send_mouse(_MOVE, nx, ny)
+        _move_to(nx, ny)
         time.sleep(max(0.0, duration_ms / 1000.0 / steps))
     return "鼠标已经移到 " + str(int(x)) + "," + str(int(y))
 
@@ -194,8 +239,14 @@ def find_template(image: str | Path, confidence: float = 0.8,
         raise ValueError("读不出这张图片：" + str(image))
 
     shot = grab_screen(region)
-    offset_x = int(region[0]) if region else 0
-    offset_y = int(region[1]) if region else 0
+    # 截图的原点是**虚拟桌面**的左上角，不是主屏的左上角。
+    # 第二块屏放在主屏左边时虚拟桌面原点是个负数（比如 -1920），
+    # 这里要是按 0 算，返回的坐标会整体偏掉整整一屏 —— 找图明明找到了，
+    # 点下去却点到另一块屏幕上。
+    if region:
+        offset_x, offset_y = int(region[0]), int(region[1])
+    else:
+        offset_x, offset_y = _virtual_screen()[:2]
     shot_gray = cv2.cvtColor(shot, cv2.COLOR_BGR2GRAY)
     shot_h, shot_w = shot_gray.shape[:2]
 
@@ -280,22 +331,54 @@ def resize_image(image: str | Path, width: int = 0, height: int = 0,
     }
 
 
-def save_for_vision(image: str | Path | None = None, max_width: int = 1280,
-                    quality: int = 75) -> Path:
-    """把（截屏或指定图片）压成适合送给视觉模型的小图，返回文件路径。"""
+def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
+                    quality: int = 75) -> dict:
+    """把（截屏或指定图片）压成适合送给视觉模型的小图。
+
+    返回一个字典而不是光一个路径：**模型给出的坐标要能换算回屏幕像素**。
+    图片被缩小过、截图的坐标原点又可能是负数（多显示器），这两件事不告诉
+    模型，它说"点这个按钮"时给的坐标就是错的 —— 而且看不出来错在哪。
+
+    返回 {path, size, original, scale, origin, screen}
+      size      送给模型的图片尺寸
+      original  原图尺寸（= 虚拟桌面尺寸）
+      scale     原图 / 送出去的图（比如 1.5 表示屏幕上 1 像素 = 图里 0.67 像素）
+      origin    截图左上角对应的屏幕坐标（多显示器时可能是负的）
+      screen    虚拟桌面宽高
+    """
     VISION_CACHE.mkdir(parents=True, exist_ok=True)
+    origin = (0, 0)
     if image is None:
         shot = grab_screen()
         from PIL import Image  # noqa: PLC0415
 
         source = VISION_CACHE / "screen.png"
         Image.fromarray(shot[:, :, ::-1]).save(source)
+        origin = _virtual_screen()[:2]
     else:
         source = Path(image)
     stamp = time.strftime("%H%M%S")
     target = VISION_CACHE / ("vision-" + stamp + ".jpg")
-    result = resize_image(source, width=int(max_width), out=target, quality=quality)
-    return Path(result["path"])
+    # max_side 是"最长边"的上限：竖屏截图按宽度缩会越缩越大
+    from PIL import Image  # noqa: PLC0415
+
+    with Image.open(source) as probe:
+        width, height = probe.size
+    limit = max(64, int(max_side or 1280))
+    if width >= height:
+        result = resize_image(source, width=min(width, limit), out=target, quality=quality)
+    else:
+        result = resize_image(source, height=min(height, limit), out=target, quality=quality)
+    original = result["original"]
+    scale = round(original[0] / max(1, result["size"][0]), 4)
+    return {
+        "path": str(result["path"]),
+        "size": result["size"],
+        "original": original,
+        "scale": scale,
+        "origin": origin,
+        "screen": _virtual_screen()[2:],
+    }
 
 
 # ── 本地应用映射表 ───────────────────────────────────────────────

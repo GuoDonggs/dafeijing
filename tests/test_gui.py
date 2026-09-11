@@ -275,6 +275,7 @@ def window_smoke() -> None:
             window.console.snapshot = live_snapshot   # type: ignore[assignment]
             dialog.deleteLater()
 
+
             # 运行日志窗口：控制台的日志缓冲是 deque(maxlen=600)，写满之后从头丢。
             # 判断"哪些是新的"如果按下标算，_seen 会永远等于 600，
             # 从此一条都捞不到 —— 表现就是日志窗口看着像卡死了。
@@ -320,6 +321,52 @@ def window_smoke() -> None:
                       str(combo.currentData() or "").isalpha() or "_" in str(combo.currentData()),
                       str(combo.currentData()))
 
+            # 开新会话：菜单和对话页各有一个入口，点了要真的清掉上下文
+            live_agent = settings.page.console.ensure_agent()
+            live_agent.brain.history.append({"role": "user", "content": "上一轮说过的话"})
+            live_agent.brain.recent_actions.append("open_app(微信) → 已经打开微信")
+            window.new_session()
+            check("「开始新会话」清了上下文",
+                  not live_agent.brain.history and not live_agent.brain.recent_actions,
+                  str(len(live_agent.brain.history)))
+            check("新会话在对话记录里留了分界",
+                  any("新会话" in str(t.get("text", "")) for t in live_agent.transcript))
+
+            # 多模型配置：设置页那一行能开、能存，存完路由真的生效
+            check("设置里有「多模型」这一行",
+                  any(field[0] == "llm.profiles" for _t, fields in __import__(
+                      "voice_agent.ui.pages", fromlist=["SETTING_SECTIONS"]
+                  ).SETTING_SECTIONS for field in fields))
+            from voice_agent.ui import models_dialog
+
+            profiles = models_dialog.ProfilesDialog(settings.page.console, settings.page)
+            profiles.add_card("vision_one", {"model": "v4-vision", "vision": True})
+            profiles.routes["vision"].setCurrentIndex(profiles.routes["vision"].findData("vision_one"))
+            collected, routes, problem = profiles.collect()
+            check("多模型对话框能读出档案与路由",
+                  not problem and collected.get("vision_one", {}).get("model") == "v4-vision"
+                  and routes.get("vision") == "vision_one",
+                  problem or str(routes))
+            check("档案里没填的字段会被省略（回落默认）",
+                  "base_url" not in collected.get("vision_one", {}),
+                  str(collected.get("vision_one")))
+            profiles.save()
+            check("保存后配置里真的有这个档案",
+                  "vision_one" in (windows_console := settings.page.console).cfg.llm.profiles,
+                  str(list(settings.page.console.cfg.llm.profiles)))
+            check("保存后看图用途指向了新档案",
+                  settings.page.console.cfg.llm.routes.get("vision") == "vision_one",
+                  str(settings.page.console.cfg.llm.routes))
+            resolved = settings.page.console.cfg.llm.resolve("vision")
+            check("路由解析出的是新档案的模型", resolved.model == "v4-vision", resolved.model)
+            check("没写的字段回落到顶层设置",
+                  resolved.base_url == settings.page.console.cfg.llm.base_url, resolved.base_url)
+            settings.page.on_tick({}, "")      # 页面每 300ms 会自己刷一次
+            check("设置页那一行会说出当前路由",
+                  "看图" in settings.page.models_note.text(), settings.page.models_note.text()[:40])
+            # 收尾：把多模型配置清掉，别影响后面的用例
+            settings.page.console.update_config({"llm.profiles": {}, "llm.routes": {}})
+            profiles.deleteLater()
             # 输出音量：拖一下要真的改到引擎的总增益上，而且不是 100 倍地接错单位
             vkind, volume = settings.page.widgets.get("audio.output_gain", ("", None))
             check("设置里有输出音量控件", vkind == "volume" and volume is not None)

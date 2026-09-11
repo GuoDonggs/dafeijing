@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from ..config import PROJECT_ROOT
@@ -16,7 +17,11 @@ __all__ = ["PROJECT_ROOT", "HOME", "SCREENSHOT_DIR", "MEMORY_FILE", "DEFAULT_SEA
 
 HOME = Path.home()
 SCREENSHOT_DIR = HOME / "Pictures" / "voice-agent"
-MEMORY_FILE = PROJECT_ROOT / "build" / "memory.json"
+# 长期记忆存哪。默认在项目目录下；测试（或只读安装）可以用
+# VOICE_AGENT_BUILD_DIR 把它挪到别处，别写进用户真实的记忆里。
+BUILD_DIR = Path(os.environ["VOICE_AGENT_BUILD_DIR"]) if os.environ.get(
+    "VOICE_AGENT_BUILD_DIR") else PROJECT_ROOT / "build"
+MEMORY_FILE = BUILD_DIR / "memory.json"
 DEFAULT_SEARCH = "https://www.bing.com/search?q={}"
 
 # ── 「这一轮要不要接着听」 ──

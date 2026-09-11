@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 
 from ..console import Console
 from . import components as ui
+from . import models_dialog
 from . import theme
 
 
@@ -213,8 +214,12 @@ class HomePage(Page):
         # 后台子代理还在干活时把进度挂在提示行后面：用户看不见进程，
         # 但至少知道"刚派出去那件事还在跑"，而不是以为助手忘了。
         subs = status.get("subagents") or {}
-        if subs.get("running") and state in ("idle", "listen"):
-            hint = (hint + "　·　" + str(subs.get("text") or "")).strip("　· ")
+        watch = status.get("watches") or {}
+        running_notes = [str(subs.get("text") or "") if subs.get("running") else "",
+                         str(watch.get("text") or "") if watch.get("running") else ""]
+        running_notes = [note for note in running_notes if note]
+        if running_notes and state in ("idle", "listen"):
+            hint = (hint + "　·　" + "　".join(running_notes)).strip("　· ")
         if self.state_label.text() != text:
             self.state_label.setText(text)
         self.state_label.setStyleSheet("color: " + theme.STATE_COLORS.get(state, theme.TEXT))
@@ -326,6 +331,11 @@ class ChatPage(Page):
         self.btn_say = ui.plain_button("只播报")
         self.btn_say.clicked.connect(self.say)
         row.addWidget(self.btn_say)
+        # 开新会话：清空上下文但保留这份记录（记录是历史，上下文是包袱）
+        self.btn_new = ui.plain_button("新会话")
+        self.btn_new.setToolTip("清空上下文，之后说的话不再参考之前的对话")
+        self.btn_new.clicked.connect(self.new_session)
+        row.addWidget(self.btn_new)
         layout.addLayout(row)
 
         self._bubbles: list = []
@@ -361,6 +371,13 @@ class ChatPage(Page):
             self.console.log("[ui] " + reply)
         else:
             agent.dispatch(text)
+        self._sync()
+
+    def new_session(self) -> None:
+        """清空上下文开一个新的（语音说「换个话题」也会走到这里）。"""
+        agent = self.console.ensure_agent()
+        message = agent.new_session()
+        self.console.log("[ui] " + message)
         self._sync()
 
     def say(self) -> None:
@@ -815,8 +832,12 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
          ["off", "low", "medium", "high", "max"]),
         ("llm.base_url", "服务地址", "任何 OpenAI 兼容服务", "text", None),
         ("llm.model", "模型名", "", "text", None),
+        ("llm.profiles", "多模型", "不同用途挂不同的模型（主对话 / 判定 / 看图 / 子代理）",
+         "models", None),
         ("llm.max_rounds", "一步最多调几次工具", "多步任务撞上限会只说半句；不限就不收尾", "choice",
          ["6", "12", "20", "0"], {"0": "不限制"}),
+        ("llm.vision_max_side", "看图分辨率", "截图送给视觉模型前的最长边；越小越省 token，字小就看不清",
+         "choice", ["768", "1024", "1280", "1600", "1920"]),
         ("llm.api_key", "API Key", "留空表示不改动；也可以读环境变量", "password", None),
     ]),
     ("外观", [
@@ -898,6 +919,8 @@ class SettingsPage(Page):
             return self._volume_row(label, hint, value)
         if kind == "accent":
             return self._accent_row(label, hint, value)
+        if kind == "models":
+            return self._models_row(label, hint)
 
         if kind == "bool":
             control = ui.ToggleSwitch(checked=bool(value))
@@ -978,6 +1001,46 @@ class SettingsPage(Page):
         card.body.addWidget(note)
         card.setVisible(self._using_chattts(values))
         return card
+
+    def _models_row(self, label: str, hint: str) -> QWidget:
+        """多模型：一行按钮 + 一句「现在是怎么挂的」。"""
+        wrap = QWidget()
+        box = QVBoxLayout(wrap)
+        box.setContentsMargins(0, 4, 0, 4)
+        box.setSpacing(4)
+        title = QLabel(label)
+        title.setObjectName("RowTitle")
+        box.addWidget(title)
+        if hint:
+            sub = QLabel(hint)
+            sub.setObjectName("RowSubtitle")
+            sub.setWordWrap(True)
+            box.addWidget(sub)
+        self.models_note = QLabel()
+        self.models_note.setObjectName("RowSubtitle")
+        self.models_note.setWordWrap(True)
+        self.models_note.setText(models_dialog.describe_routes(self.console.cfg.llm))
+        box.addWidget(self.models_note)
+        button = ui.plain_button("配置多模型…", "settings")
+        button.clicked.connect(self.open_models)
+        row = QHBoxLayout()
+        row.addWidget(button)
+        row.addStretch(1)
+        box.addLayout(row)
+        return wrap
+
+    def open_models(self) -> None:
+        dialog = models_dialog.ProfilesDialog(self.console, self)
+        if dialog.exec():
+            self.refresh_models_note()
+
+    def refresh_models_note(self) -> None:
+        note = getattr(self, "models_note", None)
+        if note is None:
+            return
+        text = models_dialog.describe_routes(self.console.cfg.llm)
+        if note.text() != text:
+            note.setText(text)
 
     def _volume_row(self, label: str, hint: str, value: Any) -> QWidget:
         """输出音量：拖动即时生效，松手才写配置。
@@ -1164,9 +1227,12 @@ class SettingsPage(Page):
         self._audition_hint.setVisible(True)
 
     def on_tick(self, snapshot: dict, state: str) -> None:
-        # 只关心试听和录音这两处：其余地方由各自的控件自己刷
+        # 只关心试听、录音、多模型说明这三处：其余地方由各自的控件自己刷
         self._paint_audition(self.console.audition_status())
         self._paint_voice_progress()
+        # 多模型对话框保存时是直接写配置的，页面收不到通知；
+        # 与其加一套信号，不如每次 tick 对一下文本（一行字符串比较，开销可忽略）
+        self.refresh_models_note()
 
     def _paint_voice_progress(self) -> None:
         """录音时显示「还剩几秒 / 有没有听到人声」。"""

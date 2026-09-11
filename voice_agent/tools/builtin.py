@@ -26,7 +26,9 @@ from .files import (
     search_files,
     write_file,
 )
+from .selfctl import new_session_tool, quit_self_tool, restart_self_tool
 from .subagents import cancel_subagent_tool, spawn_subagent_tool, subagent_status_tool
+from .watches import list_watches_tool, start_watch_tool, stop_watch_tool
 from .system_info import get_time, system_info
 from .vision import (
     app_map_tool,
@@ -59,6 +61,68 @@ from .windows import (
 )
 
 # ─────────────────────────── 交互类 ───────────────────────────
+
+_register(Tool(
+    name="start_watch",
+    description=(
+        "让助手每隔几秒盯着一件事，条件成立就主动汇报。用户说「每 3 秒看一下…」"
+        "「盯着…出现了告诉我」时用它。三种方式："
+        "kind=图片（target 是图片路径，本地找图，最省）；"
+        "kind=屏幕（condition 是要等的画面情况，会调用视觉模型，最贵）；"
+        "kind=命令（target 是要跑的命令，condition 是判断条件）。"
+        "一次就能问完的事不要用它。"
+    ),
+    parameters=_params(
+        kind={"type": "string", "description": "图片 / 屏幕 / 命令", "_required": True},
+        target={"type": "string", "description": "图片路径（kind=图片）或要跑的命令（kind=命令）"},
+        condition={"type": "string", "description": "要等的条件，例如「出现了下载完成」"},
+        interval_s={"type": "number", "description": "每隔多少秒查一次，默认 5"},
+        once={"type": "boolean", "description": "命中一次就停，默认 true"},
+    ),
+    handler=start_watch_tool,
+    confirm=True,
+))
+
+_register(Tool(
+    name="list_watches",
+    description="查看正在盯的事情的进度。",
+    parameters=_params(watch_id={"type": "string", "description": "留空表示全部"}),
+    handler=list_watches_tool,
+))
+
+_register(Tool(
+    name="stop_watch",
+    description="停掉在盯的事情（用户说「别盯了」时用）。留空表示全部停掉。",
+    parameters=_params(watch_id={"type": "string", "description": "留空表示全部"}),
+    handler=stop_watch_tool,
+))
+
+_register(Tool(
+    name="new_session",
+    description=(
+        "开一个新会话：之前聊过的内容不再带进后面的对话。用户说「我们换个话题」"
+        "「忘掉刚才的」「重新开始」时用它；只是插一句无关的话不要用。"
+    ),
+    parameters=_params(reason={"type": "string", "description": "可选：为什么换话题"}),
+    handler=new_session_tool,
+))
+
+_register(Tool(
+    name="restart_self",
+    description="重启助手程序本身（用户说「重启你自己」时用）。属于敏感操作，调用前先确认。",
+    parameters=_params(),
+    handler=restart_self_tool,
+    confirm=True,
+))
+
+_register(Tool(
+    name="quit_self",
+    description="退出（关闭）助手程序本身（用户说「关掉你自己」「退出程序」时用）。"
+                "注意区别于 power 工具：那个关的是电脑。属于敏感操作，调用前先确认。",
+    parameters=_params(),
+    handler=quit_self_tool,
+    confirm=True,
+))
 
 _register(Tool(
     name="keep_listening",
@@ -181,6 +245,7 @@ _register(Tool(
     parameters=_params(
         pattern={"type": "string", "description": "通配符，例如 *.pdf", "_required": True},
         root={"type": "string", "description": "从哪个目录开始找，默认用户目录"},
+        limit={"type": "integer", "description": "最多返回几个，默认 20"},
     ),
     handler=find_files,
 ))
@@ -308,7 +373,10 @@ _register(Tool(
 _register(Tool(
     name="power",
     description="关机、重启、睡眠或注销电脑。属于敏感操作，调用前应先跟用户确认。",
-    parameters=_params(action={"type": "string", "description": "shutdown / restart / sleep / logoff"}),
+    parameters=_params(
+        action={"type": "string", "description": "shutdown / restart / sleep / logoff"},
+        delay={"type": "integer", "description": "延迟多少秒再执行，0 = 立刻"},
+    ),
     handler=power,
     confirm=True,
 ))

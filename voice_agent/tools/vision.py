@@ -13,14 +13,30 @@ __all__ = [
     "mouse_position_tool", "mouse_move_tool", "mouse_click_tool", "mouse_drag_tool",
     "mouse_scroll_tool", "find_on_screen_tool", "click_image_tool",
     "resize_image_tool", "look_at_screen_tool", "app_map_tool", "set_vision_handler",
+    "set_vision_max_side", "max_side",
 ]
 
 _VISION_HANDLER: list = [None]
+# 送给视觉模型的截图最长边。截图动辄 3840 宽，直接送过去又慢又贵；
+# 缩到多少由配置决定（llm.vision_max_side），Brain 启动和改配置时推进来。
+_VISION_MAX_SIDE: list = [1280]
 
 
 def set_vision_handler(handler) -> None:
     """注册「看图回答问题」的实现（brain 负责接上多模型里的 vision 档案）。"""
     _VISION_HANDLER[0] = handler
+
+
+def set_vision_max_side(value) -> None:
+    """设置送给视觉模型的图片最长边（像素）。"""
+    try:
+        _VISION_MAX_SIDE[0] = max(256, min(4096, int(value)))
+    except (TypeError, ValueError):
+        pass
+
+
+def max_side() -> int:
+    return int(_VISION_MAX_SIDE[0])
 
 
 def _screen():
@@ -138,11 +154,14 @@ def look_at_screen_tool(question: str = "") -> str:
         return ("还没配置视觉模型。在 config.yaml 的 llm.profiles 里加一个 vision: true 的档案，"
                 "再把 llm.routes.vision 指过去")
     try:
-        path = _screen().save_for_vision(None, max_width=1280)
+        shot = _screen().save_for_vision(None, max_side=max_side())
     except Exception as exc:  # noqa: BLE001
         return "截屏失败：" + str(exc)[:80]
     try:
-        return handler(str(path), question or "屏幕上有什么？用一两句话说明关键内容")
+        # 把缩放比例和坐标原点一并交给大脑：模型要是指了坐标，
+        # 得能换算回真正的屏幕像素（截图原点在多显示器下可能是负的）
+        return handler(str(shot["path"]),
+                       question or "屏幕上有什么？用一两句话说明关键内容", shot)
     except Exception as exc:  # noqa: BLE001
         return "视觉模型调用失败：" + str(exc)[:100]
 
