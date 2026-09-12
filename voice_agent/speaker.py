@@ -25,12 +25,17 @@ from typing import Any
 
 import numpy as np
 
+from . import paths
 from .config import PROJECT_ROOT, Config
 
-__all__ = ["Voiceprint", "PROFILE_PATH"]
+__all__ = ["Voiceprint", "profile_path"]
 
-PROFILE_PATH = PROJECT_ROOT / "build" / "voiceprint.json"
 MODEL_DIR = PROJECT_ROOT / "models" / "speaker"
+
+
+def profile_path() -> Path:
+    """声纹档案存哪（数据目录下，跟着用户配置走）。"""
+    return paths.sub("voiceprint", create=True)
 DEFAULT_THRESHOLD = 0.55
 
 # ── 录音体检的门槛 ──
@@ -61,7 +66,7 @@ class Voiceprint:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.enabled = bool(getattr(cfg.speaker, "enabled", False))
-        self.profile_path = Path(getattr(cfg.speaker, "profile", "") or PROFILE_PATH)
+        self.profile_path = Path(getattr(cfg.speaker, "profile", "") or profile_path())
         self._extractor = None
         self._manager = None
         self._dim = 0

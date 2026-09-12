@@ -37,13 +37,14 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from . import paths
 from urllib.parse import urlparse
 
 __all__ = [
@@ -142,9 +143,7 @@ _same: deque = deque(maxlen=16)
 
 
 def _build_dir() -> Path:
-    base = os.environ.get("VOICE_AGENT_BUILD_DIR")
-    root = Path(base) if base else Path(__file__).resolve().parent.parent / "build"
-    return root
+    return paths.data_dir()
 
 
 def transport_trusted(base_url: str) -> tuple[bool, str]:

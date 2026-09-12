@@ -7,25 +7,41 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
+from .. import paths
 from ..config import PROJECT_ROOT
 
-__all__ = ["PROJECT_ROOT", "HOME", "SCREENSHOT_DIR", "REFERENCE_DIR", "MEMORY_FILE",
-           "DEFAULT_SEARCH", "TURN", "reset_turn", "keep_listening"]
+__all__ = ["PROJECT_ROOT", "HOME", "DEFAULT_SEARCH", "TURN", "reset_turn", "keep_listening",
+           "screenshot_dir", "reference_dir", "memory_file", "build_dir"]
 
 HOME = Path.home()
-SCREENSHOT_DIR = HOME / "Pictures" / "voice-agent"
-#: 参考图片目录：把「下载按钮.png」丢进去，就能说「找一下下载按钮」。
-#: 用户不用记路径，模型也不用猜 —— 名字就是文件名。
-REFERENCE_DIR = SCREENSHOT_DIR / "reference"
-# 长期记忆存哪。默认在项目目录下；测试（或只读安装）可以用
-# VOICE_AGENT_BUILD_DIR 把它挪到别处，别写进用户真实的记忆里。
-BUILD_DIR = Path(os.environ["VOICE_AGENT_BUILD_DIR"]) if os.environ.get(
-    "VOICE_AGENT_BUILD_DIR") else PROJECT_ROOT / "build"
-MEMORY_FILE = BUILD_DIR / "memory.json"
 DEFAULT_SEARCH = "https://www.bing.com/search?q={}"
+
+# ── 运行时文件都收在「数据目录」下（见 voice_agent/paths.py）──
+# 以前截图丢在图片文件夹、记忆丢在 build/、映射表丢在项目根，三处分散。
+# 现在统一，而且目录可以在设置窗口里改。这些必须是**函数**而不是常量：
+# 用户改了数据目录要立刻生效，import 期算好的常量改不动。
+
+
+def screenshot_dir(create: bool = False) -> Path:
+    """截图存哪（参考图片在它下面的 reference/）。"""
+    return paths.sub("screenshots", create=create)
+
+
+def reference_dir(create: bool = False) -> Path:
+    """参考图片目录：把「下载按钮.png」丢进去，就能说「找一下下载按钮」。"""
+    return paths.sub("reference", create=create)
+
+
+def memory_file(create: bool = False) -> Path:
+    """长期记忆存哪。"""
+    return paths.sub("memory", create=create)
+
+
+#: 兼容旧名字（有些地方直接 import 了它）—— 指向数据目录本身
+def build_dir() -> Path:
+    return paths.data_dir()
 
 # ── 「这一轮要不要接着听」 ──
 # 工具本身是无状态的纯函数，但"答完这句要不要继续收音"是**这一轮对话**的状态。

@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from . import paths
 from .config import PROJECT_ROOT
 
 __all__ = [
@@ -29,8 +30,14 @@ __all__ = [
     "open_cv_ready",
 ]
 
-APP_MAP_FILE = PROJECT_ROOT / "apps.yaml"
-VISION_CACHE = PROJECT_ROOT / "build" / "vision"
+def app_map_path() -> Path:
+    """应用映射表放哪（数据目录下，用户可以改数据目录）。"""
+    return paths.sub("apps", create=False)
+
+
+def vision_cache() -> Path:
+    """送给视觉模型的压缩图缓存。"""
+    return paths.sub("vision")
 
 # ── Win32 鼠标事件 ───────────────────────────────────────────────
 _MOVE = 0x0001
@@ -312,9 +319,9 @@ def _imread(path: Path):
 
 def reference_dir() -> Path:
     """参考图片目录：里面放"要找的东西"的小图。"""
-    from .tools._shared import REFERENCE_DIR  # noqa: PLC0415 - 避免循环导入
+    from .tools._shared import reference_dir  # noqa: PLC0415 - 避免循环导入
 
-    return REFERENCE_DIR
+    return reference_dir()
 
 
 def list_reference_images(limit: int = 20) -> list[str]:
@@ -536,6 +543,7 @@ def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
       origin    截图左上角对应的屏幕坐标（多显示器时可能是负的）
       screen    虚拟桌面宽高
     """
+    VISION_CACHE = vision_cache()
     VISION_CACHE.mkdir(parents=True, exist_ok=True)
     origin = (0, 0)
     if image is None:
@@ -591,8 +599,7 @@ def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
 _APP_TYPES = ("exe", "path", "url", "command", "folder")
 
 
-def app_map_path() -> Path:
-    return APP_MAP_FILE
+
 
 
 def _guess_app_type(target: str) -> str:
@@ -644,12 +651,13 @@ def _normalize_entry(value: Any) -> dict:
 
 def load_app_map() -> dict[str, dict]:
     """读用户自定义的应用映射表（apps.yaml）。缺文件时就是空的。"""
+    APP_MAP_FILE = app_map_path()
     if not APP_MAP_FILE.is_file():
         return {}
     try:
         import yaml  # noqa: PLC0415
 
-        data = yaml.safe_load(APP_MAP_FILE.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(app_map_path().read_text(encoding="utf-8")) or {}
     except Exception:  # noqa: BLE001
         return {}
     if not isinstance(data, dict):
@@ -669,6 +677,7 @@ def save_app_map(mapping: dict[str, Any]) -> Path:
     """写回映射表。只给 target 的条目写成简写，有别名/参数的写完整形式。"""
     import yaml  # noqa: PLC0415
 
+    APP_MAP_FILE = app_map_path()
     APP_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
     header = ("# 本地应用映射表：说「打开 XXX」时优先查这里\n"
               "# 左边是名字（可以有多个叫法），右边是程序名 / 完整路径 / 网址。\n"
@@ -730,7 +739,7 @@ def describe_app_map() -> str:
     mapping = load_app_map()
     if not mapping:
         return ("还没有自定义映射。可以直接说「添加应用 我的项目 指向 D:\\code」，"
-                "或者编辑 " + str(APP_MAP_FILE))
+                "或者编辑 " + str(app_map_path()))
     parts = []
     for name, entry in list(mapping.items())[:12]:
         text = name

@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from ._shared import HOME, MEMORY_FILE
+from ._shared import HOME, memory_file
 from .windows import _desktop
 
 __all__ = ["list_files", "search_files", "read_file", "write_file", "edit_file",
@@ -204,7 +204,7 @@ def remember(text: str = "", key: str = "") -> str:
     value = (text or "").strip()
     if not value:
         return "没说要记什么"
-    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MEMORY_FILE = memory_file(create=True)
     try:
         items = json.loads(MEMORY_FILE.read_text(encoding="utf-8")) if MEMORY_FILE.is_file() else []
     except Exception:
@@ -220,6 +220,7 @@ def remember(text: str = "", key: str = "") -> str:
 
 def recall(query: str = "") -> str:
     """回忆之前记下的事。"""
+    MEMORY_FILE = memory_file()
     if not MEMORY_FILE.is_file():
         return "我还没记过什么事"
     try:

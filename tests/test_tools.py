@@ -147,12 +147,12 @@ def live_tools() -> None:
     # 截屏
     text = str(tools.call("screenshot", {}))
     # 工具只说文件名（"存到图片文件夹里的 xxx.png"），目录得自己补上
-    from voice_agent.tools._shared import SCREENSHOT_DIR
+    from voice_agent.tools._shared import screenshot_dir
 
     shot_path = None
     for token in text.replace("：", " ").replace("，", " ").split():
         if token.lower().endswith(".png"):
-            candidate = SCREENSHOT_DIR / token
+            candidate = screenshot_dir() / token
             if candidate.is_file():
                 shot_path = candidate
     check("截图工具真的存下了文件", shot_path is not None,
@@ -316,7 +316,9 @@ def image_tools() -> None:
     import numpy as np
     from PIL import Image
 
-    from voice_agent.tools._shared import REFERENCE_DIR
+    from voice_agent.tools._shared import reference_dir
+
+    REFERENCE_DIR = reference_dir(create=True)
 
     with _tempfile.TemporaryDirectory() as tmp:
         # 造一张大图，里面贴一张有特征的小图，再让工具把它找出来

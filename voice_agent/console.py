@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from . import __version__, audio as audio_io, security, tools
+from . import __version__, audio as audio_io, paths, security, tools
 from . import voices as voice_table
 from .agent import VoiceAgent
 from .config import (
@@ -121,6 +121,7 @@ class Console:
         else:
             config = Config.load(self.config_path)
         security.configure(config)
+        self._apply_data_dir(config)
         if not security.snapshot()["transport_ok"]:
             # 这条必须吵一点：明文中转站能改写模型的回答，也就能塞工具调用
             self.log("[安全] " + str(security.snapshot()["transport_note"])
@@ -261,6 +262,28 @@ class Console:
                 self.agent = self._new_agent()
             return self.agent
 
+    def _apply_data_dir(self, config) -> None:  # noqa: ANN001
+        """装载数据目录，顺手把老位置的文件搬过来（只搬一次）。
+
+        以前截图放在「图片/voice-agent」、映射表放在项目根，现在统一到数据目录下；
+        升级不该让用户以为东西丢了，所以这里做一次性迁移。
+        """
+        configured = str(getattr(getattr(config, "paths", None), "data_dir", "") or "")
+        paths.set_data_dir(configured)
+        moved = paths.migrate_legacy([
+            (Path.home() / "Pictures" / "voice-agent", paths.sub("screenshots")),
+            (PROJECT_ROOT / "apps.yaml", paths.sub("apps")),
+        ], log=self.log)
+        if moved:
+            self.log("[ui] 运行时文件已集中到 " + str(paths.data_dir()))
+        # 标记仓库是全局单例：换了目录要让它按新位置重读
+        try:
+            from . import marks as marks_mod  # noqa: PLC0415
+
+            marks_mod.store.reload()
+        except Exception:  # noqa: BLE001 - 重读失败不该影响启动
+            pass
+
     def _new_agent(self) -> VoiceAgent:
         """造一个引擎并接上界面注册的回调。
 
@@ -371,6 +394,9 @@ class Console:
             "ui.accent": cfg.ui.accent,
             "ui.accent_hex": cfg.ui.accent_hex(),
             "ui.show_turn": cfg.ui.show_turn,
+            # 数据目录：程序产生的文件都收在这里
+            "paths.data_dir": cfg.paths.data_dir,
+            "paths.data_dir_effective": str(paths.data_dir()),
             # 权限：模式与两条限流
             "security.mode": cfg.security.mode,
             "security.allow_insecure": cfg.security.allow_insecure,
@@ -582,6 +608,8 @@ class Console:
         self.cfg.update_from(fresh)
         # 权限设置也是"改完立刻生效"，而且它决定工具层放不放行
         security.configure(self.cfg)
+        # 数据目录可能被改了：立刻生效（已经在写的文件不受影响）
+        self._apply_data_dir(self.cfg)
         self._apply_voice_live()
         # 看图分辨率是"下次截图时读一次"，改完立刻推给工具层
         tools.set_vision_max_side(self.cfg.llm.vision_max_side)
@@ -874,7 +902,15 @@ class Console:
             "restart_items": self.pending_restart(),
             # 权限状态：界面上要能一眼看到"现在是什么模式、链路可不可信"
             "security": security.snapshot(),
+            # 数据目录清单（设置页展示 + 打开目录用）
+            "paths": paths.describe(),
         }
+
+    def open_path_in_shell(self, target) -> str:  # noqa: ANN001
+        """在资源管理器里打开一个目录（设置页的「打开目录」用）。"""
+        from .tools.windows import open_folder
+
+        return open_folder(str(target))
 
     def set_permission_mode(self, value: str) -> dict:
         """换权限模式（界面上的用户操作，不需要再确认一遍）。"""

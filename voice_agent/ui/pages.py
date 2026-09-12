@@ -860,6 +860,11 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
          "主对话 / 同意判定 / 看图 / 子代理 可以各挂一个模型（例如看图用一个带视觉的）",
          "models", None),
     ]),
+    ("数据与文件", [
+        ("paths.data_dir", "数据目录",
+         "记忆、截图、标记、缓存、审计日志都收在这一个目录里；留空 = 程序目录下的 build",
+         "datadir", None),
+    ]),
     ("权限", [
         ("security.mode", "权限模式",
          "只读：只能查；标准：敏感操作先问你；放开：敏感操作直接做（关机和执行命令仍要确认）",
@@ -963,6 +968,8 @@ class SettingsPage(Page):
             return self._accent_row(label, hint, value)
         if kind == "models":
             return self._models_row(label, hint)
+        if kind == "datadir":
+            return self._datadir_row(label, hint, value)
 
         if kind == "bool":
             control = ui.ToggleSwitch(checked=bool(value))
@@ -1043,6 +1050,59 @@ class SettingsPage(Page):
         card.body.addWidget(note)
         card.setVisible(self._using_chattts(values))
         return card
+
+    def _datadir_row(self, label: str, hint: str, value: Any) -> QWidget:
+        """数据目录：能改、能打开，还有一句"现在到底用哪个"。"""
+        wrap = QWidget()
+        box = QVBoxLayout(wrap)
+        box.setContentsMargins(0, 4, 0, 4)
+        box.setSpacing(4)
+        title = QLabel(label)
+        title.setObjectName("RowTitle")
+        box.addWidget(title)
+        if hint:
+            sub = QLabel(hint)
+            sub.setObjectName("RowSubtitle")
+            sub.setWordWrap(True)
+            box.addWidget(sub)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        editor = QLineEdit(str(value or ""))
+        editor.setPlaceholderText("留空 = " + str(self.console.snapshot().get(
+            "paths", {}).get("default", "")))
+        row.addWidget(editor, 1)
+        save = ui.plain_button("保存")
+        save.clicked.connect(lambda: self._save("paths.data_dir", editor.text().strip()))
+        row.addWidget(save)
+        open_button = ui.plain_button("打开目录")
+        open_button.clicked.connect(self._open_data_dir)
+        row.addWidget(open_button)
+        box.addLayout(row)
+
+        self.data_note = QLabel()
+        self.data_note.setObjectName("RowSubtitle")
+        self.data_note.setWordWrap(True)
+        self.data_note.setText(self._data_dir_note())
+        box.addWidget(self.data_note)
+        return wrap
+
+    def _data_dir_note(self) -> str:
+        info = self.console.snapshot().get("paths") or {}
+        rows = [row for row in (info.get("items") or []) if row.get("exists")]
+        here = "现在用：" + str(info.get("dir") or "")
+        if rows:
+            here += "（已有 " + "、".join(str(row["name"]) for row in rows[:6]) + "）"
+        return here
+
+    def _open_data_dir(self) -> None:
+        from .. import paths  # noqa: PLC0415
+
+        target = paths.set_data_dir(self.console.cfg.paths.data_dir)
+        result = self.console.open_path_in_shell(target)
+        self.console.log("[ui] " + result)
+        if hasattr(self, "data_note"):
+            self.data_note.setText(self._data_dir_note())
 
     def _models_row(self, label: str, hint: str) -> QWidget:
         """多模型：一行按钮 + 一句「现在是怎么挂的」。"""

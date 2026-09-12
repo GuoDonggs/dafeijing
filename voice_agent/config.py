@@ -269,6 +269,15 @@ def resolve_accent(value: Any) -> str:
 
 
 @dataclass
+class PathsCfg:
+    """程序自己产生的文件放哪（见 voice_agent/paths.py）。"""
+
+    # 留空 = 「程序目录/build」。改成一个绝对路径就能把记忆、截图、缓存、
+    # 审计日志全部挪到别处（比如 D 盘）。
+    data_dir: str = ""
+
+
+@dataclass
 class SecurityCfg:
     """权限：这个助手能动本机的什么。见 voice_agent/security.py 的长注释。"""
 
@@ -543,6 +552,7 @@ class Config:
     llm: LlmCfg
     agent: AgentCfg
     security: SecurityCfg
+    paths: PathsCfg
     ui: UiCfg
     raw: dict
 
@@ -732,6 +742,9 @@ class Config:
                     no=_str_list(_get(raw, "agent.confirm.no", None), confirm_defaults.no),
                     prompt=str(_get(raw, "agent.confirm.prompt", confirm_defaults.prompt)),
                 ),
+            ),
+            paths=PathsCfg(
+                data_dir=str(_get(raw, "paths.data_dir", "") or ""),
             ),
             security=SecurityCfg(
                 mode=str(_get(raw, "security.mode", "workspace-write") or "workspace-write"),

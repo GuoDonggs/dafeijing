@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import paths
+
 __all__ = ["Mark", "MarkStore", "store", "resolve_region",
            "REGION_PREFIX", "POINT_PREFIX"]
 
@@ -78,12 +80,8 @@ class Mark:
 
 
 def store_path() -> Path:
-    """标记存哪。放在 build/ 下：它是运行时数据，不该混进项目文件里。"""
-    import os
-
-    base = os.environ.get("VOICE_AGENT_BUILD_DIR")
-    root = Path(base) if base else Path(__file__).resolve().parent.parent / "build"
-    return root / "marks.json"
+    """标记存哪（数据目录下）。"""
+    return paths.sub("marks", create=True)
 
 
 class MarkStore:
@@ -97,16 +95,31 @@ class MarkStore:
         self._items: dict[str, Mark] = {}
         self._order: list[str] = []
         self._lock = threading.Lock()
-        self._path = Path(path) if path else store_path()
+        #: 显式给了路径就固定用它；否则每次都现算 —— 用户改了数据目录之后，
+        #: 标记要跟着写到新目录去（import 期算死的路径改不动）
+        self._fixed_path = Path(path) if path else None
         self._version = 0        # 界面靠它判断"要不要重画"
+        self._load()
+
+    @property
+    def path(self) -> Path:
+        return self._fixed_path or store_path()
+
+    def reload(self) -> None:
+        """按当前数据目录重新读一遍（换了目录之后调用）。"""
+        with self._lock:
+            self._items.clear()
+            self._order.clear()
+            self._version += 1
         self._load()
 
     # ── 落盘 ──
     def _load(self) -> None:
-        if not self._path.is_file():
+        target = self.path
+        if not target.is_file():
             return
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
+            data = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
         items = data.get("marks") if isinstance(data, dict) else data
@@ -130,13 +143,14 @@ class MarkStore:
 
     def _save(self) -> None:
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            target = self.path
+            target.parent.mkdir(parents=True, exist_ok=True)
             payload = {"version": 1, "marks": [
                 {"name": m.name, "kind": m.kind, "x1": m.x1, "y1": m.y1,
                  "x2": m.x2, "y2": m.y2, "note": m.note}
                 for m in (self._items[k] for k in self._order)
             ]}
-            self._path.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
                                   encoding="utf-8")
         except OSError:
             pass   # 存不下不该影响"框一下"这件事本身

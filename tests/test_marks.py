@@ -132,9 +132,9 @@ def main() -> int:
     saved = None
     for token in out.replace("，", " ").split():
         if token.endswith(".png"):
-            from voice_agent.tools._shared import SCREENSHOT_DIR
+            from voice_agent.tools._shared import screenshot_dir
 
-            candidate = SCREENSHOT_DIR / token
+            candidate = screenshot_dir() / token
             if candidate.is_file():
                 saved = candidate
     check("文件真的存下来了", saved is not None, str(saved))

@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from . import audio as audio_io
+from . import paths as data_paths
 from . import textutil
 from . import translit
 from . import voices as voice_table
@@ -45,9 +46,7 @@ class WakeWord:
         self.score = float(cfg.wake.score)
         self.cooldown_ms = int(cfg.wake.cooldown_ms)
 
-        target = Path(keywords_path) if keywords_path else (
-            Path(__file__).resolve().parent.parent / "build" / "keywords.generated.txt"
-        )
+        target = Path(keywords_path) if keywords_path else data_paths.sub("keywords")
         extra = None
         raw = cfg.raw.get("wake", {}) if isinstance(cfg.raw, dict) else {}
         if isinstance(raw.get("pinyin"), dict):

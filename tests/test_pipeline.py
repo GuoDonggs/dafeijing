@@ -241,10 +241,24 @@ def main() -> int:
             target=lambda: (time.sleep(delay), agent._confirm_q.put(text)), daemon=True
         ).start()
 
+    # 每次换一个"轮次"：同一轮里同一个操作只会问一遍（下面单独验），
+    # 所以这里要清掉记忆，模拟用户又发起了一次
+    agent._confirm_memory.clear()
     answer_later("取消")
     check("回答「取消」→ 拒绝执行", agent._ask_confirm("要关机，确认吗？") is False)
+
+    # 同一个操作在同一轮里不会被问第二遍 —— 用户的原话是
+    # "明明确认过了它又问一遍，好像刚才那句白说了"
+    answer_later("好，你弄吧")
+    check("同一个操作再问时直接复用上次的答案（拒绝）",
+          agent._ask_confirm("要关机，确认吗？") is False)
+
+    agent._confirm_memory.clear()
     answer_later("好，你弄吧")
     check("回答「好，你弄吧」→ 放行", agent._ask_confirm("要关机，确认吗？") is True)
+    check("同一轮里同样的操作也不再问第二遍（同意）",
+          agent._ask_confirm("要关机，确认吗？") is True)
+    agent._confirm_memory.clear()
     answer_later("", delay=0.1)  # 不说话 = 超时
     agent.cfg.agent.confirm.timeout_ms = 800
     check("不回答 → 保守拒绝", agent._ask_confirm("要关机，确认吗？") is False)

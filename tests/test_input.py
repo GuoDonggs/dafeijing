@@ -158,7 +158,9 @@ def end_to_end() -> None:
         screen.mouse_move(cx, cy)
         time.sleep(0.15)
         moved = screen.mouse_position()
-        check("鼠标能移到指定坐标", moved == (cx, cy),
+        # 留 2 像素余量：真人在用电脑时鼠标会被碰到一两个像素，
+        # 这里要验的是"它落到了我们说的位置"，不是亚像素精度
+        check("鼠标能移到指定坐标", abs(moved[0] - cx) <= 2 and abs(moved[1] - cy) <= 2,
               str(moved) + " 目标 " + str((cx, cy)))
         screen.mouse_click(cx, cy)
         pump(5)
@@ -170,7 +172,8 @@ def end_to_end() -> None:
         if after == (0, 0) and moved != (0, 0):
             print("  [跳过] 鼠标位置突然变成 0,0（桌面被切走？），后面的不测")
             return
-        check("点击不会把鼠标带偏", after == (cx, cy), str(after))
+        check("点击不会把鼠标带偏",
+              abs(after[0] - cx) <= 2 and abs(after[1] - cy) <= 2, str(after))
 
         if not focused():
             print("  [跳过] 拿不到前台焦点，键盘部分不测"

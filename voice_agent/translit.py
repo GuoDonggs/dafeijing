@@ -24,6 +24,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
+from . import paths
+
 __all__ = ["apply", "lookup", "learn", "cache_path", "known_words", "describe"]
 
 #: 最常见的词直接写死：这些词几乎每天都会出现在回答里，
@@ -67,11 +69,7 @@ _LOADED = False
 
 
 def cache_path() -> Path:
-    import os
-
-    base = os.environ.get("VOICE_AGENT_BUILD_DIR")
-    root = Path(base) if base else Path(__file__).resolve().parent.parent / "build"
-    return root / "translit.json"
+    return paths.sub("translit", create=True)
 
 
 def _load() -> None:

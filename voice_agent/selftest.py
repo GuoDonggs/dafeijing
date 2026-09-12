@@ -13,8 +13,9 @@ import traceback
 from typing import Callable
 
 from . import audio as audio_io
+from . import paths
 from . import tools
-from .config import PROJECT_ROOT, Config
+from .config import Config
 from .speech import Asr, Tts, VadSegmenter, WakeWord
 
 __all__ = ["run", "SENTENCE"]
@@ -99,7 +100,8 @@ def run(config_path: str | None = None, skip_tools: bool = False) -> bool:
             samples, rate = tts.synthesize(SENTENCE, "reply")
             if samples.size == 0:
                 raise RuntimeError("合成结果为空")
-            path = audio_io.write_wav(PROJECT_ROOT / "build" / "selftest.wav", samples, rate)
+            path = audio_io.write_wav(paths.sub("selftest_audio", create=True),
+                                      samples, rate)
             pcm = audio_io.resample(samples, rate, 16000)
             heard = asr.transcribe(pcm)
             holder["heard"] = heard

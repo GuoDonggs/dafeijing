@@ -434,6 +434,7 @@
     { key: 'llm.api_key', label: 'API Key（留空表示不改动）', type: 'password' },
     { key: 'agent.listen_timeout_ms', label: '唤醒后等待说话时长（毫秒）', type: 'number' },
     { key: 'agent.follow_up_ms', label: '追问窗口（毫秒，0 = 任务做完就回待命）', type: 'number' },
+    { key: 'paths.data_dir', label: '数据目录（记忆/截图/缓存/审计都收在这；留空 = 程序目录下的 build）', type: 'text' },
     { key: 'security.mode', label: '权限模式（只读 / 标准 / 放开）', type: 'choice',
       options: ['read-only', 'workspace-write', 'danger-full-access'] },
     { key: 'security.max_prompts_per_minute', label: '每分钟最多问几次确认（0 = 不限）', type: 'number' },

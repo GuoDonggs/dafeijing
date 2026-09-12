@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import queue
 import random
+import re
 import sys
 import threading
 import time
@@ -106,6 +107,10 @@ class VoiceAgent:
         self._speaking_since = 0.0
         self._interrupt = threading.Event()    # 立刻取消当前任务
         self._confirm_q: queue.Queue[str] = queue.Queue()
+        # 这一轮里已经答过的确认：同一个操作（同一句确认提示）不再问第二遍。
+        # 用户的抱怨是"明明确认过了，它又问一遍，好像刚才那句白说了" ——
+        # 模型重发同一个调用时就会这样。一轮结束就清空。
+        self._confirm_memory: dict[str, bool] = {}
         self._worker: threading.Thread | None = None
         self._epoch = 0
         # 工作线程自己的代次放在 thread-local 里：确认流程是「哪个任务问的就归哪个任务」，
@@ -770,6 +775,8 @@ class VoiceAgent:
         self._state = _THINK
         self._interrupt.clear()
         self._stop_speak.clear()
+        # 新一轮：上一轮的确认不再复用（同一个操作重新问一遍才安全）
+        self._confirm_memory.clear()
         started = time.perf_counter()
         try:
             reply = self.brain.respond(text, confirm=self._ask_confirm, interrupt=self._interrupt)
@@ -832,43 +839,77 @@ class VoiceAgent:
         if self._stale(epoch):
             return False
         prompt = question or self.cfg.agent.confirm.prompt
-        self._note("system", prompt)
-        self._cue("confirm")
-        self._speak(prompt, kind="confirm")
-        if self._interrupt.is_set() or self._stale(epoch):
-            return False
-        while not self._confirm_q.empty():  # 清掉过期回答
-            self._confirm_q.get_nowait()
-        self._begin_listen("confirm")
-        self._arm_listening()
-        timeout = self.cfg.agent.confirm.timeout_ms / 1000.0
-        try:
-            answer = self._confirm_q.get(timeout=timeout)
-        except queue.Empty:
-            answer = ""
-        # 等待期间可能已经被唤醒词打断/被新任务取代，此时不能再碰状态
-        if self._stale(epoch):
-            self.log("[agent] 确认期间任务已被打断，忽略这次回答")
-            return False
-        self._state = _THINK
+        key = self._confirm_key(prompt)
+        remembered = self._confirm_memory.get(key)
+        if remembered is not None:
+            # 同一个操作这一轮已经问过：直接用上次的答案，别再问第二遍
+            self.log("[agent] 这一步刚才已经确认过（" + ("同意" if remembered else "拒绝")
+                     + "），不再重复问")
+            return remembered
+        answer = ""
+        for attempt in range(2):
+            self._note("system", prompt if attempt == 0 else ("（再问一次）" + prompt))
+            self._cue("confirm")
+            self._speak(prompt, kind="confirm")
+            if self._interrupt.is_set() or self._stale(epoch):
+                return False
+            while not self._confirm_q.empty():  # 清掉过期回答
+                self._confirm_q.get_nowait()
+            self._begin_listen("confirm")
+            self._arm_listening()
+            timeout = self.cfg.agent.confirm.timeout_ms / 1000.0
+            try:
+                answer = self._confirm_q.get(timeout=timeout)
+            except queue.Empty:
+                answer = ""
+            # 等待期间可能已经被唤醒词打断/被新任务取代，此时不能再碰状态
+            if self._stale(epoch):
+                self.log("[agent] 确认期间任务已被打断，忽略这次回答")
+                return False
+            self._state = _THINK
+            if answer.strip():
+                break
+            if attempt == 0:
+                # 一次没听清就问第二遍 —— 直接判"拒绝"的话，用户会看到模型
+                # 又发起同一个操作、再问一遍，像是"刚才那句确认白说了"。
+                self.log("[agent] 确认没听清，再问一次")
+                self._speak("我没听清。要" + self._action_words(prompt)
+                            + "吗？说「确认」或者「取消」。", kind="notice")
         if not answer.strip():
-            self.log("[agent] 确认超时，按拒绝处理")
-            self._speak("没听到回答，我先不做了。", kind="notice")
+            self.log("[agent] 确认两次都没听到回答，按拒绝处理")
+            self._speak("还是没听到，我先不做了。", kind="notice")
+            self._confirm_memory[key] = False
             return False
 
         value = answer.strip()
         self._note("user", value)
         self.log("[agent] 确认回答：" + value)
         if any(word and word in value for word in self.cfg.agent.confirm.no):
+            self._confirm_memory[key] = False
             return False
         if any(word and word in value for word in self.cfg.agent.confirm.yes):
+            self._confirm_memory[key] = True
             return True
         verdict = self.brain.judge(prompt, value)
         if verdict is None:
             # 语义判断不可用：既没听到明确的「确认」也没听到「取消」，保守拒绝
             self._speak("我没听准，为安全起见先不执行。", kind="notice")
+            self._confirm_memory[key] = False
             return False
-        return verdict
+        self._confirm_memory[key] = bool(verdict)
+        return bool(verdict)
+
+    @staticmethod
+    def _confirm_key(prompt: str) -> str:
+        """同一句确认提示算同一个操作（工具名和参数都已经拼在里面了）。"""
+        return re.sub(r"\s+", "", str(prompt or ""))[:120]
+
+    @staticmethod
+    def _action_words(prompt: str) -> str:
+        """从确认提示里抠出"要做什么"，好用在第二遍的短问句里。"""
+        text = str(prompt or "").strip()
+        text = text.replace("，确认吗？", "").replace("确认吗？", "")
+        return text[:24] or "这样做"
 
     # ───────────────────── 播报 / 打断 ─────────────────────
 

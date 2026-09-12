@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from ._shared import HOME, SCREENSHOT_DIR
+from ._shared import HOME, screenshot_dir
 
 _CMD_SYNTAX = re.compile(r'[&|<>^"\']')
 
@@ -194,9 +194,9 @@ def screenshot(monitor: int = 0, region: str = "", name: str = "") -> str:
         return "截屏失败：" + str(exc)[:80]
     if shot.size == 0:
         return "截屏失败：没有拿到画面"
-    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    folder = screenshot_dir(create=True)
     tag = "-" + re.sub(r"\W+", "", str(name))[:16] if str(name or "").strip() else ""
-    path = SCREENSHOT_DIR / ("screen" + tag + "-"
+    path = folder / ("screen" + tag + "-"
                              + datetime.now().strftime("%Y%m%d-%H%M%S") + ".png")
     try:
         Image.fromarray(shot[:, :, ::-1]).save(path)
