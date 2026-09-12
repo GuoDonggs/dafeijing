@@ -32,6 +32,8 @@ class MarksOverlay(QWidget):
 
     #: 框选完成（物理像素矩形）或取消（None），工作线程等这个信号
     selection_done = pyqtSignal(object)
+    #: 给用户的一句提示（"框太小了，再拖一次"），界面拿去写日志
+    selection_notice = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -48,6 +50,9 @@ class MarksOverlay(QWidget):
         self._selecting = ""
         self._start = QPoint()
         self._current = QRect()
+        #: 鼠标真的按下了没有。**没有它就会出现"还没按就已经定了一个角"**：
+        #: _start 默认是 (0,0)，一移动鼠标就画出一条从屏幕左上角拉过来的虚线。
+        self._pressed = False
         #: 正在"闪一下"的标记名 + 什么时候结束（"闪一下"按钮用）
         self._flash_name = ""
         self._flash_until = 0.0
@@ -107,7 +112,7 @@ class MarksOverlay(QWidget):
         painter.setFont(font)
         for mark in marks_mod.store.all():
             self._paint_mark(painter, mark, dpr)
-        if self._selecting and not self._current.isNull():
+        if self._selecting and self._pressed and not self._current.isNull():
             pen = QPen(QColor(theme.ACCENT), 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
             # 半透明填充：QColor 得用数值构造，rgba(...) 是给 QSS 用的字符串
@@ -170,6 +175,7 @@ class MarksOverlay(QWidget):
             return False
         self._selecting = "point" if kind == "point" else "region"
         self._current = QRect()
+        self._pressed = False
         self.show_overlay()
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, False)
         self.show()                     # 改了 flag 要重新 show 才生效
@@ -189,6 +195,7 @@ class MarksOverlay(QWidget):
         """选择结束（正常结束或取消）。"""
         self._selecting = ""
         self._current = QRect()
+        self._pressed = False
         self.unsetCursor()
         self.releaseKeyboard()
         self.clearMask()            # 松开之后恢复"点得穿"，别挡住桌面
@@ -205,33 +212,46 @@ class MarksOverlay(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802
         if not self._selecting or event.button() != Qt.MouseButton.LeftButton:
             return
-        self._start = event.position().toPoint()
+        self._pressed = True
+        self._start = event.position().toPoint()          # 第一个角从**按下**这里算
         self._current = QRect(self._start, self._start)
         self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: ANN001, N802
         if not self._selecting:
             return
+        point = event.position().toPoint()
         if self._selecting == "point":
-            self._current = QRect(event.position().toPoint(), event.position().toPoint())
+            # 标点：还没按下也画一个小圆点跟着走，用户才知道会标在哪
+            self._current = QRect(point, point)
+        elif self._pressed:
+            # 框选：**只有按住时**才拉框。没按就画的话，第一个角会默认落在
+            # 屏幕左上角（_start 的初始值），看起来像"还没按就定了一个角"。
+            self._current = QRect(self._start, point).normalized()
         else:
-            self._current = QRect(self._start, event.position().toPoint()).normalized()
+            return
         self.update()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
         if not self._selecting or event.button() != Qt.MouseButton.LeftButton:
             return
+        self._pressed = False
         dpr = self._dpr()
         point = event.position().toPoint()
         result: dict
         if self._selecting == "point":
+            # 标点：点一下就够了，不用拖
             result = {"kind": "point",
                       "x": int((point.x() + self.x()) * dpr),
                       "y": int((point.y() + self.y()) * dpr)}
         else:
             rect = QRect(self._start, point).normalized()
             if rect.width() < 8 or rect.height() < 8:
-                self.selection_done.emit(None)      # 手抖点了一下，当取消
+                # 只是点了一下（没拖动）：不当作"取消"，而是留在框选模式里
+                # 让他再拖一次 —— 以前这里直接把模式关掉了，用户得重新点按钮。
+                self._current = QRect()
+                self.update()
+                self.selection_notice.emit("框太小了，按住鼠标拖一个框出来（按 Esc 取消）")
                 return
             result = {"kind": "region",
                       "x1": int((rect.left() + self.x()) * dpr),

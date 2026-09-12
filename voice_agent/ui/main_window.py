@@ -345,6 +345,8 @@ class MainWindow(QWidget):
 
             self._marks_overlay = MarksOverlay(self)
             self._marks_overlay.selection_done.connect(self._on_selection_done)
+            # "框太小了，再拖一次"这类提示直接进运行日志
+            self._marks_overlay.selection_notice.connect(self.console.log)
         return self._marks_overlay
 
     def start_marks(self, kind: str = "region") -> None:

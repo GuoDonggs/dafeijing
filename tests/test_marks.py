@@ -195,12 +195,41 @@ def main() -> int:
 
         overlay.start_selection("region")
         check("进入框选模式后能接收鼠标", overlay._selecting == "region", overlay._selecting)
-        start = QPointF(20, 30)
-        end = QPointF(220, 130)
+
         def _event(kind, pos, button, buttons):  # noqa: ANN001
             return QMouseEvent(kind, pos, QPointF(overlay.mapToGlobal(pos.toPoint())),
                                button, buttons, Qt.KeyboardModifier.NoModifier)
 
+        # 还没按下时移动鼠标：**不能**画出一个从屏幕左上角拉过来的框。
+        # （_start 的初始值是 (0,0)，老代码一移动就画，看起来像"没按就定了一个角"）
+        overlay.mouseMoveEvent(_event(QMouseEvent.Type.MouseMove, QPointF(300, 200),
+                                      Qt.MouseButton.NoButton, Qt.MouseButton.NoButton))
+        empty = overlay.grab().toImage()
+        edge = any(empty.pixelColor(x, 1).alpha() > 60 for x in range(0, 400, 10))
+        check("没按下鼠标时不会冒出框（旧代码从左上角拉虚线）", not edge, "上边缘没有框线")
+        check("没按下时也不记第一个角", not overlay._pressed)
+
+        # 原地点一下（不拖动）：不结束选择，而是留在框选模式里等重拖
+        notices: list = []
+        overlay.selection_notice.connect(notices.append)
+        picks: list = []
+        overlay.selection_done.connect(picks.append)
+        spot = QPointF(150, 160)
+        overlay.mousePressEvent(_event(QMouseEvent.Type.MouseButtonPress, spot,
+                                       Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton))
+        overlay.mouseReleaseEvent(_event(QMouseEvent.Type.MouseButtonRelease, spot,
+                                         Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton))
+        app.processEvents()
+        check("原地点一下不会创建选取", not picks, str(picks))
+        check("点一下之后还留在框选模式（要求重拖）",
+              overlay._selecting == "region" and not overlay._pressed, overlay._selecting)
+        check("会提示一句人话", bool(notices) and "太小" in notices[0],
+              notices[0] if notices else "")
+        overlay.selection_notice.disconnect(notices.append)
+        overlay.selection_done.disconnect(picks.append)
+
+        start = QPointF(20, 30)
+        end = QPointF(220, 130)
         overlay.mousePressEvent(_event(QMouseEvent.Type.MouseButtonPress, start,
                                        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton))
         overlay.mouseMoveEvent(_event(QMouseEvent.Type.MouseMove, end,
@@ -226,7 +255,9 @@ def main() -> int:
               str(alphas))
 
         # 拖拽中的那块填充必须是**半透明**的：以前用 QColor(rgba(...)) 构造，
-        # QColor 不认那个字符串 → 无效颜色 → 画成不透明的纯色
+        # QColor 不认那个字符串 → 无效颜色 → 画成不透明的纯色。
+        # （橡皮筋只在按住时画，所以这里要模拟"正在拖"）
+        overlay._pressed = True
         overlay._start = QPointF(10, 10).toPoint()
         overlay._current = QRect(10, 10, 200, 120)
         shot = overlay.grab().toImage()
