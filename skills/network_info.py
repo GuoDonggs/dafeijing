@@ -40,6 +40,8 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {}},
         "handler": handler,
         "confirm": False,
+        # 用途标签：写在给模型的说明最前面，帮它一眼看出这是个什么活儿的工具
+        "tags": ["系统", "查网络"],
         # 没有 API Key 时的触发词
         "triggers": ["网络信息", "局域网地址", "我的ip", "电脑叫什么", "主机名"],
     }

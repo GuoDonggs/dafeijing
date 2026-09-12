@@ -128,7 +128,8 @@ def mouse_scroll_tool(amount: int = 3, horizontal: bool = False) -> str:
 
 
 def find_on_screen_tool(image: str = "", confidence: float = 0.8,
-                        region: str = "", monitor: int = 0) -> str:
+                        region: str = "", monitor: int = 0,
+                        method: str = "auto") -> str:
     """在屏幕上找一张图，返回它的位置坐标。
 
     image 可以直接给路径，也可以只给**名字**（参考图片目录里的文件名）。
@@ -153,24 +154,36 @@ def find_on_screen_tool(image: str = "", confidence: float = 0.8,
             # 实际搜了整个桌面，还可能点到别的屏幕上去。
             return "这台机器上没有第 " + str(int(monitor)) + " 块屏幕"
     try:
-        hits = _screen().find_template(image, confidence=_confidence(confidence), region=rect)
+        hits = _screen().find_template(image, confidence=_confidence(confidence),
+                                       region=rect, method=method)
     except FileNotFoundError as exc:
         return str(exc)
     except Exception as exc:  # noqa: BLE001
         return "找图失败：" + str(exc)[:80]
     where = ("，只在 " + str(region) + " 里找") if str(region or "").strip() else ""
     if not hits:
+        if _screen().template_is_flat(image):
+            return ("你给的那张图基本是纯色的（没有花纹、文字或边框），"
+                    "这种图没法在屏幕上定位 —— 屏幕上一大片地方都「像」它。"
+                    "截一块带周围内容的区域当模板，或者改用 look_at_screen 让视觉模型看")
         return ("屏幕上没找到这张图" + where + "（阈值 "
-                + str(round(float(confidence), 2)) + "）")
+                + str(round(float(confidence), 2))
+                + "；模板匹配和 SIFT 特征匹配都试过了。"
+                "要是它确实在屏幕上，把那一小块截下来当模板更准）")
     best = hits[0]
     extra = ("，另外还有 " + str(len(hits) - 1) + " 处相似位置") if len(hits) > 1 else ""
+    how = "（SIFT 特征匹配：这张图和你给的模板有缩放/旋转差异）" if str(
+        best.get("method")) == "sift" else ""
     return ("找到了，在屏幕 " + str(best["x"]) + "," + str(best["y"])
-            + " 位置，相似度 " + str(round(best["score"] * 100)) + "%" + where + extra)
+            + " 位置，相似度 " + str(round(best["score"] * 100)) + "%"
+            + where + extra + how
+            + "。下一步可以直接 mouse_click 这个坐标，或者用 mark_region 把它框下来记成「范围N」")
 
 
 def click_image_tool(image: str = "", times: int = 1, interval_ms: int = 200,
                      confidence: float = 0.8, button: str = "left",
-                     region: str = "", monitor: int = 0) -> str:
+                     region: str = "", monitor: int = 0,
+                     method: str = "auto") -> str:
     """找到屏幕上的图片并点击它（连点器）。
 
     image 可以是路径，也可以是参考图片目录里的名字；region 限定只在这一块里找
@@ -194,7 +207,7 @@ def click_image_tool(image: str = "", times: int = 1, interval_ms: int = 200,
     try:
         module = _screen()
         hits = module.find_template(image, confidence=_confidence(confidence),
-                                    region=rect, limit=1)
+                                    region=rect, limit=1, method=method)
         if not hits:
             return "屏幕上没找到这张图，没有点击"
         spot = hits[0]

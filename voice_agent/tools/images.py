@@ -23,8 +23,18 @@ def _screen():
     return screen_mod
 
 
+def _how(hit: dict) -> str:
+    """这一处是模板匹配找到的，还是 SIFT 兜底找到的？
+
+    SIFT 找到的通常是"参考图被缩放过/转过一点角度"，说清楚用户才知道
+    为什么相似度不是 99%。
+    """
+    return "（SIFT 特征匹配）" if str(hit.get("method")) == "sift" else ""
+
+
 def find_in_image_tool(image: str = "", template: str = "",
-                       confidence: float = 0.8, scales: str = "") -> str:
+                       confidence: float = 0.8, scales: str = "",
+                       method: str = "auto") -> str:
     """在一张图片里找另一张图。"""
     if not str(image).strip():
         return "没说要在大图是哪张（给我图片路径）"
@@ -37,17 +47,23 @@ def find_in_image_tool(image: str = "", template: str = "",
         factors = tuple(float(part) for part in str(scales).replace("，", ",").split(",")
                         if part.strip()) if str(scales).strip() else (1.0, 0.9, 1.1)
         hits = _screen().find_in_image(image, template, confidence=float(confidence),
-                                       scales=factors or (1.0,))
+                                       scales=factors or (1.0,), method=method)
     except FileNotFoundError as exc:
         return str(exc)
     except Exception as exc:  # noqa: BLE001
         return "比对失败：" + str(exc)[:80]
     if not hits:
-        return ("这张图里没有找到它（阈值 " + str(round(float(confidence), 2)) + "）")
+        if _screen().template_is_flat(template):
+            return ("要找的那张图（" + str(template) + "）基本是纯色的，没有花纹/文字/边框"
+                    "可做定位依据 —— 换一张带周围内容的小图当模板更靠谱")
+        return ("这张图里没有找到它（阈值 " + str(round(float(confidence), 2))
+                + "；模板匹配和 SIFT 都试过了）")
     best = hits[0]
     extra = ("，另外还有 " + str(len(hits) - 1) + " 处相似位置") if len(hits) > 1 else ""
     return ("找到了，在这张图的 " + str(best["x"]) + "," + str(best["y"])
-            + " 位置，相似度 " + str(round(best["score"] * 100)) + "%" + extra)
+            + " 位置，相似度 " + str(round(best["score"] * 100)) + "%"
+            + _how(best) + extra +
+            "。要接着在屏幕上找就把它交给 find_on_screen，找到位置后可以用 mark_region 框下来。")
 
 
 def list_reference_tool() -> str:

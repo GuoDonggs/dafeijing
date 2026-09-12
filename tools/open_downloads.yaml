@@ -5,6 +5,8 @@
 name: open_downloads
 title: 打开下载文件夹
 description: 打开当前用户的「下载」文件夹。用户说「打开下载文件夹」「我的下载」时调用。
+# 用途标签：一句话说清"这是个什么活儿的工具"，模型挑工具时会先看它
+tags: [文件, 打开目录]
 action:
   type: app
   target: "%USERPROFILE%\\Downloads"

@@ -109,6 +109,9 @@ class Tool:
     # LLM 模式不依赖它（模型自己看 description 判断），但没有 API Key 时
     # 它是自定义技能唯一能被「说出来」的入口。
     triggers: tuple = ()
+    #: 用途标签：**同一件事有好几种做法时**，模型靠它一眼挑对的那个。
+    #: 会写在给模型的说明最前面（【找图/本地/不花钱】…），词表见 _TAGS_DOC。
+    tags: tuple = ()
 
     @property
     def follow_up(self) -> bool:
@@ -196,11 +199,16 @@ class Tool:
         return "、".join(words[:3])
 
     def schema(self) -> dict:
+        # 标签写在说明最前面：模型扫一眼就知道"这是干什么的、要不要花钱"。
+        # 找一张图这件事有三个工具能干（本地找 / 截图问视觉模型 / 连点），
+        # 没有这行标签时它经常挑最贵、最慢的那条路。
+        description = ("【" + "·".join(self.tags) + "】" + self.description) if self.tags \
+            else self.description
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
+                "description": description,
                 "parameters": self.parameters,
             },
         }
@@ -248,8 +256,17 @@ def register(tool: Tool, replace: bool = False) -> None:
     """
     if not replace and tool.name in REGISTRY:
         raise ValueError("工具名重复：" + tool.name)
+    # 标题和用途标签都在这里统一补：加工具的人只要写 name/description/parameters，
+    # 界面上的短名字和给模型看的标签自动就有（少一处漏写的机会）。
+    changes: dict = {}
     if not tool.title:
-        tool = _replace(tool, title=_BUILTIN_TITLES.get(tool.name, ""))
+        changes["title"] = _BUILTIN_TITLES.get(tool.name, "")
+    if not tool.tags:
+        tags = _BUILTIN_TAGS.get(tool.name, ())
+        if tags:
+            changes["tags"] = tags
+    if changes:
+        tool = _replace(tool, **changes)
     REGISTRY[tool.name] = tool
 
 
@@ -694,6 +711,83 @@ _BUILTIN_TITLES = {
     "wait": "等一会儿",
     "keep_listening": "继续听你说",
 }
+#: 用途标签：**同一件事有好几种做法时**，模型靠它挑对的那个。
+#: 会显示在给模型的工具说明最前面（【找图·本地·不花钱】…）。
+#:
+#: 最要紧的是「找图」和「看图」这一组：在屏幕上找一张**认得出的图**这件事，
+#: 本地模板匹配（毫秒级、不花钱）和"截图去问视觉模型"（几秒、一次调用）都能干，
+#: 不标清楚的话模型经常挑后面那条最慢最贵的路 —— 用户看到的是"它截了屏、想了半天、
+#: 才开始动手"。标签 + 系统提示里的速查表把这件事说在前面。
+_BUILTIN_TAGS: dict[str, tuple] = {
+    # ── 找图 / 看图（最要紧的一组）──
+    "find_on_screen": ("找图", "本地", "不花钱"),
+    "find_in_image": ("找图", "本地", "不花钱"),
+    "click_image": ("找图", "本地", "顺手点它"),
+    "list_reference": ("找图", "看有哪些模板"),
+    "reference_dir": ("找图", "模板放哪"),
+    "resize_image": ("图像", "本地"),
+    "look_at_screen": ("看图", "视觉模型", "慢", "花钱"),
+    "screenshot": ("截图", "本地"),
+    # ── 标记：找到位置之后固定下来，之后一律用名字引用 ──
+    "mark_region": ("标记", "框选"),
+    "mark_point": ("标记", "点一下"),
+    "list_marks": ("标记", "看一遍"),
+    "remove_mark": ("标记", "擦掉"),
+    "clear_marks": ("标记", "清空"),
+    "show_marks": ("标记", "只藏不删"),
+    # ── 鼠标 / 键盘 ──
+    "mouse_position": ("鼠标", "查位置"),
+    "mouse_move": ("鼠标", "移动"),
+    "mouse_click": ("鼠标", "点击"),
+    "mouse_drag": ("鼠标", "拖拽"),
+    "mouse_scroll": ("鼠标", "滚动"),
+    "type_text": ("键盘", "打字"),
+    "press_keys": ("键盘", "快捷键"),
+    # ── 文件 ──
+    "list_files": ("文件", "看目录"),
+    "search_files": ("文件", "按名字找"),
+    "find_files": ("文件", "通配符找"),
+    "grep_files": ("文件", "搜内容"),
+    "read_file": ("文件", "读"),
+    "write_file": ("文件", "写", "会改磁盘"),
+    "edit_file": ("文件", "改", "会改磁盘"),
+    "open_path": ("文件", "用它打开"),
+    "remember": ("记忆", "记下来"),
+    "recall": ("记忆", "想起来"),
+    # ── 应用 / 网页 ──
+    "open_app": ("应用", "打开"),
+    "open_url": ("网页", "打开"),
+    "web_search": ("网页", "搜一下"),
+    "app_map": ("应用", "改映射表"),
+    # ── 系统 ──
+    "get_time": ("时间", "本地"),
+    "system_info": ("系统", "查状态"),
+    "list_windows": ("窗口", "看列表"),
+    "focus_window": ("窗口", "切到前面"),
+    "list_processes": ("进程", "看谁占资源"),
+    "kill_process": ("进程", "结束它", "要确认"),
+    "wait": ("等待",),
+    "volume": ("声音", "调音量"),
+    "media_control": ("声音", "播放控制"),
+    "clipboard": ("剪贴板",),
+    "lock_screen": ("系统", "锁屏"),
+    "power": ("电源", "关机重启", "要确认"),
+    "run_command": ("系统", "执行命令", "要确认"),
+    "window": ("窗口", "桌面/关闭/切换"),
+    # ── 交互 / 后台 ──
+    "keep_listening": ("连续对话", "别走"),
+    "new_session": ("连续对话", "换话题"),
+    "start_watch": ("盯梢", "定时看", "要确认"),
+    "list_watches": ("盯梢", "看进度"),
+    "stop_watch": ("盯梢", "别盯了"),
+    "spawn_subagent": ("子代理", "后台干"),
+    "subagent_status": ("子代理", "看进度"),
+    "cancel_subagent": ("子代理", "叫停"),
+    "permission_mode": ("权限", "查或切"),
+    "restart_self": ("程序自己", "重启", "要确认"),
+    "quit_self": ("程序自己", "退出", "要确认"),
+}
+
 SKILL_INFOS: list = []
 _SKILLS_LOADED = False
 _BUILTIN_SNAPSHOT: dict[str, Tool] = {}

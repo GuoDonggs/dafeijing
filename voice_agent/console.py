@@ -887,6 +887,8 @@ class Console:
                 "source": tool.source,
                 # builtin / skill / tool（tools/ 目录里的自定义工具）
                 "builtin": tool.source == "builtin",
+                # 用途标签：界面上和模型看到的是同一份，用户能一眼对上是"哪个工具干的"
+                "tags": list(tool.tags),
                 "params": list((tool.parameters.get("properties") or {}).keys()),
             }
             for tool in tools.REGISTRY.values()

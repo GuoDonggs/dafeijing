@@ -129,6 +129,7 @@ def _make_handler(console: Console):
                     {
                         "name": t.name, "title": t.display, "description": t.description,
                         "confirm": t.confirm, "source": t.source,
+                        "tags": list(t.tags),
                         "parameters": list((t.parameters.get("properties") or {}).keys()),
                     }
                     for t in tools.REGISTRY.values()

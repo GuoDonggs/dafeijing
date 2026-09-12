@@ -392,46 +392,51 @@ def resolve_template(image: str | Path) -> Path:
     raise FileNotFoundError("找不到图片「" + raw + "」。" + hint)
 
 
-def find_in_image(image: str | Path, template: str | Path, confidence: float = 0.8,
-                  scales: tuple[float, ...] = (1.0,), limit: int = 5) -> list[dict]:
-    """在一张图片里找另一张图（不碰屏幕）。
+# ── 匹配：模板匹配 + SIFT 兜底 ──────────────────────────────────────
+#
+# 两种算法各管一段，**先便宜的后贵的**：
+#
+#   matchTemplate  毫秒级、尺寸对得上时极准（界面截图 99% 的活儿它都干得了），
+#                  但**不会旋转、稍微缩放就掉分**（DPI 不同、窗口被拖大过…）；
+#   SIFT + 单应   对旋转/缩放/局部遮挡都不敏感，代价是慢（几十到几百毫秒，
+#                  4K 全屏更久），而且图上得有纹理 —— 纯色按钮它抓不到特征。
+#
+# 所以默认 method="auto"：先跑模板匹配，**一个都没找到**才用 SIFT 兜底。
+# 用户那句"用文档里那张图去屏幕上找"经常是旋转/缩放过的，正是 SIFT 的活儿。
+MATCH_METHODS = ("auto", "template", "sift")
+#: SIFT 处理场景前先缩到这个尺寸以内：关键点检测是 O(像素)，4K 原图慢好几倍，
+#: 而缩一半对匹配的影响很小（算完把坐标乘回去就行）。
+SIFT_SCENE_MAX = 1600
+#: 模板太小就没有足够的特征点，SIFT 没意义。
+SIFT_MIN_SIDE = 14
+#: 灰度标准差低于它就算"纯色图"：这种图定位不了（模板匹配会假命中、
+#: SIFT 也没有特征点），只能说清楚而不是硬给一个结果。
+FLAT_STD = 4.0
+#: SIFT 兜底的门槛：**内点数**为主（比例容易被少量误匹配拉高）。
+SIFT_MIN_INLIERS = 8
+SIFT_MIN_RATIO = 0.2
 
-    用来回答"这张截图里有没有那个图标""参考图 A 里有没有 B"，
-    也用来在把图送进视觉模型之前先自己比对一遍 —— 本地比对不要钱。
-    """
+
+def template_is_flat(image: str | Path) -> bool:
+    """这张图是不是"纯色/没花纹"（这种图没法在屏幕上定位）。"""
     import cv2  # noqa: PLC0415
 
-    source = Path(image)
-    if not source.is_file():
-        raise FileNotFoundError("找不到图片：" + str(image))
-    shot = _imread(source)
-    if shot is None:
-        raise ValueError("读不出这张图片：" + str(image))
-    target_path = resolve_template(template)
-    target = _imread(target_path)
-    if target is None:
-        raise ValueError("读不出要找的那张图：" + str(target_path))
-    shot_gray = cv2.cvtColor(shot, cv2.COLOR_BGR2GRAY)
-    shot_h, shot_w = shot_gray.shape[:2]
-    found: list[dict] = []
-    for scale in scales:
-        if scale <= 0:
-            continue
-        height = int(target.shape[0] * scale)
-        width = int(target.shape[1] * scale)
-        if height < 6 or width < 6 or height > shot_h or width > shot_w:
-            continue
-        scaled = cv2.resize(target, (width, height), interpolation=cv2.INTER_AREA)
-        result = cv2.matchTemplate(shot_gray, cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY),
-                                   cv2.TM_CCOEFF_NORMED)
-        ys, xs = np.where(result >= float(confidence))
-        for x, y in zip(xs.tolist(), ys.tolist()):
-            found.append({"x": int(x + width / 2), "y": int(y + height / 2),
-                          "score": float(result[y, x]), "scale": float(scale),
-                          "w": width, "h": height})
-    found.sort(key=lambda item: item["score"], reverse=True)
+    try:
+        target = resolve_template(image)
+    except FileNotFoundError:
+        return False
+    data = _imread(target)
+    if data is None:
+        return False
+    gray = cv2.cvtColor(data, cv2.COLOR_BGR2GRAY) if data.ndim == 3 else data
+    return float(np.std(gray)) < FLAT_STD
+
+
+def _dedupe(hits: list[dict], limit: int) -> list[dict]:
+    """同一目标在多个尺度/多次匹配上会重复命中，按重叠度只留分最高的那个。"""
+    hits.sort(key=lambda item: item["score"], reverse=True)
     kept: list[dict] = []
-    for item in found:
+    for item in hits:
         if any(abs(item["x"] - other["x"]) < max(item["w"], other["w"]) * 0.6
                and abs(item["y"] - other["y"]) < max(item["h"], other["h"]) * 0.6
                for other in kept):
@@ -442,17 +447,187 @@ def find_in_image(image: str | Path, template: str | Path, confidence: float = 0
     return kept
 
 
-def find_template(image: str | Path, confidence: float = 0.8,
-                  region: tuple[int, int, int, int] | None = None,
-                  scales: tuple[float, ...] = (1.0, 0.9, 1.1, 0.8, 1.25),
-                  limit: int = 5) -> list[dict]:
-    """在屏幕上找一张小图，返回 [(中心x, 中心y, 相似度, 缩放)]。
+def _template_pass(scene_gray, template, confidence: float,
+                   scales: tuple[float, ...], offset: tuple[int, int]) -> list[dict]:
+    """多尺度模板匹配。多尺度是为了容忍界面缩放（125% DPI、浏览器缩放）。"""
+    import cv2  # noqa: PLC0415
 
-    多尺度匹配是为了容忍界面缩放（125% DPI、浏览器缩放）导致的尺寸差异；
-    同一目标会在多个尺度上重复命中，所以最后要按重叠度去重。
+    # 纯色（或几乎没有花纹）的模板在 TM_CCOEFF_NORMED 下是 0/0：OpenCV 会给出一片
+    # 接近 1.0 的分数，于是"随便哪儿都算命中"。这不是用户要的结果，
+    # 而且报出来的是"相似度 99%"这种假话 —— 直接跳过，交给上层如实说。
+    if float(np.std(template)) < FLAT_STD:
+        return []
+    shot_h, shot_w = scene_gray.shape[:2]
+    offset_x, offset_y = offset
+    found: list[dict] = []
+    for scale in scales:
+        if scale <= 0:
+            continue
+        height = int(template.shape[0] * scale)
+        width = int(template.shape[1] * scale)
+        if height < 6 or width < 6 or height > shot_h or width > shot_w:
+            continue
+        scaled = cv2.resize(template, (width, height), interpolation=cv2.INTER_AREA)
+        result = cv2.matchTemplate(scene_gray, cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY),
+                                   cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(result >= float(confidence))
+        for x, y in zip(xs.tolist(), ys.tolist()):
+            found.append({
+                "x": int(x + width / 2 + offset_x),
+                "y": int(y + height / 2 + offset_y),
+                "score": float(result[y, x]),
+                "scale": float(scale),
+                "w": width, "h": height,
+                "method": "template",
+            })
+    return found
+
+
+def _sift_pass(scene_gray, template, confidence: float,
+               offset: tuple[int, int], relaxed: bool) -> list[dict]:
+    """SIFT 特征匹配 + RANSAC 单应：旋转、缩放、轻微遮挡都能对上。
+
+    返回至多一个命中（RANSAC 找的是**最一致的那一个**变换）。
+    relaxed=True 时门槛按内点数走（auto 兜底：宁可多给一个候选，也不要"明明在却找不到"）；
+    relaxed=False 时按调用方给的 confidence 卡（显式指定 method="sift"）。
     """
     import cv2  # noqa: PLC0415
 
+    if not hasattr(cv2, "SIFT_create"):
+        return []
+    h, w = template.shape[:2]
+    if min(h, w) < SIFT_MIN_SIDE:
+        return []
+    factor = 1.0
+    scene = scene_gray
+    shot_h, shot_w = scene_gray.shape[:2]
+    if max(shot_h, shot_w) > SIFT_SCENE_MAX:
+        factor = SIFT_SCENE_MAX / float(max(shot_h, shot_w))
+        scene = cv2.resize(scene_gray, (max(1, int(shot_w * factor)),
+                                        max(1, int(shot_h * factor))),
+                           interpolation=cv2.INTER_AREA)
+    try:
+        sift = cv2.SIFT_create(nfeatures=3000)
+        key_t, des_t = sift.detectAndCompute(template, None)
+        key_s, des_s = sift.detectAndCompute(scene, None)
+    except Exception:  # noqa: BLE001 - 这个 OpenCV 构建没有 SIFT 就当作不可用
+        return []
+    if des_t is None or des_s is None or len(key_t) < 4 or len(key_s) < 4:
+        return []
+    pairs = []
+    try:
+        flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+        pairs = flann.knnMatch(des_t, des_s, k=2)
+    except Exception:  # noqa: BLE001 - FLANN 不可用就退回暴力匹配
+        try:
+            pairs = cv2.BFMatcher().knnMatch(des_t, des_s, k=2)
+        except Exception:  # noqa: BLE001
+            return []
+    good = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
+    if len(good) < SIFT_MIN_INLIERS:
+        return []
+    src = np.float32([key_t[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    dst = np.float32([key_s[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    try:
+        matrix, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
+    except cv2.error:
+        return []
+    if matrix is None or mask is None:
+        return []
+    inliers = int(mask.sum())
+    ratio = inliers / float(len(good))
+    if inliers < SIFT_MIN_INLIERS or ratio < SIFT_MIN_RATIO:
+        return []
+    # 内点比例 → 一个和模板匹配同一量级的"相似度"，好让上层统一卡阈值、
+    # 也好在播报里说"相似度 87%"
+    score = min(0.99, 0.55 + 0.45 * ratio)
+    if not relaxed and score < float(confidence):
+        return []
+    corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(-1, 1, 2)
+    try:
+        box = cv2.perspectiveTransform(corners, matrix).reshape(-1, 2)
+    except cv2.error:
+        return []
+    if not np.all(np.isfinite(box)):
+        return []
+    center_x = float(box[:, 0].mean())
+    center_y = float(box[:, 1].mean())
+    if not (0 <= center_x <= scene.shape[1] and 0 <= center_y <= scene.shape[0]):
+        return []
+    width = float((np.linalg.norm(box[1] - box[0]) + np.linalg.norm(box[2] - box[3])) / 2)
+    height = float((np.linalg.norm(box[3] - box[0]) + np.linalg.norm(box[2] - box[1])) / 2)
+    back = 1.0 / factor
+    offset_x, offset_y = offset
+    return [{
+        "x": int(center_x * back + offset_x),
+        "y": int(center_y * back + offset_y),
+        "score": float(score),
+        "scale": float(round(width / max(1, w), 3)),
+        "w": max(1, int(width * back)), "h": max(1, int(height * back)),
+        "method": "sift",
+    }]
+
+
+def match_template(scene, template, confidence: float = 0.8,
+                   scales: tuple[float, ...] = (1.0, 0.9, 1.1, 0.8, 1.25),
+                   limit: int = 5, offset: tuple[int, int] = (0, 0),
+                   method: str = "auto") -> list[dict]:
+    """在 scene（BGR 数组）里找 template，返回命中列表（坐标已加上 offset）。
+
+    method：auto（先模板匹配，没找到再用 SIFT）/ template / sift。
+    """
+    import cv2  # noqa: PLC0415
+
+    want = str(method or "auto").strip().lower()
+    if want not in MATCH_METHODS:
+        want = "auto"
+    scene_gray = cv2.cvtColor(scene, cv2.COLOR_BGR2GRAY) if scene.ndim == 3 else scene
+    hits: list[dict] = []
+    if want in ("auto", "template"):
+        hits = _template_pass(scene_gray, template, confidence, scales, offset)
+    if not hits and want in ("auto", "sift"):
+        hits = _sift_pass(scene_gray, template, confidence, offset,
+                          relaxed=(want == "auto"))
+    return _dedupe(hits, limit)
+
+
+def find_in_image(image: str | Path, template: str | Path, confidence: float = 0.8,
+                  scales: tuple[float, ...] = (1.0,), limit: int = 5,
+                  method: str = "auto") -> list[dict]:
+    """在一张图片里找另一张图（不碰屏幕）。
+
+    用来回答"这张截图里有没有那个图标""参考图 A 里有没有 B"，
+    也用来在把图送进视觉模型之前先自己比对一遍 —— 本地比对不要钱。
+    method="auto" 时模板匹配没找到会自动用 SIFT 再试一遍（旋转/缩放过的图）。
+    """
+    source = Path(image)
+    if not source.is_file():
+        raise FileNotFoundError("找不到图片：" + str(image))
+    shot = _imread(source)
+    if shot is None:
+        raise ValueError("读不出这张图片：" + str(image))
+    target_path = resolve_template(template)
+    target = _imread(target_path)
+    if target is None:
+        raise ValueError("读不出要找的那张图：" + str(target_path))
+    # 坐标是**相对这张大图**的（不是屏幕坐标）—— 调用方按这个说话
+    return match_template(shot, target, confidence=confidence, scales=scales,
+                          limit=limit, offset=(0, 0), method=method)
+
+
+def find_template(image: str | Path, confidence: float = 0.8,
+                  region: tuple[int, int, int, int] | None = None,
+                  scales: tuple[float, ...] = (1.0, 0.9, 1.1, 0.8, 1.25),
+                  limit: int = 5, method: str = "auto") -> list[dict]:
+    """在屏幕上找一张小图，返回命中的位置（**绝对屏幕坐标**）。
+
+    多尺度匹配是为了容忍界面缩放（125% DPI、浏览器缩放）导致的尺寸差异；
+    同一目标会在多个尺度上重复命中，所以最后要按重叠度去重。
+
+    method="auto"（默认）：先用模板匹配（毫秒级）；一个都没找到才用 SIFT 再试一遍
+    —— 参考图是从文档里截的、被缩放过或转过一点角度时，模板匹配对不上，
+    而 SIFT 靠特征点还能找到。命中项带 method 字段，回答里会说清是哪种。
+    """
     target = resolve_template(image)
     template = _imread(target)
     if template is None:
@@ -467,42 +642,8 @@ def find_template(image: str | Path, confidence: float = 0.8,
         offset_x, offset_y = int(region[0]), int(region[1])
     else:
         offset_x, offset_y = _virtual_screen()[:2]
-    shot_gray = cv2.cvtColor(shot, cv2.COLOR_BGR2GRAY)
-    shot_h, shot_w = shot_gray.shape[:2]
-
-    found: list[dict] = []
-    for scale in scales:
-        if scale <= 0:
-            continue
-        height = int(template.shape[0] * scale)
-        width = int(template.shape[1] * scale)
-        if height < 8 or width < 8 or height > shot_h or width > shot_w:
-            continue
-        scaled = cv2.resize(template, (width, height), interpolation=cv2.INTER_AREA)
-        result = cv2.matchTemplate(shot_gray, cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY),
-                                   cv2.TM_CCOEFF_NORMED)
-        ys, xs = np.where(result >= float(confidence))
-        for x, y in zip(xs.tolist(), ys.tolist()):
-            found.append({
-                "x": int(x + width / 2 + offset_x),
-                "y": int(y + height / 2 + offset_y),
-                "score": float(result[y, x]),
-                "scale": float(scale),
-                "w": width, "h": height,
-            })
-
-    # 去重：重叠面积大的只留分最高的那个
-    found.sort(key=lambda item: item["score"], reverse=True)
-    kept: list[dict] = []
-    for item in found:
-        if any(abs(item["x"] - other["x"]) < max(item["w"], other["w"]) * 0.6
-               and abs(item["y"] - other["y"]) < max(item["h"], other["h"]) * 0.6
-               for other in kept):
-            continue
-        kept.append(item)
-        if len(kept) >= max(1, int(limit)):
-            break
-    return kept
+    return match_template(shot, template, confidence=confidence, scales=scales,
+                          limit=limit, offset=(offset_x, offset_y), method=method)
 
 
 def resize_image(image: str | Path, width: int = 0, height: int = 0,

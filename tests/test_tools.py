@@ -605,6 +605,132 @@ def spoken_location_tools() -> None:
         tools.set_utterance("")
 
 
+def sift_matching() -> None:
+    """旋转 / 缩放过的参考图：模板匹配对不上时，SIFT 兜底要找得到。
+
+    这是用户那句「根据文档里的图片介绍去屏幕上找」的常见形态 ——
+    文档里的图往往被缩放过、或者角度差一点，模板匹配直接归零。
+    """
+    print("找图：模板匹配 + SIFT 兜底")
+    import tempfile as _tempfile
+
+    import numpy as np
+
+    from voice_agent import screen
+    from voice_agent.tools import images as images_mod
+
+    try:
+        import cv2
+    except Exception as exc:  # noqa: BLE001
+        print("  跳过：没有 OpenCV（" + str(exc)[:40] + "）")
+        return
+    if not hasattr(cv2, "SIFT_create"):
+        print("  跳过：这个 OpenCV 构建没有 SIFT")
+        return
+
+    rng = np.random.default_rng(7)
+    # 造一张有纹理的"界面"：纯色块没有特征点，SIFT 也没辙
+    scene = (rng.random((600, 900, 3)) * 90 + 60).astype(np.uint8)
+    cv2.rectangle(scene, (620, 380), (760, 470), (40, 180, 90), -1)
+    cv2.circle(scene, (690, 425), 22, (230, 230, 240), -1)
+    cv2.putText(scene, "OK", (650, 440), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (10, 10, 10), 3)
+    patch = scene[370:480, 610:770].copy()
+
+    with _tempfile.TemporaryDirectory() as tmp:
+        scene_path = str(Path(tmp) / "scene.png")
+        patch_path = str(Path(tmp) / "patch.png")
+        cv2.imwrite(scene_path, scene)
+        cv2.imwrite(patch_path, patch)
+
+        straight = screen.find_in_image(scene_path, patch_path, confidence=0.8)
+        check("原样的图用模板匹配就能找到",
+              bool(straight) and straight[0]["method"] == "template"
+              and abs(straight[0]["x"] - 690) <= 3 and abs(straight[0]["y"] - 425) <= 3,
+              str(straight[:1]))
+
+        # 转 50 度再贴回去：模板匹配必然对不上
+        big = cv2.copyMakeBorder(patch, 80, 80, 80, 80, cv2.BORDER_REPLICATE)
+        hh, ww = big.shape[:2]
+        matrix = cv2.getRotationMatrix2D((ww / 2, hh / 2), 50, 1.0)
+        rotated = cv2.warpAffine(big, matrix, (ww, hh), borderMode=cv2.BORDER_REPLICATE)
+        rotated_path = str(Path(tmp) / "rotated.png")
+        cv2.imwrite(rotated_path, rotated)
+
+        check("转过角度的图，模板匹配确实找不到（这就是要 SIFT 的原因）",
+              screen.find_in_image(scene_path, rotated_path, confidence=0.8,
+                                   method="template") == [])
+        started = time.time()
+        auto = screen.find_in_image(scene_path, rotated_path, confidence=0.8)
+        elapsed = time.time() - started
+        check("auto 会用 SIFT 兜底找到它",
+              bool(auto) and auto[0]["method"] == "sift", str(auto[:1]))
+        check("SIFT 给的坐标基本对得上（±25 像素）",
+              bool(auto) and abs(auto[0]["x"] - 690) <= 25 and abs(auto[0]["y"] - 450) <= 25,
+              str(auto[:1]))
+        check("SIFT 兜底也是百毫秒级，不会把语音拖住", elapsed < 3.0, "%.2fs" % elapsed)
+        check("显式指定 method=sift 也走同一条路",
+              bool(screen.find_in_image(scene_path, rotated_path, confidence=0.8,
+                                        method="sift")))
+
+        # 工具层的回答要说清楚是哪一种匹配（用户才知道为什么"相似度不是 99%"）
+        answer = images_mod.find_in_image_tool(scene_path, rotated_path)
+        check("回答里点明了是 SIFT 特征匹配", "SIFT" in answer, answer[:80])
+        check("回答里给了下一步（上屏幕找 / 框下来）",
+              "find_on_screen" in answer and "mark_region" in answer, answer[-60:])
+
+        # 找不到时要如实说，而且不能只怪阈值
+        absent = screen.find_in_image(scene_path,
+                                      str(Path(tmp) / "patch.png"), confidence=0.99)
+        check("阈值太高时就是找不到（不再硬凑一个结果）", absent == [] or absent[0]["score"] >= 0.99)
+        blank = np.full((40, 40, 3), 200, np.uint8)
+        blank_path = str(Path(tmp) / "blank.png")
+        cv2.imwrite(blank_path, blank)
+        check("纯色小图不会让 SIFT 炸掉（没有特征点就返回空）",
+              screen.find_in_image(scene_path, blank_path, confidence=0.8) == [])
+
+
+def tool_tags() -> None:
+    """用途标签：同一件事有好几种做法时，模型靠它挑对的那个。
+
+    重点盯「找图」这一组：本地模板匹配（毫秒、不花钱）和"截图问视觉模型"
+    （几秒、一次调用）都能干，标签和提示词必须把这件事说在前面。
+    """
+    print("工具的用途标签")
+    from voice_agent import skills as skills_mod
+
+    tools.autoload_skills()
+    builtin = [item for item in tools.REGISTRY.values() if item.source == "builtin"]
+    missing = sorted(item.name for item in builtin if not item.tags)
+    check("每个内置工具都有用途标签（" + str(len(builtin)) + " 个）", not missing,
+          "缺：" + "、".join(missing))
+    schema = tools.REGISTRY["find_on_screen"].schema()["function"]["description"]
+    check("标签写在给模型的说明最前面", schema.startswith("【找图"), schema[:30])
+    check("「本地找图」和「视觉模型看图」的标签能区分开",
+          "不花钱" in tools.REGISTRY["find_on_screen"].tags
+          and "花钱" in tools.REGISTRY["look_at_screen"].tags,
+          str(tools.REGISTRY["find_on_screen"].tags) + " / "
+          + str(tools.REGISTRY["look_at_screen"].tags))
+    from voice_agent.brain import _TOOL_HINT
+
+    check("提示词里写明：先本地找图，别先截图问模型",
+          "找图·本地·不花钱" in _TOOL_HINT and "look_at_screen" in _TOOL_HINT)
+    check("提示词里写明：找到位置就顺手标下来",
+          "mark_region" in _TOOL_HINT and "顺手固定下来" in _TOOL_HINT)
+
+    skill_tools = [item for item in tools.REGISTRY.values() if item.source != "builtin"]
+    check("自带技能也打了标签（" + str(len(skill_tools)) + " 个）",
+          all(item.tags for item in skill_tools),
+          str([item.name for item in skill_tools if not item.tags]))
+    check("技能标签支持字符串和列表两种写法",
+          skills_mod.normalize_tags("找图/本地") == ("找图", "本地")
+          and skills_mod.normalize_tags(["找图", "本地"]) == ("找图", "本地"),
+          str(skills_mod.normalize_tags("找图/本地")))
+    check("标签最多留 4 个（说明最前面那行不能变成一句话）",
+          len(skills_mod.normalize_tags("a/b/c/d/e/f")) == 4)
+    check("没写标签就是空元组，不影响老技能",
+          skills_mod.normalize_tags(None) == () and skills_mod.normalize_tags("") == ())
+
+
 def main() -> int:
     print("=== 工具层体检 ===")
     static_audit()
@@ -612,6 +738,8 @@ def main() -> int:
     live_tools()
     vision_path()
     image_tools()
+    sift_matching()
+    tool_tags()
     confirm_prompts()
     continuous_talk()
     folder_mapping()

@@ -137,6 +137,7 @@ _register(Tool(
         template={"type": "string", "description": "要找的图：路径或参考图片目录里的名字", "_required": True},
         confidence={"type": "number", "description": "相似度阈值，默认 0.8"},
         scales={"type": "string", "description": "多尺度，例如 1.0,0.9,1.1（默认这三个）"},
+        method={"type": "string", "description": "匹配方式：auto（默认，先模板匹配、没找到再用 SIFT）/ template（只模板匹配，最快）/ sift（只 SIFT，旋转缩放过的图用它）"},
     ),
     handler=find_in_image_tool,
 ))
@@ -600,7 +601,8 @@ _register(Tool(
     parameters=_params(image=_S_REQ,
                        confidence={"type": "number", "description": "相似度阈值 0~1，默认 0.8"},
                        region={"type": "string", "description": "只在框选过的这块里找，例如 范围1"},
-                       monitor={"type": "integer", "description": "第几块屏幕，1 = 主屏"}),
+                       monitor={"type": "integer", "description": "第几块屏幕，1 = 主屏"},
+                       method={"type": "string", "description": "匹配方式：auto（默认，先模板匹配、没找到再用 SIFT）/ template（只模板匹配，最快）/ sift（只 SIFT，旋转缩放过的图用它）"}),
     handler=find_on_screen_tool,
 ))
 
@@ -615,7 +617,8 @@ _register(Tool(
                        confidence={"type": "number", "description": "相似度阈值，默认 0.8"},
                        button=_S,
                        region={"type": "string", "description": "只在框选过的这块里找，例如 范围1"},
-                       monitor={"type": "integer", "description": "第几块屏幕，1 = 主屏"}),
+                       monitor={"type": "integer", "description": "第几块屏幕，1 = 主屏"},
+                       method={"type": "string", "description": "匹配方式：auto（默认，先模板匹配、没找到再用 SIFT）/ template（只模板匹配，最快）/ sift（只 SIFT，旋转缩放过的图用它）"}),
     handler=click_image_tool,
 ))
 

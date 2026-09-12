@@ -110,6 +110,25 @@ class SkillInfo:
         }
 
 
+#: 用途标签：写给模型看的"这是个什么活儿的工具"（会显示在说明最前面）。
+#: 允许写成字符串（"找图/本地"）或列表（[找图, 本地]），最多留 4 个。
+TAG_LIMIT = 4
+
+
+def normalize_tags(raw: Any) -> tuple:
+    """把技能里的 tags 统一成元组。字符串按逗号/斜杠/顿号切开。"""
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        items = re.split(r"[,，/、|]+", raw)
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        return ()
+    out = [str(item).strip() for item in items]
+    return tuple(item for item in out if item)[:TAG_LIMIT]
+
+
 def normalize_triggers(raw: Any) -> tuple:
     """把 triggers 统一成 ((说法, {预设参数}), ...)。
 
@@ -553,6 +572,7 @@ class SkillLoader:
                 confirm=confirm,
                 source=str(path),
                 triggers=normalize_triggers(data.get("triggers")),
+                tags=normalize_tags(data.get("tags")),
             ), replace=True)
             return SkillInfo(name, title, description, path, "yaml", [name], deps=deps)
         except Exception as exc:  # noqa: BLE001 - 单个技能坏了不能拖垮整体
@@ -679,6 +699,7 @@ class SkillLoader:
                 confirm=bool(raw.get("confirm", False)),
                 source=str(path),
                 triggers=normalize_triggers(raw.get("triggers")),
+                tags=normalize_tags(raw.get("tags")),
             )
         else:
             raise ValueError("TOOLS 里的元素必须是 Tool 或 dict")

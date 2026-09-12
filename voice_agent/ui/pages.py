@@ -577,6 +577,9 @@ class ToolsPage(Page):
         badges_layout = QHBoxLayout(badges)
         badges_layout.setContentsMargins(0, 0, 0, 0)
         badges_layout.setSpacing(6)
+        # 用途标签：和给模型看的是同一份 —— 用户能一眼看出"哪个工具适合干什么"
+        for tag in (tool.get("tags") or [])[:3]:
+            badges_layout.addWidget(ui.Pill(str(tag), theme.BLUE))
         if tool["confirm"]:
             badges_layout.addWidget(ui.Pill("需确认", theme.ORANGE))
         if tool.get("source") == "tool":

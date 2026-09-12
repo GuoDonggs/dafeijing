@@ -8,6 +8,8 @@ parameters:
     type: string
     description: 怎么称呼用户，例如「老板」「张工」；没听出来就填「你」
     required: true
+# 用途标签（可以写 [打招呼, 闲聊] 或 "打招呼/闲聊" 两种写法）
+tags: [打招呼, 闲聊]
 # 没有 API Key 时靠这些触发词命中；args 是预设参数（这里固定称呼为「你」）
 triggers:
   - phrase: 打个招呼
