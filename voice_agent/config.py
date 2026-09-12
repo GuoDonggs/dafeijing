@@ -362,7 +362,9 @@ class TtsCfg:
     # 这种会被当成 OOV **整词丢掉**（听起来就是"这句话少了一截"）。
     # 内置表 + 学习缓存零延迟，只有没见过的新词才会问一次模型。
     translit: bool = True
-    styles: dict[str, dict] = field(default_factory=dict)
+    # 语气参数。确认那句默认放慢一点：**听不清就没法确认**，
+    # 而确认是整个安全模型里唯一的人工闸门。
+    styles: dict[str, dict] = field(default_factory=lambda: {"confirm": {"speed": 0.94}})
 
     def style(self, kind: str) -> dict:
         """某种语气下的合成参数。

@@ -848,6 +848,11 @@ class VoiceAgent:
             return remembered
         answer = ""
         for attempt in range(2):
+            # 先清队列**再开口**：上一句确认的迟到回答（用户答慢了、
+            # 或者上一次根本没问就直接用缓存返回了）会躺在队列里，
+            # 等到这次开口之后才被清 —— 那就成了"拿上一句的回答答这一句"。
+            while not self._confirm_q.empty():
+                self._confirm_q.get_nowait()
             self._note("system", prompt if attempt == 0 else ("（再问一次）" + prompt))
             self._cue("confirm")
             self._speak(prompt, kind="confirm")
@@ -873,8 +878,8 @@ class VoiceAgent:
                 # 一次没听清就问第二遍 —— 直接判"拒绝"的话，用户会看到模型
                 # 又发起同一个操作、再问一遍，像是"刚才那句确认白说了"。
                 self.log("[agent] 确认没听清，再问一次")
-                self._speak("我没听清。要" + self._action_words(prompt)
-                            + "吗？说「确认」或者「取消」。", kind="notice")
+                self._speak("我没听清。" + self._action_words(prompt, ask=True)
+                            + "说「确认」或者「取消」。", kind="notice")
         if not answer.strip():
             self.log("[agent] 确认两次都没听到回答，按拒绝处理")
             self._speak("还是没听到，我先不做了。", kind="notice")
@@ -905,11 +910,22 @@ class VoiceAgent:
         return re.sub(r"\s+", "", str(prompt or ""))[:120]
 
     @staticmethod
-    def _action_words(prompt: str) -> str:
-        """从确认提示里抠出"要做什么"，好用在第二遍的短问句里。"""
+    def _action_words(prompt: str, ask: bool = False) -> str:
+        """从确认提示里抠出"要做什么"，好用在第二遍的短问句里。
+
+        确认提示本身的结尾就是"…，确认吗？"，直接拼第二遍会变成
+        "我没听清。要要关机吗？" —— 所以这里去掉原句的疑问收尾，
+        再按需要补一个"要不要…"。
+        """
         text = str(prompt or "").strip()
-        text = text.replace("，确认吗？", "").replace("确认吗？", "")
-        return text[:24] or "这样做"
+        text = text.replace("，确认吗？", "").replace("确认吗？", "").strip("，。 ")
+        if not text:
+            return "要不要继续"
+        if ask:
+            if text.startswith("要"):
+                return "要不要" + text[1:] + "？"
+            return "要不要" + text + "？"
+        return text[:24]
 
     # ───────────────────── 播报 / 打断 ─────────────────────
 

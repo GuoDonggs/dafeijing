@@ -418,6 +418,44 @@ def folder_mapping() -> None:
             screen.save_app_map(saved)
 
 
+def confirm_prompts() -> None:
+    """确认提示必须"念得清楚"。
+
+    用户的原话是"此操作需要xxx（听不清）"—— 因为提示里塞了路径、扩展名和英文名，
+    中文 TTS 念出来就是噪音。这里逐条验证：提示里不能有反斜杠、正斜杠、
+    文件扩展名、成串的英文。
+    """
+    print("确认提示念得清楚")
+    import re as _re
+
+    cases = [
+        ("write_file", {"path": "D:\\screen-20260912.png", "content": "x" * 400},
+         "写文件", "带时间戳的英文文件名不能念"),
+        ("write_file", {"path": "D:\\报告.docx", "content": "你好"},
+         "「报告」", "中文文件名可以说出来"),
+        ("run_command", {"command": "Get-ChildItem -Path C:\\Users -Recurse"},
+         "列出文件", "命令只说要干什么"),
+        ("kill_process", {"name": "notepad.exe"}, "记事本", "英文程序名换成中文"),
+        ("click_image", {"image": "下载按钮.png", "times": 3},
+         "「下载按钮」", "找的图用中文名"),
+        ("power", {"action": "shutdown", "delay": 60}, "关机", "动作词换成中文"),
+        ("mouse_drag", {"x1": 10, "y1": 20, "x2": 300, "y2": 400},
+         "拖拽鼠标", "坐标不念"),
+    ]
+    for name, args, must, why in cases:
+        question = tools.REGISTRY[name].confirm_question(args)
+        check("「" + name + "」：" + why, must in question, question)
+    for name in ("write_file", "run_command", "click_image", "mouse_drag", "start_watch"):
+        question = tools.REGISTRY[name].confirm_question(
+            {"path": "D:\\a\\b\\c.png", "image": "x.png", "command": "dir /s",
+             "x1": 1, "y1": 2, "x2": 3, "y2": 4, "kind": "图片", "target": "y.png"})
+        bad = _re.search(r"[\\/]", question) or _re.search(r"\.[a-z]{2,4}\b", question)
+        check("「" + name + "」的提示里没有路径分隔符和扩展名", bad is None, question)
+        check("「" + name + "」的提示够短（念得完）", len(question) <= 30,
+              str(len(question)) + " 字：" + question)
+        check("「" + name + "」的提示以确认吗结尾", question.endswith("确认吗？"), question)
+
+
 def self_control() -> None:
     """控制程序自己：开新会话 / 重启 / 退出。
 
@@ -481,6 +519,7 @@ def main() -> int:
     live_tools()
     vision_path()
     image_tools()
+    confirm_prompts()
     continuous_talk()
     folder_mapping()
     self_control()

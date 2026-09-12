@@ -248,8 +248,9 @@ def main() -> int:
     check("回答「取消」→ 拒绝执行", agent._ask_confirm("要关机，确认吗？") is False)
 
     # 同一个操作在同一轮里不会被问第二遍 —— 用户的原话是
-    # "明明确认过了它又问一遍，好像刚才那句白说了"
-    answer_later("好，你弄吧")
+    # "明明确认过了它又问一遍，好像刚才那句白说了"。
+    # 注意这一段**不要**再排"回答"：它走缓存、根本不听麦克风，
+    # 排进去的回答会留在队列里污染下一段（这是这个测试抖了很久的原因）。
     check("同一个操作再问时直接复用上次的答案（拒绝）",
           agent._ask_confirm("要关机，确认吗？") is False)
 
@@ -258,10 +259,25 @@ def main() -> int:
     check("回答「好，你弄吧」→ 放行", agent._ask_confirm("要关机，确认吗？") is True)
     check("同一轮里同样的操作也不再问第二遍（同意）",
           agent._ask_confirm("要关机，确认吗？") is True)
+
+    # 换一轮：清记忆 + 等上一段的线程落地 + 清队列
     agent._confirm_memory.clear()
-    answer_later("", delay=0.1)  # 不说话 = 超时
+    time.sleep(0.6)
+    while not agent._confirm_q.empty():
+        agent._confirm_q.get_nowait()
+    # 不说话 = 超时。注意问不清会**再问一遍**（这正是修过的行为），
+    # 所以两次尝试各推一个空回答，否则第二次要干等到超时（测试变慢又易抖）。
+    # 另外先把队列里上一场景的残留清掉，否则可能被当成"这次听到的回答"。
+    while not agent._confirm_q.empty():
+        agent._confirm_q.get_nowait()
+    threading.Thread(target=lambda: (
+        time.sleep(0.1), agent._confirm_q.put(""),
+        time.sleep(1.0), agent._confirm_q.put("")), daemon=True).start()
     agent.cfg.agent.confirm.timeout_ms = 800
     check("不回答 → 保守拒绝", agent._ask_confirm("要关机，确认吗？") is False)
+    check("没听清时会换个短句再问一遍（而不是直接拒绝）",
+          agent._action_words("要执行命令，确认吗？", ask=True) == "要不要执行命令？",
+          agent._action_words("要执行命令，确认吗？", ask=True))
 
     print("\n场景 5：唤醒后一直没人说话 → 超时回到待命")
     # 这条曾经是坏掉的：超时检查原本挂在「mic.read 返回 None」的分支里，

@@ -143,13 +143,16 @@ class Tool:
         return question + "，确认吗？"
 
     def _spoken_detail(self, args: dict) -> str:
-        """把参数压成"能听懂的一小句"。
+        """把参数压成"**念得清楚**的一小句"。
 
-        三类参数分开处理，一刀切都会出问题：
-        - **命令/脚本/代码**：念出来是一串路径和引号，用户听不懂 —— 只说"要干什么"；
-        - **正文/文本**：太长就没必要念，说"有内容"即可；
-        - **路径**：路径本身有用（用户要知道动的是哪个文件），太长就只念文件名；
-        - 其余：短的原样念，长的省略。
+        这里的目标不是"完整"，而是"用户听得懂在问什么"：念不清的东西宁可不念
+        （原文在日志和审计里都有）。三类参数分开处理：
+
+        - **命令/脚本/代码**：念出来是一串路径和引号 —— 只说"要干什么"；
+        - **正文/文本**：太长就没必要念，说"一段内容"即可；
+        - **路径/文件名**：只说"哪个盘、哪个中文名的文件"，
+          扩展名（.png）、英文名、目录层级一律不念 —— 它们念出来就是噪音；
+        - 其余：短的原样念，含英文且没有中文叫法的直接省掉。
         """
         words: list[str] = []
         for key, value in args.items():
@@ -157,24 +160,38 @@ class Tool:
             text = " ".join(str(value).split())
             if not text:
                 continue
+            if name in _QUIET_ARGS:
+                # 坐标、毫秒、相似度阈值这类数字念出来只是噪音：
+                # 用户要判断的是"它要干什么"，不是"拖了多少像素"
+                continue
             if name in ("command", "script", "code"):
                 hint = _command_hint(text)
                 if hint:
                     words.append(hint)
                 continue
             if name in ("content", "text", "body"):
-                words.append(text if len(text) <= 16 else "一段内容")
+                if len(text) <= 16 and not re.search(r"[A-Za-z]", text):
+                    words.append(text)
+                else:
+                    words.append("一段内容")
                 continue
-            if name in ("path", "file", "target", "out", "source"):
-                words.append(text if len(text) <= 24 else _tail_name(text))
+            if name in ("path", "file", "target", "out", "source", "image", "template"):
+                spoken = _spoken_path(text)
+                if spoken:
+                    words.append(spoken)
                 continue
             label = _ARG_LABELS.get(name)
             if label and re.fullmatch(r"-?\d+(?:\.\d+)?", text):
                 words.append(label[0] + text + label[1])
                 continue
             mapped = _ARG_WORDS.get(text.lower())
-            words.append(mapped or (text if len(text) <= 24 else ""))
-        return "、".join(word for word in words if word)
+            if mapped:
+                words.append(mapped)
+                continue
+            spoken = _spoken_name(text)
+            if spoken:
+                words.append(spoken)
+        return "、".join(words[:3])
 
     def schema(self) -> dict:
         return {
@@ -319,6 +336,50 @@ def _tail_name(path: str) -> str:
     """长路径只念最后一段（文件名），前面那些目录念了也没人记得住。"""
     parts = re.split(r"[\\/]+", str(path).strip())
     return parts[-1] if parts and parts[-1] else str(path)
+
+
+#: 常见程序的念法：英文名直接念出来 TTS 是念不清的（不是漏字就是逐字母拼）
+_NAME_ZH = {
+    "notepad": "记事本", "calc": "计算器", "mspaint": "画图", "explorer": "资源管理器",
+    "chrome": "谷歌浏览器", "msedge": "浏览器", "edge": "浏览器", "firefox": "火狐",
+    "cmd": "命令行", "powershell": "命令行", "wt": "终端", "taskmgr": "任务管理器",
+    "wechat": "微信", "weixin": "微信", "qq": "QQ", "dingtalk": "钉钉",
+    "cloudmusic": "网易云音乐", "code": "编辑器", "devenv": "开发工具",
+}
+
+
+def _spoken_path(path: str) -> str:
+    """把路径压成"念得清楚"的一小段。
+
+    一张截图存成带时间戳的英文名（盘符 + 反斜杠 + 一串字母数字 + 扩展名），
+    原样念出来用户根本听不出在问什么。所以只保留**盘符**和**纯中文的文件名主干**，
+    其余（目录、扩展名、英文名、数字串）一概不念。
+    """
+    raw = str(path or "").strip().replace("/", "\\")
+    drive = re.match(r"^([A-Za-z]):", raw)
+    parts = [part for part in raw.split("\\") if part]
+    name = parts[-1] if parts else raw
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    where = (drive.group(1).upper() + "盘") if drive else ""
+    spoken = ("「" + stem + "」") if re.fullmatch(r"[\u4e00-\u9fff0-9]{1,10}", stem or "") else ""
+    if where and spoken:
+        return where + "的" + spoken
+    return where or spoken or "一个文件"
+
+
+def _spoken_name(text: str) -> str:
+    """非路径的参数：认识的中文叫法就说，含英文又没叫法的直接省掉。"""
+    value = str(text or "").strip()
+    if not value or len(value) > 24:
+        return ""
+    low = value.lower()
+    if low.endswith(".exe"):
+        low = low[:-4]
+    if low in _NAME_ZH:
+        return _NAME_ZH[low]
+    if re.search(r"[A-Za-z]", value):
+        return ""            # 英文名念不清，不如不念
+    return value
     
     
 def _command_hint(command: str) -> str:
@@ -456,6 +517,12 @@ _FOLLOW_UP_TOOLS = frozenset({
     "app_map", "resize_image", "read_file", "recall", "list_watches", "subagent_status",
 })
 
+#: 这些参数念出来纯属噪音（坐标、毫秒、阈值、内部开关）
+_QUIET_ARGS = frozenset({
+    "x", "y", "x1", "y1", "x2", "y2", "duration_ms", "interval_ms", "confidence",
+    "scales", "limit", "max_chars", "quality", "timeout_s", "once", "max_minutes",
+    "out", "reason",
+})
 #: 这些参数是"给机器看的"，念出来听不懂（命令、脚本、代码、正文）
 _OPAQUE_ARGS = ("command", "script", "code", "content", "text")
 #: 数字参数的念法：（前缀，后缀）。"延迟 60 秒"比"60"清楚得多
