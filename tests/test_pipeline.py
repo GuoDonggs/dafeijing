@@ -279,6 +279,18 @@ def main() -> int:
           agent._action_words("要执行命令，确认吗？", ask=True) == "要不要执行命令？",
           agent._action_words("要执行命令，确认吗？", ask=True))
 
+    # 词表判定：**否定说法里也含「行 / 是 / 好」这些肯定字**，
+    # 以前是 `word in answer` 的子串匹配，实测「不太行」「不是」全被判成同意 ——
+    # 而确认是整个权限模型里唯一的人工闸门，判反了就是关机被放行。
+    print("\n场景 4b：否定说法不能被当成同意")
+    for text in ("确认", "好的", "行", "可以", "没问题", "是的", "嗯，行"):
+        check("「" + text + "」算同意", agent._confirm_verdict(text) is True, repr(text))
+    for text in ("不太行", "不是", "不是这个意思", "不用了", "算了", "先不要",
+                 "我觉得不行", "好什么好", "别"):
+        check("「" + text + "」不算同意", agent._confirm_verdict(text) is not True, repr(text))
+    check("长句不靠词表硬判（交给语义判断）",
+          agent._confirm_verdict("可以是可以，不过我现在真的没空") is None)
+
     print("\n场景 5：唤醒后一直没人说话 → 超时回到待命")
     # 这条曾经是坏掉的：超时检查原本挂在「mic.read 返回 None」的分支里，
     # 而麦克风每 32ms 就送来一块，那个分支几乎永远不执行。

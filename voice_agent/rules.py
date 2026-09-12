@@ -174,13 +174,16 @@ def route(text: str) -> tuple[str, dict[str, Any]] | None:
     # ── 打开 / 搜索 ────────────────────────────────────────────────
     search = re.search(r"(搜索|搜一下|搜个|查一下|查询|百度|谷歌)(.+)", core)
     if search:
-        return "web_search", {"query": search.group(2).strip(" 一下个")}
+        # 不能用 str.strip(" 一下个")：它是**按字符集**剥的，
+        # "搜索一下个税" 会被剥成 "税"、"打开个人所得税" 会被剥成 "人所得税"。
+        # 只剥一次前缀词。
+        return "web_search", {"query": re.sub(r"^[\s一了下个吧]+", "", search.group(2)).strip()}
     url = _DOMAIN.search(value)
     if url and re.search(r"(打开|访问|上)", value):
         return "open_url", {"url": url.group(0)}
     opened = re.search(r"(打开|启动|运行|开一下|开启)(.+)", core)
     if opened:
-        target = opened.group(2).strip(" 一下个吧")
+        target = re.sub(r"^[\s一了下个吧]+", "", opened.group(2)).strip()
         if _DOMAIN.search(target):
             return "open_url", {"url": target}
         return "open_app", {"name": target}

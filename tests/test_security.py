@@ -195,6 +195,25 @@ def main() -> int:
     check("记录了限流", "rate_limited" in text)
     check("记录了明文链路降级", "transport_downgrade" in text)
 
+    print("\n参数坏掉时绝不拿默认值去调工具")
+    # 模型的 arguments 被截断（max_tokens、网关只回半截 JSON）时，以前会
+    # 当成 {} 直接调 handler —— 而 power 的默认动作是**关机**。这条断言守住它。
+    security.configure(make_config("danger-full-access"))
+    security.reset_limits()
+    broken = tools.call_result("power", '{"action": "shut', on_confirm=lambda *_: True)
+    check("参数不是合法 JSON 时不执行（哪怕放开了权限）",
+          not broken.ok and broken.code == "bad_arguments", broken.code)
+    check("空参数仍然照常（有些工具就是没有参数）", tools.call_result("get_time", None).ok)
+
+    print("\n提权提示必须说清切到哪一档")
+    # 只读模式下被问一句光秃秃的「要调整权限，确认吗？」然后答「确认」，
+    # 用户根本不知道自己批准了什么 —— 提示里必须念出目标模式。
+    question = tools.REGISTRY["permission_mode"].confirm_question(
+        {"mode": "danger-full-access", "reason": "任务做不下去"})
+    check("提权确认里念得出目标模式", "放开权限" in question, question)
+    readonly = tools.REGISTRY["permission_mode"].confirm_question({"mode": "read-only"})
+    check("切回只读也说得出", "只读模式" in readonly, readonly)
+
     print("\n放开模式：底线名单可以关掉")
     security.configure(make_config("danger-full-access"))
     security.reset_limits()

@@ -905,6 +905,14 @@ class NoticeBar(QFrame):
             self.hint.setText(hint)
         if not self.isHidden() and self._effect.opacity() > 0.9:
             return
+        # hide_bar 会把 _after_hide 挂到动画的 finished 上；那次连接如果没断，
+        # 这里刚淡入进来、200ms 后就被它一句 setVisible(False) 藏掉，
+        # 而每 280ms 一次的刷新又把它显示出来 —— 提示条于是不停地闪，
+        # 字根本读不完。显示之前先摘掉那个连接。
+        try:
+            self._anim.finished.disconnect(self._after_hide)
+        except TypeError:
+            pass
         if self.isHidden():
             self.setMaximumHeight(0)
             self.setVisible(True)
@@ -922,6 +930,10 @@ class NoticeBar(QFrame):
         if not self.isHidden():
             self.setMaximumHeight(16777215)
 
+    def _after_hide(self) -> None:
+        """淡出结束才真的藏起来（提前藏会让动画看不见）。"""
+        self.setVisible(False)
+
     def hide_bar(self) -> None:
         if self.isHidden():
             return
@@ -934,7 +946,7 @@ class NoticeBar(QFrame):
             self._anim.finished.disconnect()
         except TypeError:
             pass
-        self._anim.finished.connect(lambda: self.setVisible(False))
+        self._anim.finished.connect(self._after_hide)
         self._anim.start()
 
     def set_busy(self, busy: bool) -> None:

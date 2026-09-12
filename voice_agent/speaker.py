@@ -65,7 +65,6 @@ class Voiceprint:
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.enabled = bool(getattr(cfg.speaker, "enabled", False))
         self.profile_path = Path(getattr(cfg.speaker, "profile", "") or profile_path())
         self._extractor = None
         self._manager = None
@@ -81,6 +80,21 @@ class Voiceprint:
         self._vectors: dict[str, list[float]] = {}
         self._meta: dict[str, int] = {}     # 每个人录了几次
         self.load_profile()
+
+    @property
+    def enabled(self) -> bool:
+        """开关每次现读配置。
+
+        以前是在构造时快照一份：设置窗口里勾上「只认主人的声音」完全没反应
+        （引擎早就造好了），而它又不属于"改了要重启"的那类键，界面上连提示
+        都没有 —— 用户只会以为这个功能坏了。
+        """
+        return bool(getattr(self.cfg.speaker, "enabled", False))
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        """写回配置（而不是在实例上留一份快照）—— 读写走同一个地方才不会对不上。"""
+        self.cfg.speaker.enabled = bool(value)
 
     @property
     def threshold(self) -> float:

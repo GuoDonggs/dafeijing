@@ -11,6 +11,7 @@ import ctypes
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -166,11 +167,16 @@ def volume(action: str = "up", steps: int = 0) -> str:
         "min": ("volume_down", 25),
     }
     key, default_steps = mapping.get(what, ("volume_up", 5))
-    count = int(steps) if steps else default_steps
+    try:
+        # 每按一次要 sleep，不封顶的话 steps=100000 会把这一轮卡住将近一小时
+        count = max(1, min(int(steps) if steps else default_steps, 60))
+    except (TypeError, ValueError):
+        count = default_steps
     if not _tap_media(key, count):
         return "调不了音量，这台系统不支持媒体键"
     if key == "mute":
-        return "已经把声音静音了"
+        # unmute 按的是同一个静音键（Windows 的静音是个开关），文案不能写死"静音了"
+        return "已经切换了静音开关（原本静音的话现在就有声音了）" if what == "unmute" else "已经把声音静音了"
     return "音量已经" + ("调到最大" if what in ("max", "最大") else "调小了" if key == "volume_down" else "调大了")
 
 
@@ -256,11 +262,24 @@ def clipboard(action: str = "get", text: str = "") -> str:
     if what in ("set", "写", "复制", "copy"):
         if not text:
             return "没说要复制什么"
-        _ps("Set-Clipboard -Value ([Console]::In.ReadToEnd())", stdin_text=text)
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 _PS_UTF8 + "Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
+                input=text.encode("utf-8"),
+                capture_output=True,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return "复制到剪贴板失败：" + str(exc)[:60]
+        if proc.returncode != 0:
+            return "复制到剪贴板失败：" + (_decode(proc.stderr or b"").strip()[:80] or "返回码 " + str(proc.returncode))
         return "已经复制到剪贴板"
     value = _ps("Get-Clipboard -Raw", timeout=10.0)
     if not value:
-        return "剪贴板是空的"
+        # "读不到"和"空"是两回事，别把失败说成空
+        return "剪贴板里没有文字（或者读不出来）"
     return "剪贴板里是：" + re.sub(r"\s+", " ", value)[:200]
 
 
@@ -331,6 +350,9 @@ def list_windows(filter: str = "") -> str:
     if key:
         titles = [t for t in titles if key in t.lower()]
     if not titles:
+        probe = str(_ps("'ok'", timeout=10.0) or "").strip()
+        if "ok" not in probe:
+            return "读不到窗口列表（PowerShell 没能执行），这不代表没有窗口"
         return ("没有匹配的窗口" if key else "现在没有打开的窗口")
     head = titles[:8]
     more = ("，还有 " + str(len(titles) - len(head)) + " 个") if len(titles) > len(head) else ""
@@ -379,7 +401,12 @@ def list_processes(filter: str = "", top: int = 5) -> str:
         return "读不到进程列表：" + str(exc)[:60]
     rows = [line.strip() for line in str(out or "").splitlines() if "|" in line]
     if not rows:
-        return ("没有名字里带「" + key + "」的进程" if key else "没读到进程")
+        # 空结果有两种可能：真的没有，和**根本没读出来**（PowerShell 起不来）。
+        # 一律说成"没有"就是在撒谎，用户会以为自己机器上真的没有这个进程。
+        probe = str(_ps("'ok'", timeout=10.0) or "").strip()
+        if "ok" not in probe:
+            return "读不到进程列表（PowerShell 没能执行），这不代表没有这个进程"
+        return ("没有名字里带「" + key + "」的进程" if key else "现在没有能列出来的进程")
     parts = []
     for row in rows:
         name, _, size = row.partition("|")
@@ -392,14 +419,21 @@ def kill_process(name: str = "", force: bool = True) -> str:
     key = (name or "").strip()
     if not key:
         return "没说要结束哪个进程"
+    if any(ch in key for ch in "*?[]"):
+        # Get-Process -Name '*' 会命中**所有**进程，一条 Stop-Process -Force
+        # 就能把整台机器上的程序全杀掉。通配符在这里没有任何正当用途。
+        return "进程名里不能带通配符（* ? [ ]），请给出确切的程序名"
     safe = key.replace("'", "''")
     script = (
         "$p = Get-Process -Name '" + safe + "' -ErrorAction SilentlyContinue; "
         "if (-not $p) { $p = Get-Process | Where-Object { $_.MainWindowTitle -like '*" + safe + "*' } }; "
         "if (-not $p) { 'NONE' } else { "
-        "$n = ($p | Measure-Object).Count; "
-        "$p | Stop-Process" + (" -Force" if force else "") + " -ErrorAction SilentlyContinue; "
-        "'OK ' + $n }"
+        # 逐个杀并统计**真正成功**的：以前 $n 数的是"匹配到几个"，
+        # 杀失败（权限不够、进程已退出）也照样报"已经结束 N 个"。
+        "$ok = 0; $fail = 0; "
+        "foreach ($x in $p) { try { Stop-Process -Id $x.Id" + (" -Force" if force else "")
+        + " -ErrorAction Stop; $ok++ } catch { $fail++ } }; "
+        "'OK ' + $ok + ' ' + $fail }"
     )
     try:
         out = str(_ps(script, timeout=20.0) or "").strip()
@@ -408,8 +442,13 @@ def kill_process(name: str = "", force: bool = True) -> str:
     if out.startswith("NONE"):
         return "没有找到叫「" + key + "」的进程"
     if out.startswith("OK"):
-        count = out.split()[-1]
-        return "已经结束 " + key + ("（" + count + " 个进程）" if count != "1" else "")
+        parts = out.split()
+        done = parts[1] if len(parts) > 1 else "0"
+        failed = parts[2] if len(parts) > 2 else "0"
+        if done == "0":
+            return "没能结束「" + key + "」：可能是权限不够（试试用管理员运行）"
+        text = "已经结束 " + key + ("（" + done + " 个进程）" if done != "1" else "")
+        return (text + "；另有 " + failed + " 个没杀掉") if failed != "0" else text
     return "结束进程的结果看不懂：" + out[:60]
 
 
@@ -431,22 +470,55 @@ def lock_screen() -> str:
     return "这个系统不支持锁屏"
 
 
-def power(action: str = "shutdown", delay: int = 0) -> str:
-    """关机 / 重启 / 睡眠 / 注销（敏感操作，需要确认）。"""
+def power(action: str = "", delay: int = 0) -> str:
+    """关机 / 重启 / 睡眠 / 注销（敏感操作，需要确认）。
+
+    action 默认**留空而不是 shutdown**：模型把参数拼坏、网关回了个空对象时，
+    "默认关机"是能想象到的最坏兜底。没说要做什么就什么都不做。
+    """
     what = (action or "").strip().lower()
+    if not what:
+        return "没说清楚要关机、重启、睡眠还是注销，这次先不动"
+    try:
+        # delay 以前**根本没被用**：确认提示念的是"延迟 60 秒，确认吗"，
+        # 用户点头之后却是立刻关机 —— 提示撒谎比不做延迟更糟。
+        wait = max(0, min(int(delay or 0), 3600))
+    except (TypeError, ValueError):
+        wait = 0
+    after = ("，" + str(wait) + " 秒后执行") if wait else ""
     if any(key in what for key in ("shutdown", "关机")):
-        _ps("Stop-Computer -Force")
-        return "正在关机"
+        subprocess.Popen(["shutdown", "/s", "/t", str(wait), "/f"],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return "好，正在关机" + after + "（想取消就说「取消关机」）" if wait else "正在关机"
     if any(key in what for key in ("restart", "reboot", "重启")):
-        _ps("Restart-Computer -Force")
-        return "正在重启"
+        subprocess.Popen(["shutdown", "/r", "/t", str(wait), "/f"],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return "好，正在重启" + after if wait else "正在重启"
+    if any(key in what for key in ("cancel", "取消", "别关", "不关")):
+        try:
+            proc = subprocess.run(["shutdown", "/a"], capture_output=True, timeout=10,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if proc.returncode == 0:
+                return "已经取消了计划中的关机"
+        except Exception:  # noqa: BLE001
+            pass
+        return "没有可取消的关机计划（或者已经来不及了）"
     if any(key in what for key in ("sleep", "睡眠", "休眠")):
+        if wait:
+            # 睡眠/注销的接口没有延迟参数，只能自己等
+            threading.Timer(wait, lambda: subprocess.Popen(
+                ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))).start()
+            return "好，" + str(wait) + " 秒后进入睡眠"
         subprocess.Popen(
             ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return "进入睡眠了"
     if any(key in what for key in ("logoff", "注销")):
+        if wait:
+            threading.Timer(wait, lambda: _ps("logoff")).start()
+            return "好，" + str(wait) + " 秒后注销"
         _ps("logoff")
         return "正在注销"
     return "不支持的电源操作"
@@ -458,25 +530,49 @@ def run_command(command: str = "", timeout: int = 30) -> str:
     if not line:
         return "没说要执行什么命令"
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             line,
             shell=True,
-            capture_output=True,
-            timeout=min(max(int(timeout), 3), 120),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except subprocess.TimeoutExpired:
-        return "命令执行超时了"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return "命令执行失败：" + str(exc)[:80]
+    try:
+        raw_out, raw_err = proc.communicate(timeout=min(max(int(timeout), 3), 120))
+    except subprocess.TimeoutExpired:
+        # 光 kill 掉 cmd.exe 是不够的：它派生的孙进程还活着（继续吃 CPU、
+        # 继续攥着 stdout 管道），而随后的 communicate() 会一直等管道关闭 ——
+        # 这条工具就再也不返回了，"命令执行超时了"根本说不出口。
+        # taskkill /T 连整棵进程树一起收，communicate 再带一次超时兜底。
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception:  # noqa: BLE001
+            pass
+        proc.kill()
+        try:
+            proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        return "命令执行超时了（超过 " + str(timeout) + " 秒，已经强制结束）"
     # 用同一个"先 UTF-8 再 ANSI"的解码：命令的错误输出经常是系统代码页，
     # 一律按 UTF-8 解会变成乱码，模型看不懂就会开始瞎试别的办法。
-    output = (_decode(proc.stdout or b"") + " " + _decode(proc.stderr or b"")).strip()
+    output = (_decode(raw_out or b"") + " " + _decode(raw_err or b"")).strip()
     output = re.sub(r"\s+", " ", output)
+    code = int(proc.returncode or 0)
     if not output:
-        return "命令执行完了，没有输出，返回码 " + str(proc.returncode)
+        return ("命令执行完了，没有输出，返回码 " + str(code)) if code == 0 else (
+            "命令失败，返回码 " + str(code) + "，没有输出")
     if len(output) > 400:
         output = output[:400] + "……后面还有"
+    # 返回码非 0 就是**失败**：以前只要有输出就当成成功上报，
+    # 模型会把一条报错的命令当成做成了。
+    if code != 0:
+        return "命令失败（返回码 " + str(code) + "）：" + output
     return "命令输出：" + output
 
 

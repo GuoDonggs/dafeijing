@@ -48,6 +48,21 @@ _IDLE, _LISTEN, _THINK, _WAIT = "idle", "listen", "think", "wait"
 # 一打断整句回复就没了 —— 用户听到的正是"它回复了却没出声"。
 BARGE_IN_GRACE_S = 0.8
 
+#: 否定字：出现在肯定词前面时，「行」就不再是「行」。
+#: 语音确认是整个权限模型里**唯一**的人工闸门，把「不太行」听成「行」
+#: 等于把关机、执行命令这类操作放了行 —— 所以这里只看字面，宁可多问一次。
+_NEGATIVE_CHARS = "不没别勿非甭毋无莫休"
+#: 答话开头的语气词（「嗯，行」里的「嗯，」先剥掉再判）。
+_FILLER = re.compile(r"^[\s，,。.、！!~～呃嗯哦噢唉哎诶啊呀呐唔额]+")
+#: 反问 / 犹豫的尾巴：跟在一个肯定词后面就不是同意（「好什么好」）。
+_DOUBT_TAILS = ("什么", "啥")
+#: 出现这些说法一律交给语义判断（「行，再说吧」不是干脆的同意）。
+#: 「不过 / 但是」这类转折：答案是"可以，不过…"时不能当成干脆的同意
+_DOUBT_WORDS = ("怎么可能", "为什么", "真的吗", "至于吗", "再说", "等下",
+                "不过", "但是", "可是", "只是", "然而", "有点")
+#: 超过这个长度就别拿词表硬判：长句里几乎一定夹着「是 / 行 / 好」这类字。
+_WORDLIST_MAX = 16
+
 
 class VoiceAgent:
     def __init__(self, cfg: Config, log: Callable[[str], None] = print) -> None:
@@ -77,6 +92,8 @@ class VoiceAgent:
         self.asr: Asr | None = None
         self.tts: Tts | None = None
         self.mic: audio_io.Mic | None = None
+        # 合成引擎"按需补建"用的锁（见 _ensure_tts）
+        self._tts_lock = threading.Lock()
 
         self._state = _IDLE
         self._listen_target = "command"       # command = 听指令，confirm = 听确认
@@ -120,6 +137,8 @@ class VoiceAgent:
         self._running = False
         self._in_device: int | None = None
         self._out_device: int | None = None
+        #: 唤醒词开关（wake.enabled）。关掉之后只能从界面派发指令。
+        self._wake_on = bool(getattr(cfg.wake, "enabled", True))
 
         # 给界面看的「最近发生了什么」
         self.last_heard = ""
@@ -163,9 +182,11 @@ class VoiceAgent:
         assert self.wake and self.vad and self.asr
         self.open_devices()
 
+        self._wake_on = bool(getattr(self.cfg.wake, "enabled", True))
         if announce:
             # 唤醒词只打进日志：马上要开麦克风，从扬声器里念出来会变成自唤醒
-            self.log("[agent] 唤醒词：" + "、".join(self.cfg.wake.keywords))
+            self.log("[agent] 唤醒词：" + ("、".join(self.cfg.wake.keywords)
+                                           if self._wake_on else "已关闭"))
             self._speak("语音助手已就绪，随时听候吩咐。", kind="notice")
 
         self._running = True
@@ -178,7 +199,11 @@ class VoiceAgent:
         self.mic.start()
         self._loop_thread = threading.Thread(target=self._loop, name="voice-agent-loop", daemon=True)
         self._loop_thread.start()
-        self.log("[agent] 已开始监听，喊「" + self.cfg.wake.keywords[0] + "」唤醒我")
+        if self._wake_on:
+            self.log("[agent] 已开始监听，喊「" + self.cfg.wake.keywords[0] + "」唤醒我")
+        else:
+            self.log("[agent] 唤醒词已关闭（wake.enabled: false）："
+                     "只能用界面上的「派发」或「录音测试」下指令")
 
     def _loop(self) -> None:
         """采集循环：只做喂唤醒词 / 喂 VAD / 收句子。
@@ -337,6 +362,16 @@ class VoiceAgent:
 
     def _on_block(self, block: np.ndarray) -> None:
         assert self.wake and self.vad
+        if not self._wake_on:
+            # wake.enabled: false —— 唤醒词整个关掉，只能从界面派发指令。
+            # 以前这一项**没有任何代码读**：用户以为关了，喊一声它还是答应。
+            if self._state == _LISTEN:
+                self._mark_voice(block)
+                utterance = self.vad.feed(block)
+                if utterance is not None and utterance.size >= int(
+                        self.cfg.audio.sample_rate * self.cfg.agent.min_speech_ms / 1000):
+                    self._on_utterance(utterance)
+            return
         # 播报期间：只跑唤醒词，用于打断
         if self._speaking.is_set():
             if self.cfg.agent.barge_in_wake and self.wake.feed(block):
@@ -583,11 +618,17 @@ class VoiceAgent:
             self._announce.append((name, text))
 
     def _on_watch_hit(self, item) -> None:
-        """轮询命中（跑在轮询线程里）：同样只入队，由主循环择机播报。"""
+        """轮询命中 / 出错 / 盯到点（跑在轮询线程里）：只入队，由主循环择机播报。"""
         name = item.id
         text = item.last or "条件成立了"
+        if getattr(item, "state", "") == "error":
+            text = "盯不下去了：" + (item.error or text)
+        elif getattr(item, "state", "") == "stopped":
+            text = text or "盯的时间到了，先停下"
         self._note("assistant", "【" + name + "】" + text)
-        if not self.cfg.agent.subagent_announce:
+        # 用**自己**的开关：以前借的是 subagent_announce（文档写的是"子代理做完
+        # 主动汇报"），用户只想关子代理播报，却连"盯着…告诉我"的唯一出口一起没了。
+        if not bool(getattr(self.cfg.agent, "watch_announce", True)):
             self.log("[watch] 命中（配置为不播报）：" + text[:40])
             return
         with self._announce_lock:
@@ -704,6 +745,10 @@ class VoiceAgent:
         self._last_voice_at = 0.0
         self._voice_ms = 0.0
         self._guard_samples = int(self.cfg.audio.sample_rate * 0.2)
+
+    def note(self, role: str, text: str) -> None:
+        """对外记一条对话（界面把"用户敲的那句"也放进来时用）。"""
+        self._note(role, text)
 
     def _note(self, role: str, text: str) -> None:
         """记一条对话（role: user / assistant / system），给网页界面用。"""
@@ -831,6 +876,8 @@ class VoiceAgent:
         """敏感操作前的语音确认：问一句，听一句，再判断同意与否。"""
         if not self.cfg.agent.confirm.enabled:
             return True
+        if self.tts is None and self.cfg.tts.enabled:
+            self._ensure_tts()      # 刚在设置里打开的，这里补建，别误判成"关着"
         if self.tts is None or not self.cfg.tts.enabled:
             # 问不出口就没办法确认。宁可拒绝，也不能默默执行敏感操作。
             self.log("[agent] 需要确认，但语音播报已关闭，按拒绝处理")
@@ -892,13 +939,9 @@ class VoiceAgent:
         value = answer.strip()
         self._note("user", value)
         self.log("[agent] 确认回答：" + value)
-        if any(word and word in value for word in self.cfg.agent.confirm.no):
-            self._confirm_memory[key] = False
-            return False
-        if any(word and word in value for word in self.cfg.agent.confirm.yes):
-            self._confirm_memory[key] = True
-            return True
-        verdict = self.brain.judge(prompt, value)
+        verdict = self._confirm_verdict(value)
+        if verdict is None:
+            verdict = self.brain.judge(prompt, value)
         if verdict is None:
             # 语义判断不可用：既没听到明确的「确认」也没听到「取消」，保守拒绝
             self._speak("我没听准，为安全起见先不执行。", kind="notice")
@@ -906,6 +949,48 @@ class VoiceAgent:
             return False
         self._confirm_memory[key] = bool(verdict)
         return bool(verdict)
+
+    def _confirm_verdict(self, answer: str) -> bool | None:
+        """用词表判「同意 / 拒绝」；判不准返回 None（交给语义判断）。
+
+        不能简单写成 `word in answer`：默认词表里有「行」「是」「好」这些单字，
+        而**否定说法里也含这些字** —— 实测「不太行」「不是」「不是这个意思」
+        全被判成了同意，而确认是整个权限模型里唯一的人工闸门，听反了就是
+        关机、执行命令被放行。所以按三条规则来：
+
+        1. 否定词表 **先**看（和 config 里的注释一致：先判 no 才不会误放行）；
+        2. 肯定词要看它前面有没有否定字、后面有没有反问尾巴 ——「不太行」的
+           「行」前面是「不」，「好什么好」的「好」后面是「什么」，都不算数；
+        3. 句子太长（> 16 字）或带犹豫说法时词表不硬判（长句里几乎一定夹着
+           「是 / 行 / 好」），交给 LLM；LLM 也用不上就保守拒绝。
+        """
+        text = _FILLER.sub("", str(answer or "").strip())
+        text = re.sub(r"[\s，,。.、！!~～]+$", "", text)
+        if not text:
+            return None
+        confirm = self.cfg.agent.confirm
+        for word in (confirm.no or []):
+            if word and word in text:
+                return False
+        if len(text) > _WORDLIST_MAX or any(mark in text for mark in _DOUBT_WORDS):
+            return None
+        for word in (confirm.yes or []):
+            if not word:
+                continue
+            start = 0
+            while True:
+                index = text.find(word, start)
+                if index < 0:
+                    break
+                before = text[max(0, index - 3):index]
+                after = text[index + len(word):index + len(word) + 2]
+                # 前面是反问尾巴也算（「好什么好」的第二个「好」前面就是「好什么」）
+                if (not any(ch in _NEGATIVE_CHARS for ch in before)
+                        and not before.endswith(_DOUBT_TAILS)
+                        and after not in _DOUBT_TAILS):
+                    return True
+                start = index + 1
+        return None
 
     @staticmethod
     def _confirm_key(prompt: str) -> str:
@@ -936,10 +1021,37 @@ class VoiceAgent:
         """对外播报一句（CLI 与外部调用用这个，不要碰 _speak）。"""
         self._speak(text, kind)
 
+    def _ensure_tts(self) -> bool:
+        """按需把合成引擎建起来。
+
+        这条路上曾经有个静默的坑：**启动时 tts.enabled 是关的、后来在设置里
+        打开** —— agent.load() 当时按 false 把 self.tts 留成了 None，
+        而 _speak 只看到 None 就直接返回。用户的表现是「设置里明明打开了
+        语音播报，它却一声不吭，也没有任何提示」。这里补建一次，
+        建不起来就把原因写进日志（绝不静默）。
+        """
+        if self.tts is not None:
+            return True
+        with self._tts_lock:
+            if self.tts is not None:
+                return True
+            try:
+                self.tts = Tts(self.cfg)
+                self.tts.device = self._out_device
+                self.log("[tts] 语音播报已按新设置启用（引擎：" + self.tts.engine + "）")
+                return True
+            except Exception as exc:  # noqa: BLE001 - 建不起来要说清楚
+                self.log("[tts] 语音播报打开了，但合成引擎起不来：" + str(exc)[:120])
+                self.tts = None
+                return False
+
     def _speak(self, text: str, kind: str = "reply") -> None:
-        if not text.strip() or self.tts is None or not self.cfg.tts.enabled:
-            if text.strip():
-                self.log("[tts-off] " + text)
+        if not text.strip():
+            return
+        if self.tts is None and self.cfg.tts.enabled:
+            self._ensure_tts()
+        if self.tts is None or not self.cfg.tts.enabled:
+            self.log("[tts-off] " + text)
             return
         self._speaking.set()
         self._speaking_since = time.monotonic()

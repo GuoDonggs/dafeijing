@@ -129,15 +129,22 @@ def build_keywords_file(
             lines.append(" ".join(pieces) + " @" + keyword)
 
     content = ("\n".join(lines) + "\n") if lines else ""
-    if content:
+    # **总是覆写**，哪怕是空文件：以前 content 为空就不写，于是上一轮生成的
+    # keywords.generated.txt 还留在磁盘上被 KeywordSpotter 加载 ——
+    # 用户把唤醒词改成"九天"（切不出词表）之后，喊"九天"没反应，喊旧的
+    # "大肥鲸"它却照样答应。留一个空文件至少是"喊什么都没反应"，
+    # 配合下面的 problems 提示，用户知道该去改 wake.pinyin。
+    try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        problems.append("唤醒词文件写不下去（" + str(exc)[:60] + "）：" + str(target))
     return target, problems
 
 
 # ─────────────────── 朗读前清洗 ───────────────────
 
-_FENCE = re.compile(_BT * 3 + r".*?" + _BT * 3, re.S)
+_FENCE = re.compile(r"(" + _BT * 3 + r".*?" + _BT * 3 + r")", re.S)
 _INLINE_CODE = re.compile(_BT + r"([^" + _BT + r"]*)" + _BT)
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")

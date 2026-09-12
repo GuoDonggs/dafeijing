@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -119,11 +121,17 @@ class MarkStore:
         if not target.is_file():
             return
         try:
-            data = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw_text = target.read_text(encoding="utf-8")
+            data = json.loads(raw_text)
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            # **不能静默返回**：手工编辑出错、或者上次写入被中断之后，
+            # 用户会看到"标记全没了"，而程序一个字都不说；更糟的是下一次
+            # 任何改动都会把这份还能救的文件覆盖掉。改成备份 + 说清楚。
+            self._quarantine(target, exc)
             return
         items = data.get("marks") if isinstance(data, dict) else data
         if not isinstance(items, list):
+            self._quarantine(target, ValueError("顶层不是 marks 列表"))
             return
         for raw in items:
             if not isinstance(raw, dict):
@@ -141,19 +149,46 @@ class MarkStore:
             self._items[name] = mark
             self._order.append(name)
 
-    def _save(self) -> None:
+    @staticmethod
+    def _quarantine(target: Path, exc: Exception) -> None:
+        """把读不出来的文件改名成 .bad 留着，并说清楚发生了什么。"""
         try:
+            backup = target.with_suffix(target.suffix + ".bad")
+            target.replace(backup)
+            where = "，原文件已改名保留为 " + backup.name
+        except OSError:
+            where = ""
+        print("[marks] " + str(target) + " 读不出来（" + str(exc)[:60] + "）"
+              + where + "；这次按「还没有标记」处理", file=sys.stderr, flush=True)
+
+    def _save(self) -> None:
+        """落盘。**先在锁里拍快照**，再原子替换。
+
+        以前是直接在锁外迭代 self._items 和 self._order：rename() 会在锁内
+        先 pop 再插入，正好卡在这个窗口的 _save 就撞 KeyError，而这里只
+        except OSError —— 异常逃出去，标记只留在内存里、磁盘没写，工具那边
+        还报一句莫名其妙的"出错了：'范围1'"。write_text 也不是原子的
+        （先截断再写），两个线程同时写会把文件写坏。
+        """
+        try:
+            with self._lock:
+                marks = []
+                for key in list(self._order):
+                    mark = self._items.get(key)
+                    if mark is None:
+                        continue
+                    marks.append({"name": mark.name, "kind": mark.kind,
+                                  "x1": mark.x1, "y1": mark.y1,
+                                  "x2": mark.x2, "y2": mark.y2, "note": mark.note})
             target = self.path
             target.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"version": 1, "marks": [
-                {"name": m.name, "kind": m.kind, "x1": m.x1, "y1": m.y1,
-                 "x2": m.x2, "y2": m.y2, "note": m.note}
-                for m in (self._items[k] for k in self._order)
-            ]}
-            target.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                                  encoding="utf-8")
-        except OSError:
-            pass   # 存不下不该影响"框一下"这件事本身
+            payload = {"version": 1, "marks": marks}
+            temp = target.with_suffix(target.suffix + ".tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+            os.replace(temp, target)      # 原子替换：中途崩了也不会留下半截文件
+        except Exception:  # noqa: BLE001 - 存不下不该影响"框一下"这件事本身
+            pass
 
     # ── 读写 ──
     @property
@@ -177,14 +212,20 @@ class MarkStore:
         """
         with self._lock:
             existing = self._items.get(str(name or "").strip())
-        if existing is not None and existing.kind == kind:
-            with self._lock:
+            if existing is not None and existing.kind == kind:
+                # 检查和改写必须在**同一个**临界区里：分两次加锁的话，
+                # 中间被 remove() 摘掉时会去改一个已经不在表里的旧对象，
+                # 还回一句"改好了" —— 而磁盘上根本没有它。
                 existing.x1, existing.y1 = int(x1), int(y1)
                 if kind == "region":
                     existing.x2, existing.y2 = int(x2), int(y2)
                 if note:
                     existing.note = str(note)[:60]
                 self._version += 1
+                updated = True
+            else:
+                updated = False
+        if updated:
             self._save()
             return existing, True
         return self._add(kind, x1, y1, x2, y2, name, note), False

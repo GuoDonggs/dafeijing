@@ -442,7 +442,7 @@
     { key: 'security.deny_tools', label: '禁止使用的工具（逗号分隔，例如 run_command、write_file）', type: 'text' },
     { key: 'security.always_confirm', label: '必须确认的工具（逗号分隔）', type: 'text' },
     { key: 'security.floor_tools', label: '放开模式下仍然要确认的工具（逗号分隔，清空 = 连命令都不问）', type: 'text' },
-    { key: 'security.keep_floor_when_empty', label: '底线清空时仍保留内置的四个', type: 'bool' },
+    { key: 'security.keep_floor_when_empty', label: '底线清空时仍保留内置的那几个', type: 'bool' },
     { key: 'security.audit', label: '记录权限审计日志（build/audit.jsonl）', type: 'bool' },
     { key: 'security.allow_insecure', label: '允许明文 HTTP 模型地址（否则自动降为只读）', type: 'bool' },
     { key: 'ui.show_turn', label: '主界面显示本轮问答', type: 'bool' },

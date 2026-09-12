@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import queue
 import re
 import secrets
@@ -109,7 +110,11 @@ class Console:
         "agent.min_speech_ms": "最短语音",
         "asr.num_threads": "识别线程数",
         "asr.provider": "识别算力",
+        "speaker.model": "声纹模型",
+        "speaker.profile": "声纹档案",
     }
+    # 注意 speaker.enabled / speaker.threshold 不在这里：它们每次现读配置，
+    # 在界面上勾一下就生效（阈值是 Voiceprint.threshold 属性，开关也是属性）。
 
     # ───────────────── 基础设施 ─────────────────
 
@@ -270,9 +275,16 @@ class Console:
         """
         configured = str(getattr(getattr(config, "paths", None), "data_dir", "") or "")
         paths.set_data_dir(configured)
+        # 旧位置 -> 新位置。marks.json 也要搬：换了数据目录之后，
+        # 用户之前框的"范围1"、标的"点1"不该就这么消失（它们还在旧目录里，
+        # 再框一次又会从"范围1"重新编号，看起来就像全丢了）。
+        legacy_data = paths.legacy_data_dir()
         moved = paths.migrate_legacy([
             (Path.home() / "Pictures" / "voice-agent", paths.sub("screenshots")),
             (PROJECT_ROOT / "apps.yaml", paths.sub("apps")),
+            (legacy_data / "marks.json", paths.sub("marks")),
+            (legacy_data / "memory.json", paths.sub("memory")),
+            (legacy_data / "voiceprint.json", paths.sub("voiceprint")),
         ], log=self.log)
         if moved:
             self.log("[ui] 运行时文件已集中到 " + str(paths.data_dir()))
@@ -383,6 +395,7 @@ class Console:
             "agent.subagent_max": cfg.agent.subagent_max,
             "agent.subagent_rounds": cfg.agent.subagent_rounds,
             "agent.subagent_announce": cfg.agent.subagent_announce,
+            "agent.watch_announce": cfg.agent.watch_announce,
             "speech.profile": cfg.speech.profile,
             "speech.device": cfg.speech.device,
             "speech.threads": cfg.speech.threads,
@@ -394,6 +407,13 @@ class Console:
             "ui.accent": cfg.ui.accent,
             "ui.accent_hex": cfg.ui.accent_hex(),
             "ui.show_turn": cfg.ui.show_turn,
+            # 设置页会直接 values.get(key) 拿这些来初始化控件；**漏掉任何一个，
+            # 界面就会显示一个假值**（SegmentedControl 落到第 0 项）：
+            # 追问窗口显示"0 回待命"、max_rounds 显示 6、速览显示未勾选，
+            # 用户点一下反而把真实配置改成了这个假值。
+            "ui.show_stats": cfg.ui.show_stats,
+            "llm.max_rounds": cfg.llm.max_rounds,
+            "agent.follow_up_ms": int(cfg.agent.follow_up_ms),
             # 数据目录：程序产生的文件都收在这里
             "paths.data_dir": cfg.paths.data_dir,
             "paths.data_dir_effective": str(paths.data_dir()),
@@ -437,11 +457,16 @@ class Console:
             level = audio_io.set_output_gain(float(percent) / 100.0)
         except (TypeError, ValueError):
             return {"ok": False, "error": "音量得是数字"}
+        previous = float(self.cfg.audio.output_gain)
         self.cfg.audio.output_gain = level
         result: dict = {"ok": True, "percent": int(round(level * 100))}
         if persist:
             saved = self.update_config({"audio.output_gain": round(level, 3)})
             if not saved.get("ok"):
+                # 落盘失败就要把内存里的值退回去：不然界面显示的音量和
+                # config.yaml 里的不一致，下次启动又变回去，谁也说不清。
+                audio_io.set_output_gain(previous)
+                self.cfg.audio.output_gain = previous
                 return {"ok": False, "error": saved.get("error")}
         return result
 
@@ -555,6 +580,12 @@ class Console:
                 raw = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError as exc:
                 return {"ok": False, "error": "现有配置无法解析：" + str(exc)[:160]}
+        else:
+            # 首次运行没有 config.yaml，程序是按 config.example.yaml 跑起来的。
+            # 以前这里从空表开始合并，于是界面里改**任何一项**都会新建一份
+            # 只有那一项的 config.yaml —— 示例里其余的取值（自定义唤醒词、
+            # 语音退出词……）静默回退成内置默认值，用户完全看不出发生过什么。
+            raw = dict(self.cfg.raw or {})
         if not isinstance(raw, dict):
             raw = {}
         for dotted, value in (updates or {}).items():
@@ -597,16 +628,49 @@ class Console:
         except Exception as exc:  # 音色没切成功不该影响配置保存
             self.log("[ui] 音色即时生效失败：" + str(exc)[:120])
 
+    @staticmethod
+    def _diff_keys(before: Config, after: Config) -> list[str]:
+        """两份配置之间**真的变了**的键（写成 a.b.c）。
+
+        为什么要比对而不是"谁传了什么就算什么改了"：网页版的「原始配置」框
+        是整份文本提交的，它压根说不出改了哪几行 —— 于是所有写操作里的
+        「改完要不要重建模型客户端 / 要不要提示重启」记账全部落空：
+        改了 llm.api_key 只弹一句"已保存"，既不生效也不提示重启。
+        """
+        out: list[str] = []
+
+        def walk(prefix: str, old: Any, new: Any) -> None:
+            for item in dataclasses.fields(new):
+                left = getattr(old, item.name, None)
+                right = getattr(new, item.name)
+                if dataclasses.is_dataclass(right) and dataclasses.is_dataclass(left):
+                    walk(prefix + item.name + ".", left, right)
+                elif right != left:
+                    out.append(prefix + item.name)
+
+        for item in dataclasses.fields(after):
+            left = getattr(before, item.name, None)
+            right = getattr(after, item.name)
+            if dataclasses.is_dataclass(right) and dataclasses.is_dataclass(left):
+                walk(item.name + ".", left, right)
+            elif right != left:
+                out.append(item.name)
+        return out
+
     def _after_config_change(self, message: str, keys: list[str] | None = None) -> dict:
         """保存后把新配置搬到内存里，并判断要不要提示重启。
 
         关键是**就地更新**（Config.update_from）：agent 和它内部的 wake/asr/tts
         都握着一开始那份 cfg 的引用，换成新对象的话它们永远读不到新值。
         """
+        previous = self.cfg
         try:
             fresh = Config.load(self.config_path)
         except ConfigError as exc:
             return {"ok": False, "error": str(exc)}
+        # 先算差集，再就地更新（update_from 会把 self.cfg 改掉，之后就比不出来了）
+        changed = self._diff_keys(previous, fresh)
+        keys = sorted(set(changed) | {str(key) for key in (keys or [])})
         self.cfg.update_from(fresh)
         # 权限设置也是"改完立刻生效"，而且它决定工具层放不放行
         security.configure(self.cfg)
@@ -628,7 +692,10 @@ class Console:
         # 只把「真的需要重启」的记下来；引擎没在跑就不用提示（下次启动自然是新的）
         running = bool(self.agent and self.agent.running)
         if running:
-            for key in keys or []:
+            # 这一遍下来配置内容和之前一模一样（改了又改回去）→ 旧的提示作废
+            if not changed:
+                self.missing_restart.clear()
+            for key in keys:
                 label = self.RESTART_KEYS.get(key)
                 if label:
                     self.missing_restart[key] = label
@@ -767,9 +834,13 @@ class Console:
         if entry.confirm and not allow_sensitive:
             return {"ok": False,
                     "error": "「" + entry.display + "」属于敏感操作，请对着麦克风说一遍再确认"}
-        result = tools.call(entry.name, args or {})
-        self.log("[ui] 试运行 " + entry.name + " → " + str(result)[:80])
-        return {"ok": True, "result": result}
+        outcome = tools.call_result(entry.name, args or {})
+        self.log("[ui] 试运行 " + entry.name + " → " + str(outcome.text)[:80])
+        # 按工具自己的成败上报：以前无论结果如何都回 ok=True，
+        # 于是"用户取消了这次操作""被安全闸门拒绝了"都会显示成绿色成功。
+        if not outcome.ok:
+            return {"ok": False, "error": str(outcome.text), "code": outcome.code}
+        return {"ok": True, "result": outcome.text}
 
     def devices(self) -> dict:
         """列出可用的输入 / 输出设备，供界面下拉框使用。"""
@@ -843,7 +914,12 @@ class Console:
 
             agent = self.ensure_agent()
             if agent.vad is None:
-                agent.load()
+                try:
+                    agent.load()
+                except Exception as exc:  # noqa: BLE001 - 模型不齐时 load 会抛
+                    # 这个函数可能从 Qt 槽里被调用，异常逃出去会让进程直接 abort
+                    self.log("[ui] 录音测试起不来：" + str(exc)[:120])
+                    return {"ok": False, "error": "语音模型没加载起来：" + str(exc)[:120]}
             device = audio_io.resolve_device(self.cfg.audio.input_device, "input")
             mic = audio_io.Mic(device=device, sample_rate=self.cfg.audio.sample_rate,
                                block_size=self.cfg.audio.block_size)

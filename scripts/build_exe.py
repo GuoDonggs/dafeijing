@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,60 @@ DEFAULT_WORK = PROJECT_ROOT / "build" / "pyinstaller"
 
 WINDOWED_EXE = "VoiceAgent.exe"
 CONSOLE_EXE = "VoiceAgentCLI.exe"
+#: exe 的「属性 → 详细信息」里那份版本资源。由版本号现场生成，
+#: 不手写第二份 —— 两份版本号迟早会对不上。
+VERSION_FILE = PROJECT_ROOT / "packaging" / "version_info.txt"
+
+
+def app_version() -> str:
+    """从 voice_agent/__init__.py 里读版本号（全项目唯一真源）。"""
+    source = PROJECT_ROOT / "voice_agent" / "__init__.py"
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError:
+        return "0.0"
+    match = re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.M)
+    return match.group(1) if match else "0.0"
+
+
+def version_tuple(value: str) -> tuple[int, int, int, int]:
+    """把 1.1 这类写法补成 Windows 版本资源要的四段数字。"""
+    parts = [int(p) for p in re.findall(r"\d+", str(value))][:4]
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts)  # type: ignore[return-value]
+
+
+def write_version_info(version: str) -> Path:
+    """生成 PyInstaller 的版本资源文件（exe 属性里看到的那份）。"""
+    nums = version_tuple(version)
+    dotted = ".".join(str(n) for n in nums)
+    text = ('# -*- coding: utf-8 -*-\n'
+            '"""由 scripts/build_exe.py 生成，不要手改（改 voice_agent/__init__.py 的版本号）。"""\n'
+            "VSVersionInfo(\n"
+            "  ffi=FixedFileInfo(\n"
+            "    filevers=" + str(nums) + ",\n"
+            "    prodvers=" + str(nums) + ",\n"
+            "    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)\n"
+            "  ),\n"
+            "  kids=[\n"
+            "    StringFileInfo([\n"
+            "      StringTable(\n"
+            "        '080404B0',\n"
+            "        [StringStruct('CompanyName', 'voice-agent'),\n"
+            "         StringStruct('FileDescription', '大肥鲸 · 语音控制电脑助手'),\n"
+            "         StringStruct('FileVersion', '" + dotted + "'),\n"
+            "         StringStruct('InternalName', 'VoiceAgent'),\n"
+            "         StringStruct('OriginalFilename', 'VoiceAgent.exe'),\n"
+            "         StringStruct('ProductName', '大肥鲸 VoiceAgent'),\n"
+            "         StringStruct('ProductVersion', '" + str(version) + "'),\n"
+            "         StringStruct('LegalCopyright', '')])\n"
+            "    ]),\n"
+            "    VarFileInfo([VarStruct('Translation', [2052, 1200])])\n"
+            "  ]\n"
+            ")\n")
+    VERSION_FILE.write_text(text, encoding="utf-8")
+    return VERSION_FILE
 
 
 def _fix_console() -> None:
@@ -245,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 68)
     print("  voice-agent 打包（PyInstaller onedir）")
     print("=" * 68)
+    version = app_version()
+    print("  版本        : " + version)
     print("  Python      : " + sys.version.split()[0] + "  " + sys.executable)
     print("  项目目录    : " + str(PROJECT_ROOT))
     print("  产物目录    : " + str(out_dir))
@@ -252,15 +309,15 @@ def main(argv: list[str] | None = None) -> int:
     print("  模式        : " + ("只出命令行版" if args.console else "桌面版 + 命令行版")
           + ("，精简 CUDA/TensorRT" if args.slim else ""))
 
-    version = pyinstaller_version()
-    if version is None:
+    pyinstaller = pyinstaller_version()
+    if pyinstaller is None:
         print()
         print("  [缺少依赖] 没找到 PyInstaller，先装它：")
         print()
         print("      pip install pyinstaller")
         print()
         return 2
-    print("  PyInstaller : " + version)
+    print("  PyInstaller : " + pyinstaller)
 
     if not SPEC_PATH.is_file():
         print()
@@ -301,6 +358,11 @@ def main(argv: list[str] | None = None) -> int:
     env["VOICE_AGENT_CONSOLE_ONLY"] = "1" if args.console else ""
     env["VOICE_AGENT_SLIM"] = "1" if args.slim else ""
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        env["VOICE_AGENT_VERSION_FILE"] = str(write_version_info(version))
+    except OSError as exc:
+        print("  ! 版本资源没写出来（" + str(exc)[:80] + "），exe 属性里不会带版本号")
+        env.pop("VOICE_AGENT_VERSION_FILE", None)
 
     cmd = [
         sys.executable, "-m", "PyInstaller",

@@ -292,6 +292,20 @@ def grab_screen(region: tuple[int, int, int, int] | None = None,
 
     if region is None and monitor:
         region = monitor_rect(int(monitor))
+        if region is None:
+            raise ValueError("这台机器上没有第 " + str(int(monitor)) + " 块屏幕")
+    if region is not None:
+        # 必须裁到虚拟桌面范围内：Pillow 的 grab(bbox) 越界**不报错**，
+        # 而是把外面那块补成黑色。以前"截一个越界的范围"会得到一张黑图，
+        # 再交给视觉模型，它会认真地说"屏幕上什么都没有" —— 用户以为真看过了。
+        left, top, right, bottom = (int(v) for v in region)
+        desktop = _virtual_screen()
+        left, top = max(left, desktop[0]), max(top, desktop[1])
+        right = min(right, desktop[0] + desktop[2])
+        bottom = min(bottom, desktop[1] + desktop[3])
+        if right - left < 2 or bottom - top < 2:
+            raise ValueError("这块区域不在屏幕上（" + str(tuple(int(v) for v in region)) + "）")
+        region = (left, top, right, bottom)
     image = ImageGrab.grab(bbox=region, all_screens=True)
     return np.array(image.convert("RGB"))[:, :, ::-1].copy()
 
@@ -352,13 +366,24 @@ def resolve_template(image: str | Path) -> Path:
         return direct
     folder = reference_dir()
     candidates = [raw] if Path(raw).suffix else [raw + suffix for suffix in _IMAGE_SUFFIXES]
-    for name in candidates:
-        target = folder / name
-        if target.is_file():
-            return target
-    if folder.is_dir():
+    # 两个地方找：参考图片目录（用户放"要找的小图"）和截图目录（自己刚截的图）。
+    # 模型拿到的截图文件名只有 basename，不给它补全路径的话，
+    # 「看看这张截图里有没有下载按钮」就得先说一遍完整路径 —— 而工具说明里
+    # 明明承诺了"只给文件名就行"。
+    from .tools._shared import screenshot_dir  # noqa: PLC0415 - 避免循环导入
+
+    for place in (folder, screenshot_dir()):
+        if not place.is_dir():
+            continue
+        for name in candidates:
+            target = place / name
+            if target.is_file():
+                return target
+    for place in (folder, screenshot_dir()):
+        if not place.is_dir():
+            continue
         lowered = raw.lower()
-        for item in folder.iterdir():
+        for item in place.iterdir():
             if item.is_file() and item.stem.lower() == lowered:
                 return item
     existing = list_reference_images(8)
@@ -613,8 +638,12 @@ def _guess_app_type(target: str) -> str:
     if "://" in target:
         return "url"
     if low.endswith((".exe", ".lnk", ".bat", ".cmd", ".com")):
+        # .com 既是 DOS 可执行文件的后缀、也是域名后缀（而且是域名里最常见的）。
+        # 带路径分隔符的按程序算，光秃秃的"bilibili.com"按网址算。
+        if low.endswith(".com") and "\\" not in target and "/" not in target:
+            return "url"
         return "path"
-    if low.endswith((".com", ".cn", ".net", ".org")) and " " not in target:
+    if low.endswith((".cn", ".net", ".org")) and " " not in target:
         return "url"
     stripped = target.rstrip("\\/")
     if target.endswith(("\\", "/")) and stripped:
@@ -658,10 +687,13 @@ def load_app_map() -> dict[str, dict]:
         import yaml  # noqa: PLC0415
 
         data = yaml.safe_load(app_map_path().read_text(encoding="utf-8")) or {}
-    except Exception:  # noqa: BLE001
-        return {}
+    except Exception as exc:  # noqa: BLE001
+        # **不能当成空表返回**：调用方拿到空表后会原样 save_app_map()，
+        # 把用户手写的整份映射表冲掉（一个缩进错就等于清空全部应用映射）。
+        raise ValueError("应用映射表（" + str(APP_MAP_FILE) + "）读不出来："
+                         + str(exc)[:80] + "；修好它再试，别让它被覆盖") from exc
     if not isinstance(data, dict):
-        return {}
+        raise ValueError("应用映射表（" + str(APP_MAP_FILE) + "）的顶层必须是「名字: 目标」的映射")
     mapping: dict[str, dict] = {}
     for key, value in data.items():
         name = str(key).strip()
@@ -729,14 +761,20 @@ def resolve_app(name: str) -> dict:
                     "target": entry["target"], "exact": True, "mapping": mapping}
     for entry_key, entry in mapping.items():
         names = [entry_key.lower()] + [a.lower() for a in entry["aliases"]]
-        if any(n and (n in key or key in n) for n in names):
+        # 短名字不做模糊匹配：别名只写了一个"微"或"a"时，"打开微信"会命中它，
+        # 而"打开 X"里任何含这个字的说法都会跟着打开一个完全无关的目标，
+        # 结果还取决于 YAML 里谁写在前面 —— 这种"随机命中"比匹配不上更糟。
+        if any(len(n) >= 2 and (n in key or key in n) for n in names):
             return {"hit": True, "key": entry_key, "entry": entry,
                     "target": entry["target"], "exact": False, "mapping": mapping}
     return {"hit": False, "mapping": mapping}
 
 
 def describe_app_map() -> str:
-    mapping = load_app_map()
+    try:
+        mapping = load_app_map()
+    except ValueError as exc:
+        return str(exc)
     if not mapping:
         return ("还没有自定义映射。可以直接说「添加应用 我的项目 指向 D:\\code」，"
                 "或者编辑 " + str(app_map_path()))

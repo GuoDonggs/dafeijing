@@ -313,17 +313,23 @@ def reset_skills() -> None:
 
 
 def openai_tools() -> list[dict]:
-    """给 LLM 的工具声明列表（含技能提供的工具）。"""
+    """给 LLM 的工具声明列表（含技能提供的工具）。
+
+    先 list() 拍一张快照：技能热重载（界面里保存/删除技能）会在**另一个线程**
+    里增删 REGISTRY，直接迭代 values() 会撞上
+    "dictionary changed size during iteration"，整轮对话以"处理的时候出错了"结束。
+    """
     autoload_skills()
-    return [tool.schema() for tool in REGISTRY.values()]
+    return [tool.schema() for tool in list(REGISTRY.values())]
 
 
 def describe() -> str:
     """供 CLI / 网页 UI 展示的工具清单（列表形式）。"""
     autoload_skills()
-    width = max((len(t.name) for t in REGISTRY.values()), default=12)
+    snapshot = list(REGISTRY.values())
+    width = max((len(t.name) for t in snapshot), default=12)
     lines = []
-    for tool in REGISTRY.values():
+    for tool in snapshot:
         flag = "  [需确认]" if tool.confirm else ""
         origin = "" if tool.source == "builtin" else "  ← " + Path(tool.source).name
         lines.append(
@@ -468,13 +474,25 @@ def call_result(name: str, arguments: Any = None,
     if tool is None:
         return ToolResult("没有这个工具：" + str(name), False, "unknown_tool")
     args = arguments
-    if isinstance(args, str):
-        try:
-            args = json.loads(args) if args.strip() else {}
-        except json.JSONDecodeError:
-            args = {}
-    if not isinstance(args, dict):
+    if args is None:
+        # 没给参数 = 这个工具不需要参数（测试和内部调用都这么用）
         args = {}
+    elif isinstance(args, str):
+        if not args.strip():
+            args = {}
+        else:
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                # **绝不能**把解不开的参数当成 {} 去调 handler：模型的参数被
+                # 截断（max_tokens、网关只回半截 JSON）时，"没有参数"会被
+                # 工具自己的默认值接住 —— 而 power 的默认动作就是关机。
+                # 说清楚、让大脑重发一次，比猜一个默认值安全得多。
+                return ToolResult(
+                    "工具参数不是合法的 JSON（可能被截断了），这一步没执行，请重新给出完整参数",
+                    False, "bad_arguments")
+    if not isinstance(args, dict):
+        return ToolResult("工具参数应该是一个对象，这一步没执行", False, "bad_arguments")
 
     # ── 权限闸门 ──
     # 判定放在这里，而不是让每个工具自己判断：模型（以及它背后的中转站）
@@ -563,8 +581,6 @@ _QUIET_ARGS = frozenset({
     "scales", "limit", "max_chars", "quality", "timeout_s", "once", "max_minutes",
     "out", "reason",
 })
-#: 这些参数是"给机器看的"，念出来听不懂（命令、脚本、代码、正文）
-_OPAQUE_ARGS = ("command", "script", "code", "content", "text")
 #: 数字参数的念法：（前缀，后缀）。"延迟 60 秒"比"60"清楚得多
 _ARG_LABELS = {
     "delay": ("延迟 ", " 秒"), "delay_s": ("延迟 ", " 秒"), "seconds": ("", " 秒"),
@@ -599,6 +615,12 @@ _ARG_WORDS = {
     "up": "调大", "down": "调小", "mute": "静音", "max": "最大", "min": "最小",
     "play_pause": "播放或暂停", "next": "下一首", "prev": "上一首", "stop": "停止",
     "get": "读取", "set": "写入", "all": "全部",
+    # 权限模式：这三个值全是英文，不映射就等于**不念** —— 于是提权那句确认
+    # 变成光秃秃的「要调整权限，确认吗？」，用户根本不知道自己批准了什么
+    # （在只读模式下尤其危险）。确认提示必须说清"切到哪一档"。
+    "read-only": "只读模式", "只读": "只读模式",
+    "workspace-write": "标准模式", "标准": "标准模式",
+    "danger-full-access": "放开权限", "放开": "放开权限",
 }
 _S = {"type": "string"}
 _S_REQ = {"type": "string", "_required": True}

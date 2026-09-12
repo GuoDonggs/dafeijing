@@ -65,7 +65,10 @@ def _make_handler(console: Console):
                        "application/json; charset=utf-8")
 
         def _body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                return {}          # 畸形的头：当空 body 处理，别让 int() 抛出去
             if length <= 0 or length > MAX_BODY:
                 return {}
             try:

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 __all__ = [
     "mouse_position_tool", "mouse_move_tool", "mouse_click_tool", "mouse_drag_tool",
@@ -45,6 +46,21 @@ def _screen():
     return screen_mod
 
 
+def _confidence(value: Any) -> float:
+    """把模型给的相似度阈值夹到 0~1。
+
+    模型很爱按百分比给（90 表示 90%），而 find_template 里是 result >= confidence，
+    90 就永远匹配不到 —— 它还会认真汇报"没找到（阈值 90.0）"，没人看得出是参数错。
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.8
+    if number > 1.0:
+        number = number / 100.0
+    return max(0.1, min(number, 1.0))
+
+
 def mouse_position_tool() -> str:
     """报告鼠标当前坐标。"""
     try:
@@ -54,8 +70,26 @@ def mouse_position_tool() -> str:
     return "鼠标现在在 " + str(x) + "," + str(y)
 
 
-def mouse_move_tool(x: int = 0, y: int = 0, duration_ms: int = 200) -> str:
-    """把鼠标移到指定坐标。"""
+def _mark_center(mark_name: str) -> tuple[int, int] | str:
+    """把「点1」「范围2」解析成中心坐标；解析不了就回一句人话。"""
+    from .. import marks as marks_mod  # noqa: PLC0415
+
+    rect = marks_mod.resolve_region(mark_name)
+    if rect is None:
+        return "找不到叫「" + str(mark_name) + "」的标记（说「看标记」可以列出来）"
+    return (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+
+
+def mouse_move_tool(x: int = 0, y: int = 0, duration_ms: int = 200,
+                    mark: str = "") -> str:
+    """把鼠标移到指定坐标，或者移到某个标记（点1 / 范围2 的中心）。"""
+    if str(mark or "").strip():
+        # 工具说明里一直写着"mark=点1 也行"，但 handler 根本没有这个参数 ——
+        # 模型照着说明传参只会拿到「工具参数不对：unexpected keyword argument」。
+        point = _mark_center(mark)
+        if isinstance(point, str):
+            return point
+        x, y = point
     try:
         return _screen().mouse_move(int(x), int(y), int(duration_ms))
     except Exception as exc:  # noqa: BLE001
@@ -63,8 +97,13 @@ def mouse_move_tool(x: int = 0, y: int = 0, duration_ms: int = 200) -> str:
 
 
 def mouse_click_tool(x: int | None = None, y: int | None = None, button: str = "left",
-                     count: int = 1) -> str:
-    """点击鼠标（可指定坐标与按键）。"""
+                     count: int = 1, mark: str = "") -> str:
+    """点击鼠标（可指定坐标、标记或按键）。"""
+    if str(mark or "").strip():
+        point = _mark_center(mark)
+        if isinstance(point, str):
+            return point
+        x, y = point
     try:
         return _screen().mouse_click(x, y, button, count)
     except Exception as exc:  # noqa: BLE001
@@ -109,8 +148,12 @@ def find_on_screen_tool(image: str = "", confidence: float = 0.8,
             return "看不懂这个范围：" + str(region)
     if rect is None and int(monitor or 0) > 0:
         rect = _screen().monitor_rect(int(monitor))
+        if rect is None:
+            # 越界的屏号以前会静默退回整屏：用户说"只看第 2 块屏"，
+            # 实际搜了整个桌面，还可能点到别的屏幕上去。
+            return "这台机器上没有第 " + str(int(monitor)) + " 块屏幕"
     try:
-        hits = _screen().find_template(image, confidence=float(confidence), region=rect)
+        hits = _screen().find_template(image, confidence=_confidence(confidence), region=rect)
     except FileNotFoundError as exc:
         return str(exc)
     except Exception as exc:  # noqa: BLE001
@@ -146,9 +189,12 @@ def click_image_tool(image: str = "", times: int = 1, interval_ms: int = 200,
             return "看不懂这个范围：" + str(region)
     if rect is None and int(monitor or 0) > 0:
         rect = _screen().monitor_rect(int(monitor))
+        if rect is None:
+            return "这台机器上没有第 " + str(int(monitor)) + " 块屏幕"
     try:
         module = _screen()
-        hits = module.find_template(image, confidence=float(confidence), region=rect, limit=1)
+        hits = module.find_template(image, confidence=_confidence(confidence),
+                                    region=rect, limit=1)
         if not hits:
             return "屏幕上没找到这张图，没有点击"
         spot = hits[0]
@@ -199,6 +245,10 @@ def look_at_screen_tool(question: str = "", region: str = "", monitor: int = 0) 
         if rect is None:
             return ("看不懂这个范围：" + str(region)
                     + "（可以先用「框一下这块」框出来，或者写成 左,上,右,下）")
+    if rect is None and int(monitor or 0) > 0:
+        rect = _screen().monitor_rect(int(monitor))
+        if rect is None:
+            return "这台机器上没有第 " + str(int(monitor)) + " 块屏幕"
     try:
         shot = _screen().save_for_vision(None, max_side=max_side(), region=rect,
                                          monitor=int(monitor or 0))

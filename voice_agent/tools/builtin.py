@@ -414,8 +414,9 @@ _register(Tool(
 
 _register(Tool(
     name="app_map",
-    description="管理本地应用映射表：查看 / 添加 / 删除「说法 → 程序或路径」。加过之后说「打开 XXX」就能直接启动。",
-    parameters=_params(action={"type": "string", "description": "list / add / remove"},
+    description="管理本地应用映射表：查看 / 添加 / 删除「说法 → 程序或路径」，也可以给已有的项"
+                "加别名（action=alias）。加过之后说「打开 XXX」就能直接启动。",
+    parameters=_params(action={"type": "string", "description": "list / add / remove / alias"},
                        name={"type": "string", "description": "说法，例如「我的项目」"},
                        target={"type": "string", "description": "程序名、完整路径或网址"}),
     handler=app_map_tool,

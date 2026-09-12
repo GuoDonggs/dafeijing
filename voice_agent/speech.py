@@ -55,6 +55,10 @@ class WakeWord:
         self.keywords_path, self.problems = textutil.build_keywords_file(
             self.keywords, paths["kws_tokens"], target, extra
         )
+        # 生成不出来的唤醒词必须吵一声：用户听到的是"喊它没反应"，
+        # 而这里一句话都不说的话，他只会以为麦克风坏了。
+        for problem in self.problems:
+            print("[wake] " + problem, file=sys.stderr, flush=True)
 
         # KWS 模型只有几 MB，放 GPU 反而要额外的搬运开销，固定用 CPU
         self._spotter = sherpa_onnx.KeywordSpotter(
@@ -207,13 +211,19 @@ def _soft_clip(x: np.ndarray, knee: float, ceiling: float) -> np.ndarray:
     return out
 
 
-def _with_provider_fallback(build, cfg: Config, what: str):
+def _with_provider_fallback(build, cfg: Config, what: str, preferred: str = ""):
     """按配置的 provider 构建模型；GPU 起不来就回退 CPU 并说清楚。
 
     有的模型（尤其是量化过的）在 CUDA 上会因为算子不支持而初始化失败。
     与其让整个助手起不来，不如降级到 CPU，并把这件事明确写进日志和状态里。
+
+    preferred 是"只给这一块单独指定"的算力（asr.provider / tts.provider）。
+    留空就跟随 speech.device —— 这样默认只有**一个**开关决定跑在哪，
+    想单独给识别或合成指定算力时才写那两项。
     """
-    provider = cfg.speech.provider
+    provider = (str(preferred or "").strip().lower() or cfg.speech.provider)
+    if provider not in ("cpu", "cuda"):
+        provider = cfg.speech.provider
     try:
         return build(provider)
     except Exception as exc:  # noqa: BLE001
@@ -250,6 +260,7 @@ class Asr:
             ),
             cfg,
             "语音识别",
+            preferred=cfg.asr.provider,
         )
         self._punct = None
         if cfg.asr.punctuation and cfg.has("punct_model"):
@@ -385,7 +396,8 @@ class Tts:
                 silence_scale=1.15,   # 标点处留点停顿才有"人味"
             ))
 
-        self._tts = _with_provider_fallback(build, cfg, "语音合成")
+        self._tts = _with_provider_fallback(build, cfg, "语音合成",
+                                            preferred=cfg.tts.provider)
         self.provider_text = cfg.speech.provider_text
 
     def _load_chattts(self) -> None:
@@ -491,8 +503,10 @@ class Tts:
         with self._lock:
             samples, rate = self._generate(clean, speaker, speed)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        if self.cfg.tts.volume != 1.0:
-            samples = samples * float(self.cfg.tts.volume)
+        # 音量**不能**在这里乘：_polish 随后会按 RMS 把响度重新归一到 target_rms，
+        # 这次缩放会被后面的增益原样抵消掉（只有撞到 max_gain 时才略轻一点点）——
+        # 也就是 tts.volume 一直是假生效。它是"相对目标响度的比例"，
+        # 折进 target_rms 里才是它该有的意思，限幅器照样兜住峰值。
         samples = self._polish(samples, rate)
         self.calls += 1
         self.total_audio_ms += 1000.0 * samples.size / max(1, rate)
@@ -509,6 +523,11 @@ class Tts:
         if self._chat is not None:
             import ChatTTS  # noqa: PLC0415
 
+            if abs(speed - 1.0) > 0.01:
+                # ChatTTS 的推理接口没有语速参数（它的节奏由文本和采样决定），
+                # 所以 tts.speed / styles.*.speed 在它这儿是真的用不上。
+                # 说清楚，别让用户以为"配了没反应"是 bug。
+                self._speed_note_once()
             params = ChatTTS.Chat.InferCodeParams(
                 spk_emb=self._embedding(speaker),
                 # 采样温度调低：语音助手的回答要稳，不要每次都换个腔调
@@ -526,6 +545,14 @@ class Tts:
         return (np.asarray(generated.samples, dtype=np.float32).reshape(-1),
                 int(generated.sample_rate))
 
+    def _speed_note_once(self) -> None:
+        """只提醒一次：ChatTTS 不支持语速。"""
+        if getattr(self, "_speed_noted", False):
+            return
+        self._speed_noted = True
+        print("[tts] ChatTTS 引擎不支持语速，tts.speed / styles.*.speed 会被忽略"
+              "（想调语速请换回 vits 引擎）", file=sys.stderr, flush=True)
+
     def _polish(self, samples: np.ndarray, rate: int) -> np.ndarray:
         """响度与底噪：去直流 -> 按 RMS 定响度 -> 轻下扩张 -> 软限幅。
 
@@ -542,7 +569,7 @@ class Tts:
             return x
         x = x - float(np.mean(x))
 
-        target = float(self.cfg.tts.target_rms)
+        target = float(self.cfg.tts.target_rms) * max(0.05, float(self.cfg.tts.volume))
         rms = float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
         if rms > 1e-6 and target > 0:
             gain = max(0.2, min(target / rms, float(self.cfg.tts.max_gain)))
@@ -715,9 +742,16 @@ class Tts:
         self._translit_client = None
         if bool(getattr(self.cfg.tts, "translit", True)):
             try:
+                from dataclasses import replace  # noqa: PLC0415
+
                 from .llm import Llm  # noqa: PLC0415
 
-                resolved = self.cfg.llm.resolve("judge")   # 判定档最便宜最快
+                # 判定档最便宜最快，而且**必须缩短超时**：
+                # 这一步是在 speak() 出声之前同步做的（生词要问一次模型），
+                # 用默认的 30 秒等待，网络一慢用户就是"喊了它半天不吭声"，
+                # 而且这期间连打断都插不进去。宁可这次不音译（离线兜底照旧念）。
+                resolved = replace(self.cfg.llm.resolve("judge"),
+                                   timeout_s=min(float(self.cfg.llm.timeout_s or 30.0), 2.0))
                 if resolved.available:
                     self._translit_client = Llm(resolved)
             except Exception as exc:  # noqa: BLE001 - 建不出来就用离线兜底

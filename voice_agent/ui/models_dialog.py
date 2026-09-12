@@ -241,6 +241,10 @@ class ProfilesDialog(QDialog):
     def add_card(self, name: str, data: dict) -> None:
         card = ProfileCard(name, data, self.remove_card,
                            defaults=self.defaults(), on_test=self.test_profile)
+        # 新建的档案改完名字也要刷新路由下拉框：这一步以前只在"载入已有档案"
+        # 那条路上连了，于是新建的档案名在下拉框里根本选不到，
+        # 只能删掉重开一次对话框。
+        card.name.editingFinished.connect(self.refresh_routes)
         self.cards.append(card)
         self.list_box.addWidget(card)
         self.refresh_routes()

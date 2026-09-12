@@ -173,6 +173,9 @@ class PageDialog(FramelessDialog):
         self._timer.stop()
         self.page.setParent(None)
         super().closeEvent(event)
+        # 关掉就回收：只"藏起来"的话，反复开关会一直堆窗口对象，
+        # 每个还带着一个已经停掉但没释放的定时器。
+        self.deleteLater()
 
     def _tick(self) -> None:
         if self.parent() is None:
@@ -333,6 +336,8 @@ class MainWindow(QWidget):
                 signal.connect(self.set_accent)
             self.pages[key] = page
         dialog = PageDialog(self.pages[key], title, self, width, height)
+        # 销毁时把缓存里的引用一起清掉（不然那个 key 永远指着一个死对象）
+        dialog.destroyed.connect(lambda _=None, k=key: self._dialogs.pop(k, None))
         self._dialogs[key] = dialog
         return dialog
 
@@ -351,7 +356,17 @@ class MainWindow(QWidget):
 
     def start_marks(self, kind: str = "region") -> None:
         """菜单入口：让用户框一块 / 点一下。"""
-        self._marks_wait = None
+        if self._marks_wait is not None:
+            # 有工具正在等用户框选：这时候不能把等待作废（以前的写法是
+            # 无条件清掉 _marks_wait），否则那次框选的结果会被当成"界面标记"
+            # 存下来，而工具还在原地白等到 45 秒超时。
+            self.console.log("[ui] 现在正在等你在屏幕上选（那是某个工具要的），"
+                             "先选完它，或者按 Esc 取消")
+            return
+        overlay = self._marks_overlay
+        if overlay is not None and getattr(overlay, "_selecting", ""):
+            self.console.log("[ui] 已经在框选模式里了，直接在屏幕上操作就行")
+            return
         self._begin_selection(kind)
 
     def request_selection(self, kind: str, timeout: float = 45.0) -> dict | None:
@@ -539,7 +554,17 @@ class MainWindow(QWidget):
         self._page_for("about", pages_mod.AboutPage, "关于", 620, 620).show()
 
     def show_logs(self) -> None:
+        """日志窗口只留一个：反复按 Ctrl+L 不该堆出一摞窗口（各带一个定时器）。"""
+        existing = self._logs_dialog
+        if existing is not None:
+            try:
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except RuntimeError:      # 底层对象已经销毁
+                self._logs_dialog = None
         dialog = LogDialog(self.console, self)
+        dialog.destroyed.connect(lambda _=None: setattr(self, "_logs_dialog", None))
         dialog.show()
         self._logs_dialog = dialog
 
@@ -734,6 +759,12 @@ class LogDialog(FramelessDialog):
         for item in new:
             self.view.appendPlainText(str(item.get("text", "")))
         self._seen = int(new[-1].get("seq") or self._seen)
+
+    def closeEvent(self, event) -> None:  # noqa: ANN001, N802
+        """关窗要停掉定时器并回收，否则每按一次 Ctrl+L 就多一个常驻窗口。"""
+        self._timer.stop()
+        super().closeEvent(event)
+        self.deleteLater()
 
 
 def run(config_path: Path | None = None, autostart: bool = True) -> int:

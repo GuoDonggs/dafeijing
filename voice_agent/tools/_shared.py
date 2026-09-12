@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
+from typing import Any
 
 from .. import paths
 from ..config import PROJECT_ROOT
@@ -46,12 +48,41 @@ def build_dir() -> Path:
 # ── 「这一轮要不要接着听」 ──
 # 工具本身是无状态的纯函数，但"答完这句要不要继续收音"是**这一轮对话**的状态。
 # 放这里由 Brain 每轮开头重置、结束时读取。
-TURN: dict = {"follow_up": False, "reason": ""}
+#
+# **按线程分开**：全局一份的话，后台子代理和定时轮询（它们也走 call_result）
+# 调工具失败或查到东西时会把标记置上，主对话答完于是莫名其妙多留 6 秒追问窗口 ——
+# 用户看到的是"它明明说完了却还在等"。同一个线程里读写，互不干扰。
+class _TurnState:
+    """每个线程自己的一份「这一轮要不要接着听」。"""
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    def _data(self) -> dict:
+        data = getattr(self._local, "data", None)
+        if data is None:
+            data = {"follow_up": False, "reason": ""}
+            self._local.data = data
+        return data
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data()[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._data()[key] = value
+
+    def reset(self) -> None:
+        self._data().update(follow_up=False, reason="")
+
+
+TURN = _TurnState()
 
 
 def reset_turn() -> None:
-    TURN["follow_up"] = False
-    TURN["reason"] = ""
+    TURN.reset()
     # 新一轮对话：上一轮碰过外部内容的标记一起清掉（权限模式不清）
     from .. import security  # noqa: PLC0415 - 避免包初始化期的循环导入
 

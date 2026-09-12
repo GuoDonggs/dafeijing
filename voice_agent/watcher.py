@@ -25,6 +25,7 @@ screen 那一种额外做了一件事：**画面没变就不问模型**。盯着
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -145,6 +146,7 @@ class Watcher:
             self._items[item.id] = item
             self._order.append(item.id)
         self.log("[watch] 开始轮询 " + item.id + "：" + item.summary())
+        self.clear_finished()      # 顺手清掉旧的：不然 _items 只增不减
         threading.Thread(target=self._run, args=(item, max(1.0, float(max_minutes))),
                          name="watch-" + item.id, daemon=True).start()
         return item
@@ -204,48 +206,72 @@ class Watcher:
         return "；".join(item.id + "：" + item.summary() for item in items[-5:])
 
     # ── 内部 ──
+    def _notify(self, watch: Watch) -> None:
+        """告诉用户一声（跑在轮询线程里，真正的播报由 agent 择机做）。"""
+        if self.on_hit is None:
+            return
+        try:
+            self.on_hit(watch)
+        except Exception as exc:  # noqa: BLE001
+            self.log("[watch] 通知失败：" + str(exc)[:80])
+
     def _run(self, watch: Watch, max_minutes: float) -> None:
         deadline = time.time() + max_minutes * 60.0
+        timed_out = False
         first = True
-        while watch.state == "running":
-            if not first:
-                # 睡一会儿再查；拆成小段是为了停得及时
-                slept = 0.0
-                while slept < watch.interval_s and watch.state == "running":
-                    time.sleep(min(0.2, watch.interval_s - slept))
-                    slept += 0.2
-                if watch.state != "running":
+        try:
+            while watch.state == "running":
+                if not first:
+                    # 睡一会儿再查；拆成小段是为了停得及时
+                    slept = 0.0
+                    while slept < watch.interval_s and watch.state == "running":
+                        time.sleep(min(0.2, watch.interval_s - slept))
+                        slept += 0.2
+                    if watch.state != "running":
+                        break
+                first = False
+                if time.time() > deadline:
+                    watch.state = "stopped"
+                    watch.last = "盯了 " + str(round(max_minutes)) + " 分钟，先停下了"
+                    timed_out = True
                     break
-            first = False
-            if time.time() > deadline:
+                watch.checks += 1
+                try:
+                    hit, note = self._check(watch)
+                except Exception as exc:  # noqa: BLE001 - 轮询出错不能拖垮主程序
+                    watch.state, watch.error = "error", str(exc)[:120]
+                    watch.last = "盯不下去了：" + watch.error
+                    self.log("[watch] " + watch.id + " 出错：" + watch.error)
+                    break
+                if watch.state != "running":
+                    # 检查期间用户喊了「别盯了」：不能再把它改回命中去通知
+                    self.log("[watch] " + watch.id + " 已经停了，忽略这次的检查结果")
+                    break
+                watch.last = note
+                if hit:
+                    watch.hits += 1
+                    watch.state = "hit"
+                    watch.finished = time.time()
+                    self.log("[watch] " + watch.id + " 命中：" + note)
+                    self._notify(watch)
+                    if not watch.once:
+                        # 用户要的是"每次出现都告诉我"：接着盯，下轮再说
+                        watch.state = "running"
+                        watch.finished = 0.0
+                        continue
+                    break
+            if watch.state == "running":
                 watch.state = "stopped"
-                watch.last = "盯了 " + str(round(max_minutes)) + " 分钟，先停下了"
-                break
-            watch.checks += 1
-            try:
-                hit, note = self._check(watch)
-            except Exception as exc:  # noqa: BLE001 - 轮询出错不能拖垮主程序
-                watch.state, watch.error = "error", str(exc)[:120]
-                self.log("[watch] " + watch.id + " 出错：" + watch.error)
-                break
-            watch.last = note
-            if hit:
-                watch.hits += 1
-                watch.state = "hit"
+            if not watch.finished:
                 watch.finished = time.time()
-                self.log("[watch] " + watch.id + " 命中：" + note)
-                if self.on_hit is not None:
-                    try:
-                        self.on_hit(watch)
-                    except Exception as exc:  # noqa: BLE001
-                        self.log("[watch] 通知失败：" + str(exc)[:80])
-                break
-        if watch.state == "running":
-            watch.state = "stopped"
-        if not watch.finished:
-            watch.finished = time.time()
+        finally:
+            self._still.pop(watch.id, None)   # 灰度快照也要跟着回收
         self.log("[watch] " + watch.id + " 结束（" + watch.state + "，查了 "
                  + str(watch.checks) + " 次）")
+        # 出错和"盯到点了"同样要出声：用户听到的是"一有结果就告诉你"，
+        # 结果什么回音都没有，只会以为助手没在听。
+        if watch.state == "error" or (timed_out and watch.state == "stopped"):
+            self._notify(watch)
 
     def _check(self, watch: Watch) -> tuple[bool, str]:
         """查一次，返回（是否命中，一句说明）。"""
@@ -278,16 +304,31 @@ class Watcher:
     def _check_command(self, watch: Watch) -> tuple[bool, str]:
         import subprocess
 
+        # 和 tools/windows.py 用同一套调用方式：设好 UTF-8 输出编码，
+        # 再用 _decode 兜住"错误记录仍是 ANSI 代码页"那种情况。
+        # 少了这两步，中文错误会变成「�Ҳ���·��」——判定模型读不懂，
+        # 条件永远判不成立，用户看到的是"盯了半天什么也没发生"。
+        from .tools.windows import _PS_UTF8, _decode
+
+        # 自己管超时，不用 subprocess.run(timeout=)：
+        # 它在 Windows 上是"kill 之后无超时地 communicate()"，只要命令派生的
+        # 孙进程还攥着 stdout 管道，这里就永远不返回 —— 轮询线程再也不汇报。
+        proc = subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             _PS_UTF8 + watch.target],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
         try:
-            proc = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", watch.target],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=30,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            out, err = proc.communicate(timeout=30)
         except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                out, err = proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                out, err = b"", b""
             return False, "命令跑超时了"
-        output = ((proc.stdout or "") + (proc.stderr or "")).strip()[:600]
+        output = (_decode(out or b"") + _decode(err or b"")).strip()[:600]
         if not watch.condition:
             return bool(output), output[:80] or "命令没有输出"
         verdict = self._verdict(watch.condition, output)
@@ -297,14 +338,34 @@ class Watcher:
         from . import screen as screen_mod
         from . import tools
 
-        shot = screen_mod.grab_screen()
+        # 范围要真的传下去（以前只截全屏，「只在范围1 里盯着」是假的），
+        # expect=消失 也要取反，否则"等它消失"变成"等它出现"，行为正好相反。
+        rect = None
+        if watch.region:
+            from . import marks as marks_mod
+
+            rect = marks_mod.resolve_region(watch.region)
+            if rect is None:
+                raise RuntimeError("看不懂这个范围：" + str(watch.region))
+        shot = screen_mod.grab_screen(rect)
         if self._unchanged(watch.id, shot):
             return False, "画面没变化"
-        answer = str(tools.call("look_at_screen", {"question": watch.condition}))
-        if "没有配置" in answer or "失败" in answer:
-            raise RuntimeError(answer[:80])
+        # 只认工具层的成败信号（ToolResult.ok / code），**不要嗅探回答文本** ——
+        # 用户要等的条件里本来就可能有"失败"两个字（"下载失败了告诉我"），
+        # 拿子串判错误会让这种正当用法当场把轮询判死。
+        outcome = tools.call_result(
+            "look_at_screen",
+            {"question": watch.condition, "region": watch.region or ""},
+        )
+        if not outcome.ok:
+            raise RuntimeError(str(outcome.text)[:80])
+        answer = str(outcome.text)
         verdict = self._verdict(watch.condition, answer)
-        return verdict, (answer[:60] if verdict else "还没出现")
+        where = ("在 " + watch.region + " 里") if watch.region else "屏幕上"
+        if watch.expect == "消失":
+            return (not verdict), (where + "：" + watch.condition + "，现在不再成立了"
+                                   if not verdict else where + "还没变")
+        return verdict, (answer[:60] if verdict else (where + "还没出现"))
 
     def _verdict(self, condition: str, evidence: str) -> bool:
         """让模型判断条件成不成立；没有模型就退化成"包含关键词"。"""
@@ -317,7 +378,12 @@ class Watcher:
                 result = None
             if result is not None:
                 return bool(result)
-        words = [w for w in str(condition).replace("，", " ").split() if len(w) > 1]
+        # 没有模型时的兜底：按标点切开，再补上**双字词**一起找。
+        # 中文没有空格，早先按空格分词等于拿整句去做全等匹配 —— 屏幕类和
+        # 命令类轮询在离线状态下几乎永远判不成立，白白盯满 30 分钟。
+        pieces = [p for p in re.split(r"[\s，。、,.!！?？;；:：]+", str(condition)) if p]
+        words = [p for p in pieces if len(p) > 1]
+        words += [p[i:i + 2] for p in pieces for i in range(max(0, len(p) - 1))]
         return any(word in evidence for word in words) if words else bool(evidence)
 
     def _unchanged(self, key: str, shot) -> bool:  # noqa: ANN001

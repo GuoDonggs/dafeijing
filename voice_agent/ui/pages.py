@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 
@@ -305,6 +306,9 @@ class ChatPage(Page):
     以前"对话记录"和"文字指令"是两个菜单项，点开来却是同一个页面 —— 合并掉。
     """
 
+    #: 后台问完一句了（Qt 的东西只能在界面线程碰，所以用信号回来）
+    asked = pyqtSignal()
+
     def __init__(self, console: Console, parent: QWidget | None = None) -> None:
         super().__init__(console, parent)
         layout = QVBoxLayout(self)
@@ -362,6 +366,8 @@ class ChatPage(Page):
         # 于是每次刷新都跳回最顶上 —— 这正是"每次都要手动滚到底"的原因。
         bar.rangeChanged.connect(self._on_range_changed)
         bar.valueChanged.connect(self._on_scrolled)
+        self._asking = False
+        self.asked.connect(self._on_asked)
 
     # ── 发送 ──
     def send(self) -> None:
@@ -372,16 +378,47 @@ class ChatPage(Page):
         # 自己发出去的消息当然要看到：即使刚才在翻历史，也跟到底部
         self._stick = True
         agent = self.console.ensure_agent()
-        if not agent.running:
-            from ..tools import CANCEL_REPLY
-
-            reply = agent.ask(text, speak=False, confirm=self.console.web_confirm)
-            if reply == CANCEL_REPLY:
-                reply = "这条指令属于敏感操作，需要语音确认。先启动监听，再对着麦克风说一次。"
-            self.console.log("[ui] " + reply)
-        else:
+        if agent.running:
             agent.dispatch(text)
+            self._sync()
+            return
+        if self._asking:
+            self.console.log("[ui] 上一条还在处理，等它完了再说")
+            return
+        # 引擎没跑（只启用了大脑）时，这一步要调模型，可能好几秒甚至更久。
+        # **绝不能**在 Qt 主线程里同步跑：以前界面会整个假死，Windows 直接
+        # 标记"无响应"，用户只能等或者强杀。丢到后台线程，结果照旧通过
+        # 对话记录回到时间线上（on_tick 会把它渲染出来）。
+        from ..tools import CANCEL_REPLY
+
+        self._asking = True
+        self.btn_send.setEnabled(False)
+        self.btn_send.setText("处理中…")
+        agent.note("user", text)
         self._sync()
+
+        def work() -> None:
+            try:
+                reply = agent.ask(text, speak=False, confirm=self.console.web_confirm)
+                if reply == CANCEL_REPLY:
+                    reply = ("这条指令属于敏感操作，需要语音确认。"
+                             "先启动监听，再对着麦克风说一次。")
+            except Exception as exc:  # noqa: BLE001 - 出错也要有一句话，不能没反应
+                reply = "处理出错了：" + str(exc)[:120]
+            agent.note("assistant", reply)
+            self.console.log("[ui] " + reply)
+            self.asked.emit()
+
+        threading.Thread(target=work, name="ui-ask", daemon=True).start()
+
+    def _on_asked(self) -> None:
+        self._asking = False
+        self._sync()
+        try:
+            self.btn_send.setEnabled(True)
+            self.btn_send.setText("派发")
+        except RuntimeError:   # 窗口已经关了
+            pass
 
     def new_session(self) -> None:
         """清空上下文开一个新的（语音说「换个话题」也会走到这里）。"""
@@ -396,9 +433,18 @@ class ChatPage(Page):
             return
         self.entry.clear()
         agent = self.console.ensure_agent()
-        if agent.tts is None:
-            agent.load()
+        # 合成引擎会在需要时按需建起来（Agent._ensure_tts），这里不再裸调
+        # agent.load()：模型不齐时它会抛 ConfigError，而 Qt 槽里的未捕获异常
+        # 会让整个进程直接 abort（连日志都没有，用户看到的是"点一下程序就没了"）。
         agent.speak(text)
+        if agent.tts is None:
+            hint = ("语音播报被关掉了（设置 → 语音与算力 → 语音播报）"
+                    if not self.console.cfg.tts.enabled else
+                    "语音合成没加载起来，运行日志里的 [tts] 那一行会说明原因")
+            box = QMessageBox(self)
+            box.setWindowTitle("没有播报")
+            box.setText(hint)
+            box.exec()
 
     # ── 渲染 ──
     def transcript_text(self) -> str:
@@ -735,7 +781,12 @@ class SkillsPage(Page):
         if not read.get("ok"):
             self._error(str(read.get("error")))
             return
-        SkillDialog(self, "编辑技能", str(read["name"]), str(read["content"])).exec()
+        # 必须带上 kind：编辑的是 tools/ 里的自定义工具时，少了它就会当成技能
+        # 存到 skills/ 目录下 —— 原文件一个字没动，反而多出一个同名工具，
+        # 加载时报"工具名重复，实际生效的是后加载的那个"，用户改了等于没改。
+        kind = "tool" if str(skill.get("kind") or "") == "tool" else "skill"
+        SkillDialog(self, "编辑技能", str(read["name"]), str(read["content"]),
+                    kind=kind).exec()
         self.reload()
 
     def delete(self, skill: dict) -> None:
@@ -884,7 +935,7 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
         ("security.floor_tools", "放开模式下的底线",
          "「放开」模式下**仍然要确认**的工具。想真的完全不问，就把这里清空"
          "并把下一项关掉 —— 不建议：执行命令等于把电脑交出去", "text", None),
-        ("security.keep_floor_when_empty", "清空底线时保留内置的四个",
+        ("security.keep_floor_when_empty", "清空底线时保留内置的那几个",
          "关掉之后，上面清空 = 连执行命令/关机都不再确认", "bool", None),
         ("security.allow_insecure", "允许明文 HTTP 模型地址",
          "关着时：非本机的 http 地址会自动降到只读（那种链路上任何人都能改写模型的回答）",
@@ -1026,6 +1077,31 @@ class SettingsPage(Page):
         card = getattr(self, "_engine_warning_card", None)
         if card is not None:
             card.setVisible(self._using_chattts(self.console.settings()))
+
+    def refresh_engine_rows(self) -> None:
+        """按最新配置把"引擎 / 算力 / 档位"这几行重画一遍。
+
+        改了「资源档位」会连带把 tts.engine 换成 chattts（quality 档），
+        只盯 tts.engine 直接变化的话，下拉框和提示行还停在旧值上 ——
+        用户重启之后才发现引擎变了，事前一点提示都没有。
+        """
+        values = self.console.settings()
+        for key in ("tts.engine", "speech.profile", "speech.device",
+                    "speech.threads", "llm.reasoning_effort"):
+            entry = self.widgets.get(key)
+            if not entry:
+                continue
+            kind, control = entry
+            value = values.get(key)
+            if kind == "choice":
+                for index in range(control.count()):
+                    if str(control.itemData(index)) == str(value):
+                        control.blockSignals(True)
+                        control.setCurrentIndex(index)
+                        control.blockSignals(False)
+                        break
+            elif kind == "bool":
+                control.setChecked(bool(value))
 
     def _engine_warning(self, values: dict) -> ui.Card:
         """ChatTTS 的警告卡：只在真的用它时才显示。
@@ -1385,9 +1461,15 @@ class SettingsPage(Page):
             box.setText(str(result.get("error")))
             box.exec()
             return
-        if "tts.engine" in (updates or {}):
-            # 换成 / 换离 ChatTTS 时，上面那张警告卡要立刻跟着出现或收起
+        # 换了「资源档位」也会连带换掉 tts.engine（quality 档 → chattts），
+        # 只盯 tts.engine 的话那张 ChatTTS 警告卡不会弹、"合成引擎"那一行还
+        # 显示着旧引擎，用户重启后才发现起不来，事前毫无提示。
+        if {"tts.engine", "speech.profile"} & set(updates or {}):
             self._refresh_engine_warning()
+            try:
+                self.refresh_engine_rows()
+            except Exception as exc:  # noqa: BLE001 - 刷新失败不该影响保存
+                self.console.log("[ui] 刷新引擎显示失败：" + str(exc)[:80])
         if result.get("restart_needed"):
             self._toast("已保存，重启引擎后生效")
 
@@ -1648,6 +1730,13 @@ class DevicesPage(Page):
         })
         if not result.get("ok"):
             self.hint.setText(str(result.get("error")))
+            return
+        was_running = bool(self.console.agent is not None and self.console.agent.running)
+        if not was_running:
+            # 引擎本来就没在跑：只保存，**不要**顺手把麦克风打开 ——
+            # 用户点的是"应用并重启引擎"，不是"开始监听"。以前这里会
+            # 静悄悄启动整套监听，等于没问过就开麦。
+            self.hint.setText("已保存，下次启动监听时生效。")
             return
         self.console.stop_engine()
         self.console.start_engine()

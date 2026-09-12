@@ -170,10 +170,10 @@ security:
   deny_tools: []
   # 额外要求确认的工具（在下面的"底线名单"之外再加）
   always_confirm: []
-  # 「放开」模式下**仍然要确认**的底线名单。默认这五个是最危险的动作 ——
-  # 放开权限不该等于把底线交出去。
+  # 「放开」模式下**仍然要确认**的底线名单。这几个是最危险的动作 ——
+  # start_watch 也在里面：它会拿着你给的命令反复执行，等于一条不需要确认的旁路。
   # 想真的完全不问：floor_tools: [] 并且 keep_floor_when_empty: false（不建议）。
-  floor_tools: [run_command, power, kill_process, restart_self, quit_self]
+  floor_tools: [run_command, power, kill_process, restart_self, quit_self, start_watch]
   keep_floor_when_empty: true
   # 审计日志：build/audit.jsonl，记录每次敏感决定的工具、参数、批没批
   audit: true

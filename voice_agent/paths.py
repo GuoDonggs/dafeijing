@@ -31,7 +31,7 @@ from pathlib import Path
 
 __all__ = [
     "ENV_DATA_DIR", "ENV_LEGACY", "set_data_dir", "data_dir", "base_dir",
-    "default_data_dir", "sub", "describe", "migrate_legacy",
+    "default_data_dir", "legacy_data_dir", "sub", "describe", "migrate_legacy",
 ]
 
 ENV_DATA_DIR = "VOICE_AGENT_DATA_DIR"
@@ -68,6 +68,16 @@ def base_dir() -> Path:
 
 def default_data_dir() -> Path:
     return base_dir() / "build"
+
+
+def legacy_data_dir() -> Path:
+    """上一版默认的数据目录（程序目录/build）。
+
+    用户把数据目录改到别处之后，老文件还留在原处；迁移时得按"默认位置"
+    去找，而不是按当前 data_dir()（那已经是新目录了，两边相等时要靠
+    migrate_legacy 的 target.exists() 兜住，不会自己搬给自己）。
+    """
+    return default_data_dir()
 
 
 def data_dir() -> Path:
@@ -149,10 +159,9 @@ def migrate_legacy(pairs: list[tuple[Path, Path]], log=None) -> list[str]:
             if not legacy.exists() or target.exists():
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            if legacy.is_dir():
-                shutil.move(str(legacy), str(target))
-            else:
-                shutil.move(str(legacy), str(target))
+            # shutil.move 对文件和目录是同一套逻辑：目标已存在时会被上面的
+            # 「target.exists() 就跳过」挡掉，所以这里不需要分情况
+            shutil.move(str(legacy), str(target))
             moved.append(legacy.name + " → " + str(target))
         except (OSError, shutil.Error):
             continue

@@ -39,9 +39,12 @@ def mark_region_tool(x1: int = 0, y1: int = 0, x2: int = 0, y2: int = 0,
     """框一块区域。不给坐标就让用户在屏幕上拖一个框。"""
     from .. import marks as marks_mod
 
-    if x2 or y2:
-        mark, updated = marks_mod.store.add_or_update("region", int(x1), int(y1),
-                                                      int(x2), int(y2), name=name, note=note)
+    # 任意一个数非 0 就当作"给了坐标"：只说「框住 100,200」时 x2/y2 是 0，
+    # 以前这里会把整对坐标丢掉，转而去要求用户在屏幕上手动框 —— 明明报了坐标。
+    if x1 or y1 or x2 or y2:
+        mark, updated = marks_mod.store.add_or_update(
+            "region", int(x1), int(y1), int(x2 or x1), int(y2 or y1),
+            name=name, note=note)
         if updated:
             return "好，「" + mark.name + "」改成 " + mark.summary().split(" 是 ", 1)[-1] + "。"
         return ("好，这块记成「" + mark.name + "」了（" + mark.summary().split(" 是 ", 1)[-1]
@@ -107,8 +110,19 @@ def clear_marks_tool(kind: str = "") -> str:
     from .. import marks as marks_mod
 
     what = str(kind or "").strip().lower()
-    target = "region" if what in ("区域", "范围", "region", "框") else (
-        "point" if what in ("点", "point", "圆点") else "")
+    # 只认得出这几种说法。**认不出来就说认不出来** —— 以前任何不认识的写法
+    # （"全部"、"标记"、"范围1"）都会落到空串，而空串是"全清"：
+    # 用户只想删一个标记，结果所有框和点都没了，还回一句"擦掉了 N 个"。
+    if not what or what in ("全部", "所有", "all", "标记", "全部清掉", "都清掉"):
+        target = ""
+    elif what in ("区域", "范围", "region", "框", "框选", "框选范围"):
+        target = "region"
+    elif what in ("点", "point", "圆点", "标记点"):
+        target = "point"
+    else:
+        got = marks_mod.store.describe()
+        return ("分不清要清哪一种（" + str(kind) + "）。可以说「清掉所有标记」、"
+                "「只清框」或者「只清点」。现在有的是：" + got)
     count = marks_mod.store.clear(target)
     if not count:
         return "本来就没有标记。"

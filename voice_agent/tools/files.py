@@ -87,7 +87,7 @@ def read_file(path: str = "", max_chars: int = 800) -> str:
     content = re.sub(r"\s+", " ", content).strip()
     if len(content) > int(max_chars):
         content = content[: int(max_chars)] + "……后面还有"
-    return target.name + " 的内容是：" + content
+    return target.name + "（" + str(target.parent) + "）的内容是：" + content
 
 
 def write_file(path: str = "", content: str = "", mode: str = "overwrite") -> str:
@@ -105,7 +105,9 @@ def write_file(path: str = "", content: str = "", mode: str = "overwrite") -> st
             handle.write(body)
     except OSError as exc:
         return "写不了这个文件：" + str(exc)[:60]
-    return ("已经追加到 " + target.name) if append else ("已经写入 " + target.name)
+    # 回**完整路径**：只报文件名的话，用户和模型事后都不知道它到底写到哪去了
+    # （相对路径是按进程的工作目录解析的，双击快捷方式启动时可能是 System32）
+    return ("已经追加到 " + str(target)) if append else ("已经写入 " + str(target))
 
 
 def edit_file(path: str = "", old: str = "", new: str = "") -> str:
@@ -122,8 +124,11 @@ def edit_file(path: str = "", old: str = "", new: str = "") -> str:
         return "读不了这个文件：" + str(exc)[:60]
     if needle not in content:
         return "文件里没有这段文字，没改动"
-    target.write_text(content.replace(needle, str(new or ""), 1), encoding="utf-8")
-    return "已经改好 " + target.name
+    try:
+        target.write_text(content.replace(needle, str(new or ""), 1), encoding="utf-8")
+    except OSError as exc:
+        return "改不了这个文件：" + str(exc)[:60]
+    return "已经改好 " + str(target)
 
 
 def find_files(pattern: str = "", root: str = "", limit: int = 20) -> str:
@@ -205,17 +210,35 @@ def remember(text: str = "", key: str = "") -> str:
     if not value:
         return "没说要记什么"
     MEMORY_FILE = memory_file(create=True)
-    try:
-        items = json.loads(MEMORY_FILE.read_text(encoding="utf-8")) if MEMORY_FILE.is_file() else []
-    except Exception:
-        items = []
+    items: list = []
+    if MEMORY_FILE.is_file():
+        try:
+            items = json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
+            if not isinstance(items, list):
+                raise ValueError("记忆文件的顶层不是列表")
+        except Exception as exc:  # noqa: BLE001
+            # **绝不能**把读不出来的文件当成空表再整表覆盖：那样一次解析失败
+            # 就会静默抹掉用户全部长期记忆，还回一句"好的，我记住了"。
+            # 改名留底 + 明确报错，让人还有机会把它救回来。
+            backup = MEMORY_FILE.with_suffix(MEMORY_FILE.suffix + ".bad")
+            try:
+                MEMORY_FILE.replace(backup)
+                note = "，原文件已改名保留为 " + backup.name
+            except OSError:
+                note = ""
+            return ("记忆文件读不出来（" + str(exc)[:60] + "）" + note
+                    + "，这次没有写入，免得把已有的记忆冲掉")
     items.append({
         "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "key": (key or "").strip(),
         "text": value,
     })
-    MEMORY_FILE.write_text(json.dumps(items[-200:], ensure_ascii=False, indent=2), encoding="utf-8")
-    return "好的，我记住了"
+    try:
+        MEMORY_FILE.write_text(json.dumps(items[-200:], ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+    except OSError as exc:
+        return "记不下来（写文件失败）：" + str(exc)[:60]
+    return "好的，我记住了（存在 " + str(MEMORY_FILE) + "）"
 
 
 def recall(query: str = "") -> str:
@@ -309,6 +332,11 @@ def _resolve_path(raw: str) -> Path:
                 return joined
     except Exception:  # noqa: BLE001 - 映射表坏了就按普通路径走
         pass
+    # 剩下的相对路径（"报告.txt"）挂到**用户目录**，不要让它跟着进程的工作目录走：
+    # 双击 exe / 快捷方式启动时 CWD 可能是 System32 或别的地方，写进去的文件
+    # 谁也找不到 —— 用户说"写到报告.txt"时的直觉是"我的文档/用户目录那里"。
+    if not Path(expanded).is_absolute():
+        return HOME / expanded
     return Path(expanded)
 
 

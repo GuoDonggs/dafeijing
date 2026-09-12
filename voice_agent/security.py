@@ -91,7 +91,12 @@ EXEC_TOOLS = frozenset({
 #: **无论如何都要用户确认**的名单：即使把模式开到最宽也不免除。
 #: 这是防中转站的最后一道闸 —— 模型不能靠"先提权再动手"绕过它。
 #: 用户可以在配置里改（floor_tools），但内置这几个是默认值。
-DEFAULT_FLOOR = ("run_command", "power", "kill_process", "restart_self", "quit_self")
+#: start_watch 也在里面：它会拿着用户给的命令**反复执行**（kind=命令 时
+#: 直接起 PowerShell），等于给 run_command 开了一条不需要确认的旁路 ——
+#: 放开模式下能把任意命令跑上几百遍。它不是"看一眼"，是"一直看"，
+#: 所以至少要用户亲口点一次头。
+DEFAULT_FLOOR = ("run_command", "power", "kill_process", "restart_self", "quit_self",
+                 "start_watch")
 ALWAYS_CONFIRM = frozenset(DEFAULT_FLOOR)
 
 #: 这些工具的结果算"外部内容"：网页、文件、屏幕上的字都可能藏着注入的指令。
@@ -186,8 +191,11 @@ def configure(cfg: Any) -> None:
                              if str(x).strip()}
         raw_floor = getattr(security, "floor_tools", None)
         if raw_floor is None:
-            # 配置里没写这一项（老配置、或者测试用的假配置）→ 用内置默认
-            raw_floor = list(DEFAULT_FLOOR)
+            # 配置里没写这一项（老配置、或者测试用的假配置）→ 用内置默认。
+            # 必须把名单也一起重置：以前这里只改 floor_enabled、不动 _state["floor"]，
+            # 于是"先把 floor_tools 清空、后来又把这一项整行删掉"之后，
+            # 上一份配置的名单还留着继续要求确认 —— 改配置没反应就是这么来的。
+            _state["floor"] = set(DEFAULT_FLOOR)
             _state["floor_enabled"] = True
         else:
             names = {str(x).strip() for x in raw_floor if str(x).strip()}

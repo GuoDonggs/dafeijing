@@ -181,7 +181,7 @@ SPEECH_PROFILES: dict[str, dict] = {
              "note": "低占用：线程最少、用最快的合成，适合后台常驻"},
     "balanced": {"threads": 4, "tts_engine": "vits",
                  "note": "默认：速度和资源平衡"},
-    "quality": {"threads": 6, "tts_engine": "chattts",
+    "quality": {"threads": 6, "tts_engine": "chattts", "tts_speed": 1.06,
                 "note": "高质量：ChatTTS 对话式合成，明显更自然，但要显卡、更慢"},
 }
 
@@ -296,10 +296,12 @@ class SecurityCfg:
     # 额外要求确认的工具名（在下面的"底线名单"之外再加）
     always_confirm: list[str] = field(default_factory=list)
     # 「放开」模式下**仍然要确认**的底线名单。默认是执行命令 / 关机 / 杀进程 /
-    # 重启退出程序 —— 这四个是最危险的动作，放开权限不该等于把底线交出去。
+    # 重启退出程序 / 定时盯梢 —— 这几个是最危险的动作（盯梢会反复跑用户给的
+    # 命令，等于一条不需要确认的执行旁路），放开权限不该等于把底线交出去。
     # 想真的完全不问：把这里清空，并把 keep_floor_when_empty 设成 false。
     floor_tools: list[str] = field(default_factory=lambda: [
-        "run_command", "power", "kill_process", "restart_self", "quit_self"])
+        "run_command", "power", "kill_process", "restart_self", "quit_self",
+        "start_watch"])
     # 名单被清空时，要不要保留内置的那几个底线（默认保留，安全优先）
     keep_floor_when_empty: bool = True
     # 审计日志（build/audit.jsonl）
@@ -336,7 +338,10 @@ class WakeCfg:
 class AsrCfg:
     punctuation: bool = True
     num_threads: int = 4
-    provider: str = "cpu"
+    # 留空 = 跟 speech.device（推荐）。写 cpu / cuda 可以只给识别单独指定算力。
+    # 以前这里默认写死 "cpu"，而这个字段没人读 —— 用户在配置里写
+    # asr.provider: cuda 完全没反应，因为真正生效的一直是 speech.device。
+    provider: str = ""
     corrections: list[list[str]] = field(default_factory=list)
 
 
@@ -347,7 +352,8 @@ class TtsCfg:
     # chattts     ：ChatTTS 对话式中文，自然得多；要显卡、显存约 2 GB、慢
     engine: str = "vits"
     num_threads: int = 2
-    provider: str = "cpu"
+    # 留空 = 跟 speech.device（推荐）；写 cpu / cuda 可以只给合成单独指定算力
+    provider: str = ""
     # ChatTTS 专用：用哪块设备，以及要不要 torch.compile 加速
     device: str = "auto"
     compile: bool = False
@@ -488,7 +494,8 @@ class ConfirmCfg:
     )
     no: list[str] = field(
         default_factory=lambda: [
-            "取消", "不要", "不用", "别", "停", "否", "算了", "先不", "不好", "不行", "no",
+            "取消", "不要", "不用", "别", "停", "否", "算了", "先不", "不想", "不必",
+            "不好", "不行", "no",
         ]
     )
     prompt: str = "这是敏感操作，确认执行吗？"
@@ -528,7 +535,10 @@ class AgentCfg:
     subagent_enabled: bool = True
     subagent_max: int = 3           # 同时最多几个；0 = 不限制（内部仍有硬上限）
     subagent_rounds: int = 8        # 每个子代理最多调几次工具；0 = 不限制
-    subagent_announce: bool = True  # 做完要不要主动播报
+    subagent_announce: bool = True  # 子代理做完要不要主动播报
+    # 定时盯梢命中 / 出错 / 到点时要不要主动播报（和子代理分开：
+    # 只想关掉其中一类的人不该被迫把另一类也关掉）
+    watch_announce: bool = True
     exit_words: list[str] = field(default_factory=lambda: ["退下", "再见"])
     persona: str = ("你是运行在用户电脑上的语音助手，名字叫「大肥鲸」。"
                     "回答会被朗读，所以要短、要口语化，不要罗列 Markdown。")
@@ -683,7 +693,7 @@ class Config:
             asr=AsrCfg(
                 punctuation=bool(_get(raw, "asr.punctuation", True)),
                 num_threads=int(_get(raw, "asr.num_threads", 4)),
-                provider=str(_get(raw, "asr.provider", "cpu")),
+                provider=str(_get(raw, "asr.provider", "") or ""),
                 corrections=[
                     [str(pair[0]), str(pair[1])]
                     for pair in (_get(raw, "asr.corrections", None) or [])
@@ -694,7 +704,7 @@ class Config:
                 enabled=bool(_get(raw, "tts.enabled", True)),
                 engine=tts_engine or "vits",
                 num_threads=int(_get(raw, "tts.num_threads", 2)),
-                provider=str(_get(raw, "tts.provider", "cpu")),
+                provider=str(_get(raw, "tts.provider", "") or ""),
                 device=str(_get(raw, "tts.device", "auto") or "auto"),
                 compile=bool(_get(raw, "tts.compile", False)),
                 voice=str(_get(raw, "tts.voice", "") or ""),
@@ -742,6 +752,7 @@ class Config:
                 subagent_max=int(_get(raw, "agent.subagent_max", 3)),
                 subagent_rounds=int(_get(raw, "agent.subagent_rounds", 8)),
                 subagent_announce=bool(_get(raw, "agent.subagent_announce", True)),
+                watch_announce=bool(_get(raw, "agent.watch_announce", True)),
                 exit_words=_str_list(_get(raw, "agent.exit_words", None), agent_defaults.exit_words),
                 persona=str(_get(raw, "agent.persona", AgentCfg.persona)),
                 confirm=ConfirmCfg(

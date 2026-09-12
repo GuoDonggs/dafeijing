@@ -81,6 +81,28 @@ class MarksOverlay(QWidget):
         except Exception:  # noqa: BLE001
             return 1.0
 
+    @staticmethod
+    def _dpr_at(x: int, y: int) -> float:
+        """**这一点所在那块屏幕**的缩放比（找不到就退回主屏的）。
+
+        覆盖层铺满所有显示器，而各显示器的缩放比可以不一样（主屏 150% +
+        副屏 100% 很常见）。统一拿主屏的 dpr 换算，副屏上的标记和点击就会
+        整体偏一截。两块屏 dpr 相同时这个函数与 _dpr() 完全等价
+        （本机就是 1.0 / 1.0），所以不改变现有行为。
+        """
+        try:
+            for screen in QGuiApplication.screens():
+                ratio = float(screen.devicePixelRatio() or 1.0)
+                geo = screen.geometry()
+                left = int(geo.x() * ratio)
+                top = int(geo.y() * ratio)
+                if (left <= x <= left + int(geo.width() * ratio)
+                        and top <= y <= top + int(geo.height() * ratio)):
+                    return ratio
+        except Exception:  # noqa: BLE001
+            pass
+        return MarksOverlay._dpr()
+
     def show_overlay(self) -> None:
         rect = self._union_rect()
         if rect.isValid():
@@ -132,8 +154,11 @@ class MarksOverlay(QWidget):
 
     def _paint_mark(self, painter: QPainter, mark, dpr: float) -> None:  # noqa: ANN001
         left, top, right, bottom = mark.rect
-        x1, y1 = int(left / dpr) - self.x(), int(top / dpr) - self.y()
-        x2, y2 = int(right / dpr) - self.x(), int(bottom / dpr) - self.y()
+        # 两个角各按自己所在屏幕的缩放比换算（同一块屏上结果与以前一样）
+        ratio1 = self._dpr_at(left, top)
+        ratio2 = self._dpr_at(right, bottom)
+        x1, y1 = int(left / ratio1) - self.x(), int(top / ratio1) - self.y()
+        x2, y2 = int(right / ratio2) - self.x(), int(bottom / ratio2) - self.y()
         accent = QColor(theme.ACCENT)
         flashing = bool(self._flash_name) and mark.name == self._flash_name
         if flashing:
@@ -236,14 +261,19 @@ class MarksOverlay(QWidget):
         if not self._selecting or event.button() != Qt.MouseButton.LeftButton:
             return
         self._pressed = False
-        dpr = self._dpr()
         point = event.position().toPoint()
+
+        def to_screen(px: int, py: int) -> tuple[int, int]:
+            """窗口坐标 → 屏幕物理坐标（按这一点所在那块屏的缩放比）。"""
+            fx, fy = px + self.x(), py + self.y()
+            ratio = self._dpr_at(fx, fy)
+            return int(fx * ratio), int(fy * ratio)
+
         result: dict
         if self._selecting == "point":
             # 标点：点一下就够了，不用拖
-            result = {"kind": "point",
-                      "x": int((point.x() + self.x()) * dpr),
-                      "y": int((point.y() + self.y()) * dpr)}
+            sx, sy = to_screen(point.x(), point.y())
+            result = {"kind": "point", "x": sx, "y": sy}
         else:
             rect = QRect(self._start, point).normalized()
             if rect.width() < 8 or rect.height() < 8:
@@ -253,11 +283,9 @@ class MarksOverlay(QWidget):
                 self.update()
                 self.selection_notice.emit("框太小了，按住鼠标拖一个框出来（按 Esc 取消）")
                 return
-            result = {"kind": "region",
-                      "x1": int((rect.left() + self.x()) * dpr),
-                      "y1": int((rect.top() + self.y()) * dpr),
-                      "x2": int((rect.right() + self.x()) * dpr),
-                      "y2": int((rect.bottom() + self.y()) * dpr)}
+            sx1, sy1 = to_screen(rect.left(), rect.top())
+            sx2, sy2 = to_screen(rect.right(), rect.bottom())
+            result = {"kind": "region", "x1": sx1, "y1": sy1, "x2": sx2, "y2": sy2}
         self.selection_done.emit(result)
 
     def keyPressEvent(self, event) -> None:  # noqa: ANN001, N802
