@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from . import __version__, audio as audio_io, paths, security, tools
+from . import __version__, audio as audio_io, journal, paths, security, tools
 from . import voices as voice_table
 from .agent import VoiceAgent
 from .config import (
@@ -78,6 +78,10 @@ class Console:
         self._recording = False
         self.last_error = ""
         self.agent: VoiceAgent | None = None
+        # 日志文件：这次的启动也记一行，排查时先看它
+        journal.install_crash_handler()
+        journal.info(journal.process_line(), tag="start")
+        journal.prune()
         self.cfg = self._load_config()
         # 总音量是模块级状态（播报和提示音走不同路径），启动时同步一次
         audio_io.set_output_gain(self.cfg.audio.output_gain)
@@ -135,9 +139,19 @@ class Console:
             security.audit({"event": "transport_downgrade", "mode": security.mode()})
         return config
 
-    def log(self, message: str) -> None:
+    def log(self, message: str, level: str = "info") -> None:
+        """记一条日志。
+
+        - **两个地方都写**：界面（deque + 订阅者）和 <数据目录>/logs/ 下的文件。
+          文件是给"事后翻账"用的：界面那个缓冲区会滚掉，闪退更是什么都不剩。
+        - level="detail" 是排查用的细节（参数全文、耗时、token），界面默认不显示，
+          日志窗口里勾上「详细」就能一起看。
+        """
+        text = str(message)
+        journal.write(level, text)
         self._log_seq += 1
-        item = {"type": "log", "ts": time.strftime("%H:%M:%S"), "text": str(message),
+        item = {"type": "log", "ts": time.strftime("%H:%M:%S"), "text": text,
+                "level": "detail" if str(level) == "detail" else "info",
                 "seq": self._log_seq}
         self.logs.append(item)
         self._broadcast(item)
@@ -984,6 +998,8 @@ class Console:
             "security": security.snapshot(),
             # 数据目录清单（设置页展示 + 打开目录用）
             "paths": paths.describe(),
+            # 日志文件在哪（界面上给用户"打开日志目录"用；闪退了也能照这个去找）
+            "log_file": str(journal.file_path()),
         }
 
     def open_path_in_shell(self, target) -> str:  # noqa: ANN001

@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from . import journal
 from . import paths
 from . import rules
 from . import security
@@ -101,7 +102,8 @@ UNLIMITED_ROUNDS_CAP = 200
 class Brain:
     def __init__(self, cfg: Config, log: Callable[[str], None] = print) -> None:
         self.cfg = cfg
-        self.log = log
+        # 统一成 (message, level) 的签名：命令行传的是 print、测试传的是单参 lambda
+        self.log = journal.adapt(log)
         self.history: list[dict] = []
         self.last_error = ""
         self.llm: Llm | None = None
@@ -245,6 +247,11 @@ class Brain:
                 return self._respond_llm(user_text, confirm, interrupt)
             except LlmError as exc:
                 self.last_error = str(exc)
+                if getattr(exc, "interrupted", False) or (
+                        interrupt is not None and interrupt.is_set()):
+                    # 用户自己打断的：不是故障，别记成错误、更别切到离线规则重跑一遍
+                    self.log("[brain] 这一轮被打断了，模型的回复丢掉不要")
+                    return ""
                 if exc.fatal:
                     # Key 不对、模型不存在这类问题，重试也不会好
                     self.llm = None
@@ -404,11 +411,28 @@ class Brain:
         rounds = configured if configured > 0 else UNLIMITED_ROUNDS_CAP
         # 同一个工具、同一套参数连着调三次，就是绕进去了（模型自己出不来）
         repeats: dict[str, int] = {}
+        # 工具声明在这一轮里是固定的：每轮重新取一次既费事，又可能在技能热重载
+        # 的中途拿到一半的清单。取一次留着用。
+        tool_schema = tools.openai_tools()
+        self.log("[brain] 开始处理：" + user_text[:60]
+                 + "（最多 " + str(rounds) + " 轮，带 " + str(len(tool_schema)) + " 个工具）",
+                 "detail")
         for _round in range(rounds):
             if interrupt is not None and interrupt.is_set():
+                self.log("[brain] 被打断，这一轮到此为止", "detail")
                 return ""
-            message = client.chat(messages, tools=tools.openai_tools())
+            started = time.perf_counter()
+            before_prompt = client.prompt_tokens
+            before_completion = client.completion_tokens
+            message = client.chat(messages, tools=tool_schema, interrupt=interrupt)
             calls = message.get("tool_calls") or []
+            self.log("[brain] 第 " + str(_round + 1) + " 轮模型返回：%.1fs，%d 个工具调用，"
+                     "内容 %d 字；tokens 输入 %d（缓存 %d）输出 %d"
+                     % (time.perf_counter() - started, len(calls),
+                        len(str(message.get("content") or "")),
+                        client.prompt_tokens - before_prompt,
+                        client.cached_tokens,
+                        client.completion_tokens - before_completion), "detail")
             if not calls:
                 reply = (message.get("content") or "").strip()
                 if failures and reply:
@@ -426,12 +450,14 @@ class Brain:
                 "content": message.get("content") or "",
                 "tool_calls": calls,
             })
-            for call in calls:
+            for index, call in enumerate(calls):
                 function = call.get("function") or {}
                 name = function.get("name") or ""
                 arguments: Any = function.get("arguments") or "{}"
                 self.log("[brain] 调用工具 " + name + " " + str(arguments))
                 if interrupt is not None and interrupt.is_set():
+                    # 中途返回也要把剩下的 tool 回复补齐（见 _answer_rest）
+                    self._answer_rest(calls, index, messages, "（这一步被用户打断了，没有执行）")
                     return ""
                 self.used_tools = True
                 # 绕圈检测：完全相同的一步重复三次，多半是模型卡住了
@@ -439,13 +465,27 @@ class Brain:
                 repeats[fingerprint] = repeats.get(fingerprint, 0) + 1
                 if repeats[fingerprint] >= 3:
                     self.log("[brain] " + name + " 用同样的参数连调 3 次，判定为绕圈，提前收尾")
-                    return self._wrap_up(client, messages, user_text, "我卡在重复执行同一步上了")
+                    # **必须补齐剩下的 tool 回复**：assistant 消息里声明了 N 个
+                    # tool_calls，就要求后面跟 N 条 tool 消息。少了的话下一次请求
+                    # 会被接口直接打回 400（"An assistant message with 'tool_calls'
+                    # must be followed by tool messages"），用户听到的是
+                    # "收尾总结也失败了"。这就是那个报错的来源。
+                    self._answer_rest(calls, index, messages,
+                                      "（这一步在重复，跳过了没有执行）")
+                    return self._wrap_up(client, messages, user_text,
+                                         "我卡在重复执行同一步上了", interrupt=interrupt)
+                started = time.perf_counter()
                 outcome = tools.call_result(name, arguments, on_confirm=confirm)
+                elapsed = (time.perf_counter() - started) * 1000.0
+                self.log("[tool] " + name + " → " + ("成功" if outcome.ok else "失败")
+                         + "（" + str(outcome.code) + "）%.0fms｜参数 %s｜结果 %s"
+                         % (elapsed, str(arguments)[:200], str(outcome.text)[:200]), "detail")
                 if outcome.ok:
                     self.log("[brain] 工具返回 " + outcome.text[:120])
                 else:
                     failures += 1
-                    self.log("[brain] 工具失败(" + outcome.code + ")：" + outcome.text[:120])
+                    self.log("[brain] 工具失败(" + outcome.code + ")："
+                             + outcome.text[:120])
                 # 记进「最近的动作」：用户接着问「再打开一次」时，模型得知道刚才开了什么
                 self._note_action(name, arguments, outcome.text)
                 messages.append({
@@ -457,6 +497,24 @@ class Brain:
 
         self.log("[brain] 到了步数上限（" + str(rounds) + " 轮），让模型自己收个尾")
         return self._wrap_up(client, messages, user_text, "")
+
+    @staticmethod
+    def _answer_rest(calls: list, start: int, messages: list[dict], reason: str) -> None:
+        """把还没答复的 tool_calls 补上占位回复。
+
+        OpenAI 兼容的接口要求：assistant 消息里声明了几个 tool_calls，后面就得跟
+        几条 tool 消息。中途直接 return（绕圈收尾、被用户打断）会让**下一次**请求
+        400 —— 用户看到的就是"收尾总结也失败了：模型返回 400：…must be followed…"。
+        """
+        for call in calls[start:]:
+            function = call.get("function") or {}
+            name = function.get("name") or ""
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.get("id") or name,
+                "name": name,
+                "content": reason,
+            })
 
     @staticmethod
     def _label_result(name: str, text: str, code: str = "") -> str:
@@ -478,7 +536,7 @@ class Brain:
         return capped
 
     def _wrap_up(self, client: Llm, messages: list[dict], user_text: str,
-                 note: str = "") -> str:
+                 note: str = "", interrupt: threading.Event | None = None) -> str:
         """步数用完时的收尾：再问一次模型，让它说清楚做到哪儿了。
 
         以前这里直接甩一句"这件事分了好几步还没做完，我先停下来" —— 用户既不知道
@@ -489,10 +547,15 @@ class Brain:
                   "请用一两句口语化中文说清楚：已经完成了什么、还剩什么没做。")
         reply = ""
         try:
-            message = client.chat(messages + [{"role": "user", "content": prompt}])
+            self.log("[brain] 步数/绕圈收尾：请模型总结已经做到哪一步", "detail")
+            message = client.chat(messages + [{"role": "user", "content": prompt}],
+                                  interrupt=interrupt)
             reply = (message.get("content") or "").strip()
         except LlmError as exc:
-            self.log("[brain] 收尾总结也失败了：" + str(exc)[:80])
+            if getattr(exc, "interrupted", False):
+                self.log("[brain] 收尾总结被打断了")
+                return ""
+            self.log("[brain] 收尾总结也失败了：" + str(exc)[:120])
         if not reply:
             reply = "这件事步骤有点多，我先停一下。已经做过的不会重复执行。"
         if note:

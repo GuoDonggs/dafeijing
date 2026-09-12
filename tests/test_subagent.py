@@ -214,6 +214,44 @@ def main() -> int:
           "不在跑" in tools_mod.call("cancel_subagent", {"name": "占位"})
           or "没有在跑" in tools_mod.call("cancel_subagent", {}))
 
+    # ── 场景 6b：用户打断 → 后台的子代理也得停 ──────────────────────
+    # 用户的原话："我打断之后，它说停下了，可日志里还在跑上一个任务"。
+    # 子代理是独立线程，主对话停它不停，必须显式叫停。
+    manager.clear_finished()
+    GATE = threading.Event()          # 关着门：请求会一直挂在那儿
+    SCRIPTED.clear()
+    SCRIPTED.append({"role": "assistant", "content": "这一步不该走到"})
+    tools_mod.call("spawn_subagent", {"task": "一件要跑很久的事", "name": "长任务"})
+    long_task = manager.get("长任务")
+    assert long_task is not None
+    time.sleep(0.3)
+    check("子代理确实在跑（请求挂在假服务上）", long_task.state == "running", long_task.state)
+    started = time.time()
+    stopped = manager.cancel_all("用户打断")
+    done_fast = wait_state(long_task, "cancelled", 3.0)
+    spent = time.time() - started
+    check("cancel_all 会叫停还在跑的子代理", stopped >= 1, str(stopped))
+    check("叫停是**立刻**的：不用等那次请求超时", done_fast and spent < 3.0, "%.2fs" % spent)
+    check("被打断的子代理不会给出结论", long_task.result == "" and long_task.state == "cancelled",
+          long_task.state)
+    GATE.set()                        # 放掉那个孤儿请求
+    GATE = None
+
+    # 主对话这边的入口：cancel() / 打断都要顺手叫停子代理
+    GATE = threading.Event()
+    SCRIPTED.clear()
+    SCRIPTED.append({"role": "assistant", "content": "同样不该走到"})
+    tools_mod.call("spawn_subagent", {"task": "又一件很久的事", "name": "第二件长任务"})
+    second = manager.get("第二件长任务")
+    assert second is not None
+    time.sleep(0.3)
+    agent.cancel()                    # 界面上的「打断」按钮走的就是它
+    check("打断主对话会顺手叫停子代理",
+          wait_state(second, "cancelled", 3.0), second.state)
+    GATE.set()
+    GATE = None
+    manager.clear_finished()
+
     # ── 场景 7：关掉之后派不动 ────────────────────────────────────
     cfg.agent.subagent_enabled = False
     off = tools_mod.call("spawn_subagent", {"task": "随便做点什么"})

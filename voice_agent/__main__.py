@@ -391,6 +391,33 @@ def cmd_selftest(args) -> int:
     return 0 if run(getattr(args, "config", None)) else 1
 
 
+def cmd_log(args) -> int:
+    """看运行日志（落盘的那份）。
+
+    界面上的日志窗口一关就没了，闪退更是连一行都不剩 —— 出问题之后
+    用户能做的就是打开这个日志、把最后几十行发出来。
+    """
+    from . import journal
+
+    if args.prune:
+        removed = journal.prune(args.keep_days)
+        print("清掉了 " + str(removed) + " 个旧日志（保留 " + str(args.keep_days) + " 天）")
+        return 0
+    path = journal.file_path()
+    print("日志文件：" + str(path))
+    others = journal.recent_files(7)
+    if len(others) > 1:
+        print("最近几天的：" + "、".join(item.name for item in others))
+    print()
+    lines = journal.tail(args.lines, "detail" if args.detail else "info")
+    if not lines:
+        print("（今天还没有日志）")
+        return 0
+    for line in lines:
+        print(line)
+    return 0
+
+
 def cmd_ui(args) -> int:
     """默认开原生桌面窗口；--web 才起浏览器版。"""
     config = Path(args.config) if getattr(args, "config", None) else None
@@ -513,6 +540,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("tools", help="列出可用工具").set_defaults(func=cmd_tools)
     sub.add_parser("devices", help="列出音频设备").set_defaults(func=cmd_devices)
+    p_log = sub.add_parser("log", parents=[common], help="看运行日志（落盘的那份）")
+    p_log.add_argument("--lines", type=int, default=40, help="看最后几行，默认 40")
+    p_log.add_argument("--detail", action="store_true",
+                       help="连细节一起看（参数全文、耗时、token 用量）")
+    p_log.add_argument("--prune", action="store_true", help="只清理旧日志")
+    p_log.add_argument("--keep-days", type=int, default=14, help="清理时保留几天")
+    p_log.set_defaults(func=cmd_log)
+
     sub.add_parser("doctor", help="环境体检").set_defaults(func=cmd_doctor)
     sub.add_parser("selftest", help="端到端自检").set_defaults(func=cmd_selftest)
     return parser
@@ -520,6 +555,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     _fix_console()
+    # 崩了也要留下痕迹：窗口版没有控制台，栈只打在内存里，
+    # 用户能提供的只有一句"它闪退了"（日志文件里能看到完整栈）。
+    from . import journal
+
+    journal.install_crash_handler()
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     if not getattr(args, "command", None):

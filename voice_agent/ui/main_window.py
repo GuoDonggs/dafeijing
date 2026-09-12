@@ -741,6 +741,14 @@ class LogDialog(FramelessDialog):
         self.view.setReadOnly(True)
         self.view.setMaximumBlockCount(600)
         self.body.addWidget(self.view, 1)
+        # 「详细」：参数全文、耗时、token 用量这些排查用的行默认不显示，
+        # 勾上就一起看（文件里本来就是全的）
+        from PyQt6.QtWidgets import QCheckBox
+
+        self.detail = QCheckBox("详细（工具参数、耗时、token 用量）")
+        self.detail.setToolTip("这些行在日志文件里一直都有，这里只是显示不显示")
+        self.detail.stateChanged.connect(self._redump)
+        self.body.addWidget(self.detail)
         self._seen = 0
         self._dump()
         self._timer = QTimer(self)
@@ -760,9 +768,18 @@ class LogDialog(FramelessDialog):
         new = [item for item in logs if int(item.get("seq") or 0) > self._seen]
         if not new:
             return
+        want_detail = bool(self.detail.isChecked())
         for item in new:
+            if not want_detail and item.get("level") == "detail":
+                continue
             self.view.appendPlainText(str(item.get("text", "")))
         self._seen = int(new[-1].get("seq") or self._seen)
+
+    def _redump(self) -> None:
+        """勾/取消「详细」之后重画一遍。"""
+        self.view.clear()
+        self._seen = 0
+        self._dump()
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802
         """关窗要停掉定时器并回收，否则每按一次 Ctrl+L 就多一个常驻窗口。"""
@@ -772,6 +789,10 @@ class LogDialog(FramelessDialog):
 
 
 def run(config_path: Path | None = None, autostart: bool = True) -> int:
+    # 窗口版没有控制台：崩了只有这个钩子能把栈写进日志文件
+    from .. import journal
+
+    journal.install_crash_handler()
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName("大肥鲸")

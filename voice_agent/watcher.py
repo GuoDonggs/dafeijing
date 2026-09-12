@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import journal
 from .config import Config
 
 __all__ = ["Watch", "Watcher"]
@@ -103,7 +104,7 @@ class Watcher:
                  judge: Callable[[str, str], bool | None] | None = None,
                  on_hit: Callable[[Watch], None] | None = None) -> None:
         self.cfg = cfg
-        self.log = log
+        self.log = journal.adapt(log)
         self.judge = judge
         self.on_hit = on_hit
         self._items: dict[str, Watch] = {}

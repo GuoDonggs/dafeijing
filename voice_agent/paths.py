@@ -54,6 +54,7 @@ _LAYOUT = {
     "screenshots": "screenshots",
     "reference": "screenshots/reference",
     "vision": "vision",
+    "logs": "logs",
 }
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from typing import Any
 
 import requests
@@ -22,9 +23,12 @@ __all__ = ["Llm", "LlmError"]
 class LlmError(RuntimeError):
     """网络、鉴权或返回格式出错；调用方据此降级到离线规则。"""
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(self, message: str, status: int | None = None,
+                 interrupted: bool = False) -> None:
         super().__init__(message)
         self.status = status
+        #: 是"用户把它打断了"，不是故障 —— 调用方不该记成错误、更不该降级到规则
+        self.interrupted = bool(interrupted)
 
     @property
     def fatal(self) -> bool:
@@ -60,8 +64,13 @@ class Llm:
         self.cached_tokens = 0
         self.last_prompt_tokens = 0
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
-        """返回 assistant 消息（含可能的 tool_calls）。"""
+    def chat(self, messages: list[dict], tools: list[dict] | None = None,
+             interrupt: Any = None) -> dict:
+        """返回 assistant 消息（含可能的 tool_calls）。
+
+        给了 interrupt（threading.Event）就**随时可以放弃等待**：用户喊一声"停"
+        之后不用干等这一轮的超时，见 _post 里的说明。
+        """
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": messages,
@@ -84,15 +93,7 @@ class Llm:
             payload.update(self.cfg.extra_body)
 
         try:
-            response = self._session.post(
-                self.url,
-                headers={
-                    "Authorization": "Bearer " + self.api_key,
-                    "Content-Type": "application/json",
-                },
-                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                timeout=self.cfg.timeout_s,
-            )
+            response = self._post(payload, interrupt)
         except requests.Timeout as exc:
             raise LlmError("模型响应超时") from exc
         except requests.RequestException as exc:
@@ -127,6 +128,43 @@ class Llm:
             "content": message.get("content") or "",
             "tool_calls": message.get("tool_calls") or [],
         }
+
+    def _post(self, payload: dict, interrupt: Any = None):  # noqa: ANN401
+        """发一次请求。给了 interrupt 就把它丢到辅助线程里等，随时能被叫走。
+
+        为什么要这么绕：requests 的 POST 是**同步阻塞**的，一次最长等
+        timeout_s（默认 30 秒）。用户喊"停"的时候，这一轮还在读 socket，
+        新的任务得排到它后面 —— 日志里看到的就是"它说停下了，可还在跑上一个任务"。
+        放在辅助线程里之后，主线程只等 interrupt：被打断就立刻抛
+        LlmError(interrupted=True)，而那个请求自己在后台跑完就被丢掉
+        （**它的 tool_calls 不会被执行**，所以不会留下任何副作用）。
+        """
+        headers = {
+            "Authorization": "Bearer " + self.api_key,
+            "Content-Type": "application/json",
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        timeout = self.cfg.timeout_s
+        if interrupt is None:
+            return self._session.post(self.url, headers=headers, data=body, timeout=timeout)
+        box: dict = {}
+
+        def work() -> None:
+            try:
+                box["response"] = self._session.post(self.url, headers=headers,
+                                                     data=body, timeout=timeout)
+            except Exception as exc:  # noqa: BLE001 - 原样带回主线程再分类
+                box["error"] = exc
+
+        worker = threading.Thread(target=work, name="llm-post", daemon=True)
+        worker.start()
+        while worker.is_alive():
+            worker.join(timeout=0.1)
+            if interrupt.is_set():
+                raise LlmError("这一轮被打断了（请求已放弃）", interrupted=True)
+        if "error" in box:
+            raise box["error"]
+        return box["response"]
 
     @property
     def stats(self) -> str:

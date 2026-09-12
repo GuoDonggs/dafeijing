@@ -113,6 +113,57 @@ def main() -> int:
     check("describe 里有目录和清单", bool(info.get("dir")) and bool(info.get("items")),
           str(info.get("dir")))
 
+    print("\n运行日志：落盘、分级、崩溃也留痕")
+    from voice_agent import journal
+
+    journal.info("测试：一行普通日志")
+    journal.detail("测试：一行详细日志")
+    log_path = journal.file_path()
+    check("日志写在数据目录下的 logs/ 里",
+          log_path.is_file() and log_path.parent.name == "logs", str(log_path))
+    check("文件名按天分", log_path.name.startswith("voice-agent-"), log_path.name)
+    check("info 和 detail 都进了文件",
+          len(journal.tail(20, "detail")) >= 2, str(journal.tail(3, "detail")))
+    check("默认只看 info（详细那些不打扰用户）",
+          all("[·]" not in line for line in journal.tail(20)),
+          str(journal.tail(3)))
+    check("要详细的时候看得到", any("[·]" in line for line in journal.tail(6, "detail")))
+
+    # 崩溃钩子：窗口版没有控制台，栈只能靠它留下来
+    saved_hook = sys.__excepthook__
+    sys.__excepthook__ = lambda *a: None      # 别把栈也打到测试输出里
+    try:
+        try:
+            raise ValueError("模拟崩溃：日志里要能看到这一句")
+        except ValueError:
+            journal.install_crash_handler()
+            sys.excepthook(*sys.exc_info())
+    finally:
+        sys.__excepthook__ = saved_hook
+    crashed = journal.tail(30, "detail")
+    check("未捕获异常的 traceback 写进了日志",
+          any("模拟崩溃" in line for line in crashed), str(crashed[-3:]))
+    check("崩溃那一行标了 crash",
+          any("[crash]" in line for line in crashed))
+
+    # 外部传进来的 log 可能只收一个参数（命令行是 print、测试是 lambda）
+    seen: list = []
+    journal.adapt(lambda message: seen.append(message))("一", "detail")
+    journal.adapt(lambda message: seen.append(message))("二", "info")
+    check("只收一个参数的 log 不会被 level 弄崩", seen == ["二"], str(seen))
+    pairs: list = []
+    journal.adapt(lambda message, level="info": pairs.append((message, level)))(
+        "三", "detail")
+    check("收两个参数的 log 会带上 level", pairs == [("三", "detail")], str(pairs))
+
+    print("\n清理呢？太旧的日志会自己走")
+    old = log_path.with_name("voice-agent-19700101.log")
+    old.write_text("很久以前\n", encoding="utf-8")
+    os.utime(old, (1000.0, 1000.0))
+    removed = journal.prune(14)
+    check("旧日志被清掉", removed >= 1 and not old.exists(), "删了 " + str(removed) + " 个")
+    check("今天的日志还在", log_path.is_file())
+
     print()
     if failures:
         print("失败 " + str(len(failures)) + " 项：" + "、".join(failures))

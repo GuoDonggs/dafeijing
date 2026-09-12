@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import journal
 from . import tools
 from .config import Config
 from .llm import Llm, LlmError
@@ -66,6 +67,9 @@ class SubAgent:
     rounds: int = 0
     started: float = field(default_factory=time.time)
     finished: float = 0.0
+    #: 叫停信号：用户打断时置位。它会传进模型调用里 —— 不然子代理正卡在
+    #: 一次几十秒的 POST 上，喊停之后还要等那一轮跑完才理你。
+    stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     @property
     def seconds(self) -> float:
@@ -96,7 +100,7 @@ class SubAgentManager:
     def __init__(self, cfg: Config, log: Callable[[str], None] = print,
                  on_done: Callable[[SubAgent], None] | None = None) -> None:
         self.cfg = cfg
-        self.log = log
+        self.log = journal.adapt(log)
         self.on_done = on_done
         self._items: dict[str, SubAgent] = {}
         self._order: list[str] = []
@@ -173,10 +177,32 @@ class SubAgentManager:
         item = self.get(key)
         if item is None or item.state != "running":
             return False
+        item.stop_event.set()
         item.state = "cancelled"
         item.finished = time.time()
         self.log("[subagent] 取消了 " + item.name)
         return True
+
+    def cancel_all(self, reason: str = "") -> int:
+        """叫停**所有**还在跑的子代理，返回停了几个。
+
+        用户打断的时候用它：子代理是独立线程，主对话"停"了它照样一步接一步地
+        调工具、烧 token、占着模型 —— 用户看到的正是"它说停下了，可日志里
+        还在跑上一个任务"。定时盯梢（watch）不在这里面：那是用户明确让它长期
+        盯着的事，要停得说「别盯了」。
+        """
+        stopped = 0
+        for item in self.all():
+            if item.state != "running":
+                continue
+            item.stop_event.set()
+            item.state = "cancelled"
+            item.finished = time.time()
+            stopped += 1
+        if stopped:
+            self.log("[subagent] 叫停了 " + str(stopped) + " 个还在跑的子代理"
+                     + ("（" + str(reason) + "）" if reason else ""))
+        return stopped
 
     def clear_finished(self) -> int:
         with self._lock:
@@ -227,11 +253,16 @@ class SubAgentManager:
                 {"role": "system", "content": _SUBAGENT_PROMPT},
                 {"role": "user", "content": item.task},
             ]
+            tool_schema = tools.openai_tools()
             for _round in range(rounds):
-                if item.state == "cancelled":
+                if item.stop_event.is_set():
                     return
                 item.rounds += 1
-                message = client.chat(messages, tools=tools.openai_tools())
+                started = time.time()
+                message = client.chat(messages, tools=tool_schema,
+                                      interrupt=item.stop_event)
+                self.log("[subagent] " + item.name + " 第 " + str(item.rounds) + " 轮："
+                         + "%.1fs" % (time.time() - started), "detail")
                 calls = message.get("tool_calls") or []
                 if not calls:
                     item.result = (message.get("content") or "").strip()
@@ -240,7 +271,7 @@ class SubAgentManager:
                                  "content": message.get("content") or "",
                                  "tool_calls": calls})
                 for call in calls:
-                    if item.state == "cancelled":
+                    if item.stop_event.is_set():
                         return
                     function = call.get("function") or {}
                     name = function.get("name") or ""
@@ -254,9 +285,14 @@ class SubAgentManager:
                         })
                         continue
                     self.log("[subagent] " + item.name + " 调用工具 " + name)
+                    started = time.time()
                     # 后台没人给它按确认 —— 敏感工具一律拒绝，这是有意的
                     outcome = tools.call_result(name, arguments,
                                                 on_confirm=lambda _q: False)
+                    self.log("[subagent] " + item.name + " ← " + name + " "
+                             + ("成功" if outcome.ok else "失败(" + str(outcome.code) + ")")
+                             + " %.0fms｜%s" % ((time.time() - started) * 1000,
+                                                str(outcome.text)[:160]), "detail")
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.get("id") or name,
@@ -266,10 +302,13 @@ class SubAgentManager:
             else:
                 item.result = ("这件事步骤太多（已经做了 " + str(item.rounds)
                                + " 步），我先停下来，把已经查到的说一下。")
-            if item.state == "cancelled":
+            if item.stop_event.is_set():
                 return
             item.state = "done"
         except LlmError as exc:
+            if getattr(exc, "interrupted", False):
+                item.state = "cancelled"
+                return
             item.state, item.error = "error", str(exc)[:160]
         except Exception as exc:  # noqa: BLE001 - 子代理崩了不能影响主循环
             item.state, item.error = "error", str(exc)[:160]

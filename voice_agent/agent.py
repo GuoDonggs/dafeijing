@@ -30,6 +30,7 @@ from typing import Callable
 import numpy as np
 
 from . import audio as audio_io
+from . import journal
 from . import rules
 from . import security
 from . import tools
@@ -67,7 +68,7 @@ _WORDLIST_MAX = 16
 class VoiceAgent:
     def __init__(self, cfg: Config, log: Callable[[str], None] = print) -> None:
         self.cfg = cfg
-        self.log = log
+        self.log = journal.adapt(log)
         self.brain = Brain(cfg, log=log)
 
         # 后台子代理做完事要主动汇报，但只能在「真的闲着」的时候开口 ——
@@ -238,6 +239,7 @@ class VoiceAgent:
 
     def stop(self) -> None:
         """停止监听并释放设备；可再次 start()。"""
+        self._stop_background("停止引擎")
         self._running = False
         self._stop_speak.set()
         self._interrupt.set()
@@ -345,6 +347,7 @@ class VoiceAgent:
 
     def cancel(self) -> None:
         """取消当前任务并停播，回到待命（界面的「打断」按钮）。"""
+        self._stop_background("用户按了打断")
         self._epoch += 1  # 让正在跑的任务作废，免得它回头又把状态写回去
         self._interrupt.set()
         self._stop_speak.set()
@@ -681,6 +684,9 @@ class VoiceAgent:
         if score:
             self.log("[agent] 声纹通过：" + str(round(score, 3)))
         self.log("[agent] 唤醒词命中")
+        self.log("[agent] 进入听指令状态（超时 "
+                 + str(self.cfg.agent.listen_timeout_ms) + "ms，追问模式 "
+                 + str(self.cfg.agent.follow_up_mode) + "）", "detail")
         self._note("system", "唤醒词命中")
         self.wake.reset()
         self.vad.reset()
@@ -833,6 +839,9 @@ class VoiceAgent:
             self.log("[agent] 任务被打断（{:.1f}s）".format(elapsed))
             return
         self.log("[brain] {:.1f}s → {}".format(elapsed, reply[:120]))
+        self.log("[agent] 这一轮说完：用时 %.1fs，回复 %d 字，追问窗口 %s"
+                 % (elapsed, len(reply), "开" if self._follow_up_window(reply)[0] else "关"),
+                 "detail")
         self.last_reply = reply
         self.turns += 1
         self._note("assistant", reply)
@@ -1071,6 +1080,23 @@ class VoiceAgent:
         finally:
             self._speaking.clear()
 
+    def _stop_background(self, why: str) -> None:
+        """把还在后台跑的子代理一起叫停。
+
+        用户喊一声"停"意思是"别做了"。子代理是独立线程：主对话回了待命，
+        它还在一步接一步地调工具、烧 token、占着模型 —— 用户看到的就是
+        "它说停下了，可日志里还在跑上一个任务"。
+        **定时盯梢（watch）不动**：那是用户明确让它长期盯着的事，
+        要停得说一句「别盯了」。
+        """
+        try:
+            stopped = self.brain.subagents.cancel_all(why)
+        except Exception as exc:  # noqa: BLE001 - 叫停失败不该影响打断本身
+            self.log("[agent] 叫停子代理失败：" + str(exc)[:80])
+            return
+        if stopped:
+            self.log("[agent] 已叫停 " + str(stopped) + " 个还在跑的子代理")
+
     def _barge_in(self) -> None:
         """喊唤醒词打断：停播 + 取消任务 + 重新开始听。
 
@@ -1083,6 +1109,7 @@ class VoiceAgent:
         快车道信号 —— 即使它们随后被新任务清掉，旧任务也不会再有任何副作用。
         """
         self.log("[agent] 打断当前任务")
+        self._stop_background("用户打断")
         self._epoch += 1
         self._interrupt.set()
         self._stop_speak.set()
