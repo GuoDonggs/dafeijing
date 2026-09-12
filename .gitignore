@@ -33,6 +33,10 @@ build/conversation.json
 # 权限审计日志：记的是每次敏感操作的参数，属于本机隐私，不入库
 build/audit.jsonl
 build/audit.1.jsonl
+# 屏幕标记：坐标是"这台机器这块屏"上的，换台机器就没意义，不入库
+build/marks.json
+# 英文音译的学习缓存（问过模型的结果）
+build/translit.json
 
 # 临时文件：提交信息（git commit -F 用）与排查用的小脚本
 build/commit-msg*.txt

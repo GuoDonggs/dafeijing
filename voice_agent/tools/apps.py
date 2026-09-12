@@ -31,6 +31,10 @@ def open_app(name: str = "") -> str:
             kind = str(entry.get("type") or "")
             if kind == "url" or "://" in mapped:
                 return open_url(mapped)
+            if kind == "folder":
+                from .windows import open_folder  # noqa: PLC0415
+
+                return open_folder(mapped, label=target_name)
             if kind == "command":
                 # 命令类（脚本、带参数的调用）走 shell，才认得到参数和管道
                 ok = _launch(mapped, args) or _launch("cmd", ["/c", mapped] + args)

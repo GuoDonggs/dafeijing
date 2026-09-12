@@ -98,6 +98,25 @@ def main() -> int:
         check("快照里能看到它", watcher.snapshot()["total"] == 1,
               str(watcher.snapshot()))
 
+        # ── 场景 1b：只在框选范围里找 / 等它消失 ──
+        from voice_agent import marks as marks_mod
+
+        marks_mod.store.clear()
+        marks_mod.store.add_region(0, 0, 60, 60, name="角落")
+        gone = watcher.start("图片", str(template), region="角落",
+                             interval_s=1, expect="消失")
+        check("范围里没有这张图 → 等消失立刻成立",
+              wait_state(gone, "hit"), gone.state + " " + gone.last)
+        check("说明里带上了范围名", "角落" in gone.last, gone.last)
+        broken = watcher.start("图片", str(template), region="范围9", interval_s=1)
+        deadline = time.time() + 8
+        while time.time() < deadline and broken.state == "running":
+            time.sleep(0.1)
+        check("范围名看不懂时报错而不是死等",
+              broken.state == "error" and "看不懂" in broken.error,
+              broken.state + " " + broken.error)
+        marks_mod.store.clear()
+
     # ── 场景 2：画面没变就不问模型 ──
     same = np.zeros((200, 300, 3), dtype=np.uint8)
     check("第一次比较不算「没变」", watcher._unchanged("probe", same) is False)

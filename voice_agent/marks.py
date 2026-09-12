@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 __all__ = ["Mark", "MarkStore", "store", "resolve_region",
@@ -75,14 +77,69 @@ class Mark:
                 + "，中心 " + str(self.center[0]) + "," + str(self.center[1]))
 
 
-class MarkStore:
-    """标记的仓库。线程安全：工具在工作线程里加，界面在 UI 线程里画。"""
+def store_path() -> Path:
+    """标记存哪。放在 build/ 下：它是运行时数据，不该混进项目文件里。"""
+    import os
 
-    def __init__(self) -> None:
+    base = os.environ.get("VOICE_AGENT_BUILD_DIR")
+    root = Path(base) if base else Path(__file__).resolve().parent.parent / "build"
+    return root / "marks.json"
+
+
+class MarkStore:
+    """标记的仓库。线程安全：工具在工作线程里加，界面在 UI 线程里画。
+
+    **会落盘**（build/marks.json）：框过的范围、标过的点，重启程序还在 ——
+    "范围1 是我上次框的那个下载按钮"，这种记忆不该每次开机都重来一遍。
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
         self._items: dict[str, Mark] = {}
         self._order: list[str] = []
         self._lock = threading.Lock()
+        self._path = Path(path) if path else store_path()
         self._version = 0        # 界面靠它判断"要不要重画"
+        self._load()
+
+    # ── 落盘 ──
+    def _load(self) -> None:
+        if not self._path.is_file():
+            return
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        items = data.get("marks") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            return
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "").strip()
+            kind = str(raw.get("kind") or "region")
+            if not name or kind not in ("region", "point"):
+                continue
+            try:
+                mark = Mark(name=name, kind=kind, x1=int(raw.get("x1", 0)),
+                            y1=int(raw.get("y1", 0)), x2=int(raw.get("x2", 0)),
+                            y2=int(raw.get("y2", 0)), note=str(raw.get("note") or "")[:60])
+            except (TypeError, ValueError):
+                continue
+            self._items[name] = mark
+            self._order.append(name)
+
+    def _save(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"version": 1, "marks": [
+                {"name": m.name, "kind": m.kind, "x1": m.x1, "y1": m.y1,
+                 "x2": m.x2, "y2": m.y2, "note": m.note}
+                for m in (self._items[k] for k in self._order)
+            ]}
+            self._path.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                                  encoding="utf-8")
+        except OSError:
+            pass   # 存不下不该影响"框一下"这件事本身
 
     # ── 读写 ──
     @property
@@ -114,6 +171,7 @@ class MarkStore:
                 if note:
                     existing.note = str(note)[:60]
                 self._version += 1
+            self._save()
             return existing, True
         return self._add(kind, x1, y1, x2, y2, name, note), False
 
@@ -128,7 +186,8 @@ class MarkStore:
             self._items[final] = mark
             self._order.append(final)
             self._version += 1
-            return mark
+        self._save()
+        return mark
 
     def _next_name(self, kind: str) -> str:
         """范围1、范围2…（点也一样）。不跳号：用户看到的编号是连续的。"""
@@ -168,7 +227,31 @@ class MarkStore:
             if mark is not None:
                 self._order.remove(mark.name)
                 self._version += 1
-            return mark
+        if mark is not None:
+            self._save()
+        return mark
+
+    def rename(self, old: str, new: str) -> tuple[bool, str]:
+        """改名。重名会被拒绝 —— 名字是引用它的唯一凭据，撞了就没法用了。"""
+        source = str(old or "").strip()
+        target = " ".join(str(new or "").split())
+        if not target:
+            return False, "名字不能空着"
+        with self._lock:
+            mark = self._items.get(source)
+            if mark is None:
+                return False, "没有叫「" + source + "」的标记"
+            if target == source:
+                return True, ""
+            if target in self._items:
+                return False, "已经有叫「" + target + "」的标记了"
+            self._items.pop(source)
+            mark.name = target
+            self._items[target] = mark
+            self._order[self._order.index(source)] = target
+            self._version += 1
+        self._save()
+        return True, ""
 
     def clear(self, kind: str = "") -> int:
         with self._lock:
@@ -184,7 +267,9 @@ class MarkStore:
                 count = len(drop)
             if count:
                 self._version += 1
-            return count
+        if count:
+            self._save()
+        return count
 
     def all(self) -> list[Mark]:
         with self._lock:

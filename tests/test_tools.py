@@ -308,6 +308,114 @@ def vision_path() -> None:
         vision_mod.set_vision_handler(original)
 
 
+def image_tools() -> None:
+    """图片匹配：图里找图、参考目录按名字找、以及"答完留个窗口"。"""
+    print("图片匹配")
+    import tempfile as _tempfile
+
+    import numpy as np
+    from PIL import Image
+
+    from voice_agent.tools._shared import REFERENCE_DIR
+
+    with _tempfile.TemporaryDirectory() as tmp:
+        # 造一张大图，里面贴一张有特征的小图，再让工具把它找出来
+        big = np.zeros((400, 600, 3), dtype=np.uint8) + 40
+        patch = np.zeros((60, 90, 3), dtype=np.uint8)
+        patch[:, :] = (10, 200, 30)
+        patch[20:40, 30:60] = (240, 20, 90)
+        big[120:180, 200:290] = patch
+        source = Path(tmp) / "big.png"
+        template = Path(tmp) / "small.png"
+        Image.fromarray(big[:, :, ::-1]).save(source)          # BGR -> RGB
+        Image.fromarray(patch[:, :, ::-1]).save(template)
+        answer = str(tools.call("find_in_image", {"image": str(source), "template": str(template)}))
+        check("在图里找得到贴进去的那块", "找到了" in answer and "245,150" in answer,
+              answer[:70])
+        other = np.zeros((60, 90, 3), dtype=np.uint8)
+        other[:, :] = (200, 200, 10)
+        other[5:15, 5:15] = (0, 0, 0)
+        other_path = Path(tmp) / "other.png"
+        Image.fromarray(other[:, :, ::-1]).save(other_path)
+        answer = str(tools.call("find_in_image", {"image": str(source),
+                                                  "template": str(other_path)}))
+        check("大图里没有这张图时会说实话", "没有找到" in answer, answer[:60])
+
+        # 参考目录：丢一张图进去，之后按**名字**就能用它
+        REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+        named = REFERENCE_DIR / "自检用按钮.png"
+        Image.fromarray(patch[:, :, ::-1]).save(named)
+        try:
+            check("参考目录列得出来",
+                  "自检用按钮" in str(tools.call("list_reference", {})))
+            check("按名字也能在图里找",
+                  "找到了" in str(tools.call("find_in_image", {"image": str(source),
+                                                              "template": "自检用按钮"})),
+                  "用名字找")
+            check("名字不存在时会告诉你有哪些",
+                  "参考图片目录里现有" in str(tools.call("find_in_image",
+                                                       {"image": str(source),
+                                                        "template": "根本没有这张"})),
+                  "给提示")
+            check("参考目录在哪说得清",
+                  str(REFERENCE_DIR) in str(tools.call("reference_dir", {})))
+            check("屏幕找图也认名字（这里只验证参数解析，不要求屏幕上有）",
+                  "没找到" in str(tools.call("find_on_screen", {"image": "自检用按钮"}))
+                  or "找到了" in str(tools.call("find_on_screen", {"image": "自检用按钮"})))
+        finally:
+            named.unlink(missing_ok=True)
+
+    check("屏幕找图能限定范围名",
+          "看不懂" in str(tools.call("find_on_screen", {"image": "x.png", "region": "范围9"})))
+
+
+def continuous_talk() -> None:
+    """连续对话：这几类工具答完要自动留个窗口。"""
+    print("连续对话")
+    from voice_agent.tools._shared import TURN
+
+    cases = [
+        ("list_windows", {}, "查了给你看 → 留窗口"),
+        ("read_file", {}, "缺参数 → 留窗口"),
+        ("get_time", {}, "普通工具 → 不留"),
+    ]
+    for name, args, label in cases:
+        security.reset_limits()
+        tools.reset_turn()
+        tools.call(name, args, on_confirm=lambda _q: False)
+        expected = name != "get_time"
+        check(label, bool(TURN.get("follow_up")) == expected,
+              str(TURN.get("follow_up")) + " " + str(TURN.get("reason"))[:30])
+    tools.reset_turn()
+
+
+def folder_mapping() -> None:
+    """应用映射表支持目录：映射一个目录，然后按名字读写。"""
+    print("目录映射")
+    import tempfile as _tempfile
+
+    from voice_agent import screen
+
+    with _tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "报告.txt").write_text("内容", encoding="utf-8")
+        saved = screen.load_app_map()
+        try:
+            screen.save_app_map({"我的项目": {"target": tmp, "type": "folder"}})
+            found = screen.resolve_app("我的项目")
+            check("目录映射认得出来", found.get("hit") and found["entry"]["type"] == "folder",
+                  str(found.get("entry")))
+            check("猜类型也认得目录", screen._guess_app_type(tmp) == "folder")
+            check("文件工具按名字能解析到那个目录",
+                  str(tools.call("list_files", {"path": "我的项目"})).find("报告") >= 0,
+                  "按名字列目录")
+            check("按名字能读到里面的文件",
+                  "内容" in str(tools.call("read_file", {"path": "我的项目\\报告.txt"}))
+                  or "内容" in str(tools.call("read_file", {"path": "我的项目/报告.txt"})),
+                  "按名字读文件")
+        finally:
+            screen.save_app_map(saved)
+
+
 def self_control() -> None:
     """控制程序自己：开新会话 / 重启 / 退出。
 
@@ -370,6 +478,9 @@ def main() -> int:
     run_audit()
     live_tools()
     vision_path()
+    image_tools()
+    continuous_talk()
+    folder_mapping()
     self_control()
     print()
     if failures:

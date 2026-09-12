@@ -208,6 +208,29 @@ def screenshot(monitor: int = 0, region: str = "", name: str = "") -> str:
             + "），存到图片文件夹里的 " + path.name)
 
 
+def open_folder(path: str = "", label: str = "") -> str:
+    """在资源管理器里打开一个文件夹。"""
+    raw = str(path or "").strip()
+    if not raw:
+        return "没说要打开哪个文件夹"
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+    from pathlib import Path  # noqa: PLC0415
+
+    target = Path(expanded)
+    if not target.is_dir():
+        return "找不到这个文件夹：" + raw
+    opened = _launch(str(target))
+    if not opened:
+        # 个别机器上 startfile 对目录不灵，退回 explorer
+        try:
+            subprocess.Popen(["explorer", str(target)],
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            opened = True
+        except Exception:  # noqa: BLE001
+            opened = False
+    return ("已经打开文件夹 " + (label or target.name)) if opened else ("打不开 " + raw)
+
+
 def clipboard(action: str = "get", text: str = "") -> str:
     """读 / 写系统剪贴板。"""
     what = (action or "get").strip().lower()

@@ -27,9 +27,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .. import security
-from ._shared import TURN, reset_turn
+from ._shared import TURN, keep_listening, reset_turn
 from .apps import open_app, open_url, web_search
 from .files import list_files, read_file, recall, remember, search_files
+from .images import find_in_image_tool, list_reference_tool, reference_dir_tool
 from .marks import (
     clear_marks_tool,
     list_marks_tool,
@@ -106,6 +107,16 @@ class Tool:
     # LLM 模式不依赖它（模型自己看 description 判断），但没有 API Key 时
     # 它是自定义技能唯一能被「说出来」的入口。
     triggers: tuple = ()
+
+    @property
+    def follow_up(self) -> bool:
+        """这个工具的结果是不是"通常需要用户接着说一句"。
+
+        连续对话的成败就在这一步：查完东西说"在 320,480"然后回待命，用户还得再喊
+        一次唤醒词说"点它" —— 像命令行，不像人。这些"查了给你看"的工具答完留个
+        窗口，"点它""打开第三个"就能直接接上。
+        """
+        return self.name in _FOLLOW_UP_TOOLS
 
     @property
     def display(self) -> str:
@@ -319,6 +330,16 @@ def _command_hint(command: str) -> str:
     return ""
 
 
+#: 工具"缺参数"时的开场白。项目里的写法很统一（全是"没说…"），
+#: 于是这里能一眼认出来：接下去用户那句话就是来补参数的。
+_NEED_INPUT = re.compile(r"^(没说|没听清|没找到叫|看不懂这个|要同时给出)")
+
+
+def _needs_input(text: str) -> bool:
+    value = str(text or "").strip()
+    return len(value) <= 60 and bool(_NEED_INPUT.match(value))
+
+
 def _audit_args(args: Any, limit: int = 160) -> str:
     """审计里记参数，但要截断：别把一整篇文件内容写进日志。"""
     try:
@@ -397,11 +418,20 @@ def call_result(name: str, arguments: Any = None,
                         "args": _audit_args(args)})
 
     try:
-        return ToolResult(str(tool.handler(**args)))
+        outcome = ToolResult(str(tool.handler(**args)))
     except TypeError as exc:
-        return ToolResult("工具参数不对：" + str(exc)[:80], False, "bad_arguments")
+        outcome = ToolResult("工具参数不对：" + str(exc)[:80], False, "bad_arguments")
     except Exception as exc:  # noqa: BLE001 - 工具层永不抛出，交给模型兜底
-        return ToolResult(ERROR_PREFIX + str(exc)[:100], False, "error")
+        outcome = ToolResult(ERROR_PREFIX + str(exc)[:100], False, "error")
+
+    # 连续对话：这三类结果之后用户通常还要接一句，先把窗口留着 ——
+    # 否则他得再喊一次唤醒词才能说"点它"，那就不像人说话了。
+    if not TURN.get("follow_up"):
+        if outcome.code == "bad_arguments" or _needs_input(outcome.text):
+            keep_listening("刚才缺参数，等用户补一句")
+        elif outcome.ok and tool.follow_up:
+            keep_listening("刚查完，" + tool.display + "之后通常还有下一句")
+    return outcome
 __all__ = [
     "Tool",
     "REGISTRY",
@@ -418,6 +448,14 @@ __all__ = [
     "reset_skills",
     "tool_names",
 ]
+#: 答完留个追问窗口的工具：它们的结果是"给用户看一眼"，
+#: 接下来那句"点它""打开第三个""把范围1 截下来"才是真正要干的事。
+_FOLLOW_UP_TOOLS = frozenset({
+    "find_on_screen", "find_in_image", "look_at_screen", "list_files", "search_files",
+    "find_files", "list_windows", "list_processes", "list_marks", "mouse_position",
+    "app_map", "resize_image", "read_file", "recall", "list_watches", "subagent_status",
+})
+
 #: 这些参数是"给机器看的"，念出来听不懂（命令、脚本、代码、正文）
 _OPAQUE_ARGS = ("command", "script", "code", "content", "text")
 #: 数字参数的念法：（前缀，后缀）。"延迟 60 秒"比"60"清楚得多
@@ -485,6 +523,9 @@ _BUILTIN_TITLES = {
     "restart_self": "重启程序",
     "quit_self": "退出程序",
     "permission_mode": "调整权限",
+    "find_in_image": "图里找图",
+    "list_reference": "看参考图",
+    "reference_dir": "参考图放哪",
     "mark_region": "框选范围",
     "mark_point": "标记点",
     "list_marks": "看标记",

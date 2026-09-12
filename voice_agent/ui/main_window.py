@@ -460,7 +460,8 @@ class MainWindow(QWidget):
             # 「对话记录」和「文字指令」本来就是同一个页面，合并成一条
             ("chat", "对话与指令", "Ctrl+K", self.show_chat),
             ("plus", "开始新会话", "", self.new_session),
-            ("search", "框选范围", "", lambda: self.start_marks("region")),
+            ("search", "屏幕标记…", "", self.show_marks),
+            ("plus", "框选范围", "", lambda: self.start_marks("region")),
             ("chat", "标记点", "", lambda: self.start_marks("point")),
             ("close", "擦掉所有标记", "", self.clear_marks),
             (None, None, None, None),
@@ -493,6 +494,12 @@ class MainWindow(QWidget):
     def show_command(self) -> None:
         """兼容旧调用（Ctrl+R 等）：打开的就是对话页。"""
         self.show_chat()
+
+    def show_marks(self) -> None:
+        """打开「屏幕标记」页：看列表、改名字坐标、删、再框一个。"""
+        from .marks_page import MarksPage
+
+        self._page_for("marks", MarksPage, "屏幕标记", 660, 640).show()
 
     def clear_marks(self) -> None:
         """擦掉屏幕上所有标记。"""

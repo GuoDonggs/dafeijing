@@ -94,6 +94,36 @@ def main() -> int:
     check("全清", "擦掉" in tools.call("clear_marks", {}) and not store.all())
     check("没标记时清会说实话", "本来就没有" in tools.call("clear_marks", {}))
 
+    print("\n落盘：重启之后标记还在")
+    store.clear()
+    store.add_region(11, 22, 333, 444, note="下载按钮")
+    store.add_point(555, 666, note="登录")
+    saved = marks_mod.store_path()
+    check("标记写进了 build/marks.json", saved.is_file(), str(saved))
+    reloaded = marks_mod.MarkStore(saved)
+    check("重新读一遍，框还在",
+          (reloaded.get("范围1") or first).rect == (11, 22, 333, 444),
+          str(reloaded.get("范围1")))
+    check("备注也一起存下来了", (reloaded.get("范围1") or first).note == "下载按钮")
+    check("点也还在", (reloaded.get("点1") or first).center == (555, 666))
+    reloaded.remove("范围1")
+    check("删掉之后落盘也更新",
+          marks_mod.MarkStore(saved).get("范围1") is None)
+    reloaded.clear()
+    check("清空之后文件里也没了",
+          not marks_mod.MarkStore(saved).all())
+
+    print("\n改名：名字是引用它的唯一凭据")
+    store.clear()
+    store.add_region(0, 0, 100, 100, name="范围1")
+    ok, why = store.rename("范围1", "下载区")
+    check("改得动", ok and (store.get("下载区") or first).rect == (0, 0, 100, 100), why)
+    check("老名字查不到了", store.get("范围1") is None)
+    store.add_point(1, 2, name="另一个")
+    ok, why = store.rename("下载区", "另一个")
+    check("重名会被拒绝", not ok and "已经有" in why, why)
+    check("空名字会被拒绝", not store.rename("下载区", "   ")[0])
+
     print("\n截图真的只截那一块")
     store.add_region(0, 0, 400, 300, name="左上角")
     out = tools.call("screenshot", {"region": "左上角", "name": "crop"})

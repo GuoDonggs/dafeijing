@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import sys
 import time
 from ctypes import wintypes
@@ -288,6 +289,127 @@ def grab_screen(region: tuple[int, int, int, int] | None = None,
     return np.array(image.convert("RGB"))[:, :, ::-1].copy()
 
 
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+
+
+def _imread(path: Path):
+    """读一张图（BGR 数组），读不出来返回 None。
+
+    不能用 cv2.imread：它在 Windows 上**读不了中文路径**（内部用窄字符 API），
+    返回 None 而不报错。而中文文件名恰恰是中文用户最自然的写法
+    （「下载按钮.png」），所以这里自己读字节再解码。
+    """
+    import cv2  # noqa: PLC0415
+
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+    except (OSError, ValueError):
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def reference_dir() -> Path:
+    """参考图片目录：里面放"要找的东西"的小图。"""
+    from .tools._shared import REFERENCE_DIR  # noqa: PLC0415 - 避免循环导入
+
+    return REFERENCE_DIR
+
+
+def list_reference_images(limit: int = 20) -> list[str]:
+    """参考目录里现成的图片名（不带扩展名），给"有哪些能找"用。"""
+    folder = reference_dir()
+    if not folder.is_dir():
+        return []
+    names = []
+    for item in sorted(folder.iterdir()):
+        if item.is_file() and item.suffix.lower() in _IMAGE_SUFFIXES:
+            names.append(item.stem)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def resolve_template(image: str | Path) -> Path:
+    """把"要找的那张图"解析成文件路径。
+
+    可以直接给路径；也可以只给**名字**（下载按钮），此时去参考图片目录里找 ——
+    语音场景里没人念得出一长串路径，说名字才是自然的。
+    """
+    raw = str(image or "").strip().strip('"').strip("'")
+    if not raw:
+        raise FileNotFoundError("没说要找哪张图片")
+    direct = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if direct.is_file():
+        return direct
+    folder = reference_dir()
+    candidates = [raw] if Path(raw).suffix else [raw + suffix for suffix in _IMAGE_SUFFIXES]
+    for name in candidates:
+        target = folder / name
+        if target.is_file():
+            return target
+    if folder.is_dir():
+        lowered = raw.lower()
+        for item in folder.iterdir():
+            if item.is_file() and item.stem.lower() == lowered:
+                return item
+    existing = list_reference_images(8)
+    hint = ("参考图片目录里现有：" + "、".join(existing)) if existing else (
+        "把要找的小图放进 " + str(folder) + " 就能直接用名字找")
+    raise FileNotFoundError("找不到图片「" + raw + "」。" + hint)
+
+
+def find_in_image(image: str | Path, template: str | Path, confidence: float = 0.8,
+                  scales: tuple[float, ...] = (1.0,), limit: int = 5) -> list[dict]:
+    """在一张图片里找另一张图（不碰屏幕）。
+
+    用来回答"这张截图里有没有那个图标""参考图 A 里有没有 B"，
+    也用来在把图送进视觉模型之前先自己比对一遍 —— 本地比对不要钱。
+    """
+    import cv2  # noqa: PLC0415
+
+    source = Path(image)
+    if not source.is_file():
+        raise FileNotFoundError("找不到图片：" + str(image))
+    shot = _imread(source)
+    if shot is None:
+        raise ValueError("读不出这张图片：" + str(image))
+    target_path = resolve_template(template)
+    target = _imread(target_path)
+    if target is None:
+        raise ValueError("读不出要找的那张图：" + str(target_path))
+    shot_gray = cv2.cvtColor(shot, cv2.COLOR_BGR2GRAY)
+    shot_h, shot_w = shot_gray.shape[:2]
+    found: list[dict] = []
+    for scale in scales:
+        if scale <= 0:
+            continue
+        height = int(target.shape[0] * scale)
+        width = int(target.shape[1] * scale)
+        if height < 6 or width < 6 or height > shot_h or width > shot_w:
+            continue
+        scaled = cv2.resize(target, (width, height), interpolation=cv2.INTER_AREA)
+        result = cv2.matchTemplate(shot_gray, cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY),
+                                   cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(result >= float(confidence))
+        for x, y in zip(xs.tolist(), ys.tolist()):
+            found.append({"x": int(x + width / 2), "y": int(y + height / 2),
+                          "score": float(result[y, x]), "scale": float(scale),
+                          "w": width, "h": height})
+    found.sort(key=lambda item: item["score"], reverse=True)
+    kept: list[dict] = []
+    for item in found:
+        if any(abs(item["x"] - other["x"]) < max(item["w"], other["w"]) * 0.6
+               and abs(item["y"] - other["y"]) < max(item["h"], other["h"]) * 0.6
+               for other in kept):
+            continue
+        kept.append(item)
+        if len(kept) >= max(1, int(limit)):
+            break
+    return kept
+
+
 def find_template(image: str | Path, confidence: float = 0.8,
                   region: tuple[int, int, int, int] | None = None,
                   scales: tuple[float, ...] = (1.0, 0.9, 1.1, 0.8, 1.25),
@@ -299,12 +421,10 @@ def find_template(image: str | Path, confidence: float = 0.8,
     """
     import cv2  # noqa: PLC0415
 
-    target = Path(image)
-    if not target.is_file():
-        raise FileNotFoundError("找不到图片：" + str(image))
-    template = cv2.imread(str(target), cv2.IMREAD_COLOR)
+    target = resolve_template(image)
+    template = _imread(target)
     if template is None:
-        raise ValueError("读不出这张图片：" + str(image))
+        raise ValueError("读不出这张图片：" + str(target))
 
     shot = grab_screen(region)
     # 截图的原点是**虚拟桌面**的左上角，不是主屏的左上角。
@@ -468,7 +588,7 @@ def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
 #     type: command                                       # exe / path / url / command
 #     args: ["--fast"]                                    # 可选启动参数
 
-_APP_TYPES = ("exe", "path", "url", "command")
+_APP_TYPES = ("exe", "path", "url", "command", "folder")
 
 
 def app_map_path() -> Path:
@@ -476,6 +596,12 @@ def app_map_path() -> Path:
 
 
 def _guess_app_type(target: str) -> str:
+    """猜这条映射是什么类型。
+
+    **目录要单独认出来**：用户说「把我的项目指到 D 盘的 code 目录」时，
+    那是要"打开文件夹"，不是"执行程序"。
+    判据：已经存在的目录，或者写法上就以斜杠结尾。
+    """
     low = target.lower()
     if "://" in target:
         return "url"
@@ -483,6 +609,14 @@ def _guess_app_type(target: str) -> str:
         return "path"
     if low.endswith((".com", ".cn", ".net", ".org")) and " " not in target:
         return "url"
+    stripped = target.rstrip("\\/")
+    if target.endswith(("\\", "/")) and stripped:
+        return "folder"
+    try:
+        if stripped and Path(stripped).is_dir():
+            return "folder"
+    except OSError:
+        pass
     return "command"
 
 

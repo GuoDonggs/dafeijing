@@ -26,6 +26,7 @@ from .files import (
     search_files,
     write_file,
 )
+from .images import find_in_image_tool, list_reference_tool, reference_dir_tool
 from .marks import (
     clear_marks_tool,
     list_marks_tool,
@@ -86,8 +87,12 @@ _register(Tool(
     ),
     parameters=_params(
         kind={"type": "string", "description": "图片 / 屏幕 / 命令", "_required": True},
-        target={"type": "string", "description": "图片路径（kind=图片）或要跑的命令（kind=命令）"},
+        target={"type": "string",
+                "description": "kind=图片 时是要找的图（路径，或参考图片目录里的名字）；"
+                               "kind=命令 时是要跑的命令"},
         condition={"type": "string", "description": "要等的条件，例如「出现了下载完成」"},
+        region={"type": "string", "description": "只在框选过的这块里找，例如 范围1"},
+        expect={"type": "string", "description": "出现（默认）或 消失"},
         interval_s={"type": "number", "description": "每隔多少秒查一次，默认 5"},
         once={"type": "boolean", "description": "命中一次就停，默认 true"},
     ),
@@ -117,6 +122,36 @@ _register(Tool(
     ),
     parameters=_params(reason={"type": "string", "description": "可选：为什么换话题"}),
     handler=new_session_tool,
+))
+
+_register(Tool(
+    name="find_in_image",
+    description=(
+        "在一张图片里找另一张图（本地比对，不碰屏幕、不要钱）。"
+        "要找的图可以直接给路径，也可以只给**名字** —— 会在参考图片目录里按文件名找，"
+        "所以说「看看这张截图里有没有下载按钮」就行。"
+    ),
+    parameters=_params(
+        image={"type": "string", "description": "大图（通常是截图）的路径", "_required": True},
+        template={"type": "string", "description": "要找的图：路径或参考图片目录里的名字", "_required": True},
+        confidence={"type": "number", "description": "相似度阈值，默认 0.8"},
+        scales={"type": "string", "description": "多尺度，例如 1.0,0.9,1.1（默认这三个）"},
+    ),
+    handler=find_in_image_tool,
+))
+
+_register(Tool(
+    name="list_reference",
+    description="列出参考图片目录里有哪些图（这些图可以直接用名字去找）。",
+    parameters=_params(),
+    handler=list_reference_tool,
+))
+
+_register(Tool(
+    name="reference_dir",
+    description="告诉用户参考图片该放到哪个目录（会顺手把目录建出来）。",
+    parameters=_params(),
+    handler=reference_dir_tool,
 ))
 
 _register(Tool(
@@ -489,15 +524,23 @@ _register(Tool(
 
 _register(Tool(
     name="mouse_move",
-    description="把鼠标移动到屏幕上的指定坐标（不会点击）。",
-    parameters=_params(x={**_I, "_required": True}, y={**_I, "_required": True}, duration_ms=_I),
+    description=(
+        "把鼠标移到指定坐标（不会点击）。也可以直接说某个标记：mark=点1 或 范围1"
+        "（范围会移到它的中心）—— 用户框过/标过的地方就别再让他报坐标了。"
+    ),
+    parameters=_params(x=_I, y=_I, duration_ms=_I,
+                       mark={"type": "string", "description": "标记名，例如 点1、范围1"}),
     handler=mouse_move_tool,
 ))
 
 _register(Tool(
     name="mouse_click",
-    description="点击鼠标：可以指定坐标和左键/右键/中键，也可以连点。",
-    parameters=_params(x=_I, y=_I, button=_S, count=_I),
+    description=(
+        "点击鼠标：可以给坐标，也可以直接说某个标记（mark=点1 / 范围1），"
+        "还能指定左右键和连点次数。"
+    ),
+    parameters=_params(x=_I, y=_I, button=_S, count=_I,
+                       mark={"type": "string", "description": "标记名，例如 点1、范围1"}),
     handler=mouse_click_tool,
 ))
 
@@ -522,19 +565,30 @@ _register(Tool(
 
 _register(Tool(
     name="find_on_screen",
-    description="在屏幕上找一张图片并返回它的坐标，配合 mouse_click 就能点它。",
+    description=(
+        "在屏幕上找一张图并返回坐标（配合 mouse_click 就能点它）。"
+        "图可以给路径，也可以只给名字 —— 会去参考图片目录里按文件名找，"
+        "所以说「桌面上的下载按钮在哪」就行；region 限定只在框过的范围里找。"
+    ),
     parameters=_params(image=_S_REQ,
-                       confidence={"type": "number", "description": "相似度阈值 0~1，默认 0.8"}),
+                       confidence={"type": "number", "description": "相似度阈值 0~1，默认 0.8"},
+                       region={"type": "string", "description": "只在框选过的这块里找，例如 范围1"},
+                       monitor={"type": "integer", "description": "第几块屏幕，1 = 主屏"}),
     handler=find_on_screen_tool,
 ))
 
 _register(Tool(
     name="click_image",
-    description="在屏幕上找到指定图片并点击它，可以连点多次（连点器）。",
+    description=(
+        "在屏幕上找到指定图片并点击它（连点器）。图可以给路径或参考图片目录里的名字；"
+        "region 限定只在框过的范围里找 —— 「点范围1 里的那个按钮」就是这么用的。"
+    ),
     parameters=_params(image=_S_REQ, times=_I,
                        interval_ms={"type": "integer", "description": "连点间隔毫秒，最小 60"},
                        confidence={"type": "number", "description": "相似度阈值，默认 0.8"},
-                       button=_S),
+                       button=_S,
+                       region={"type": "string", "description": "只在框选过的这块里找，例如 范围1"},
+                       monitor={"type": "integer", "description": "第几块屏幕，1 = 主屏"}),
     handler=click_image_tool,
 ))
 

@@ -57,6 +57,10 @@ class Watch:
     condition: str = ""
     interval_s: float = 5.0
     once: bool = True
+    # 「盯着范围1 里有没有出现图片A」：图片类检查可以只在框选范围内找，
+    # 也可以等它"消失"（比如等加载中的转圈转完）
+    region: str = ""
+    expect: str = "出现"
     state: str = "running"        # running / hit / stopped / error
     hits: int = 0
     checks: int = 0
@@ -73,13 +77,15 @@ class Watch:
     def as_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "target": self.target,
                 "condition": self.condition, "interval_s": self.interval_s,
+                "region": self.region, "expect": self.expect,
                 "state": self.state, "hits": self.hits, "checks": self.checks,
                 "seconds": self.seconds, "last": self.last, "error": self.error}
 
     def summary(self) -> str:
         head = "每 " + str(self.interval_s) + " 秒"
-        what = {"image": "看一眼屏幕上的图", "command": "跑一次检查",
-                "screen": "看一眼屏幕"}.get(self.kind, "检查一次")
+        what = {"找图": "看" + (self.region or "屏幕") + "里的图"
+                        + ("还在不在" if self.expect == "消失" else "出现没有"),
+                "命令": "跑一次检查", "屏幕": "看一眼屏幕"}.get(self.kind, "检查一次")
         if self.state == "running":
             return head + what + "（已经查了 " + str(self.checks) + " 次）"
         if self.state == "hit":
@@ -108,6 +114,7 @@ class Watcher:
     # ── 对外 ──
     def start(self, kind: str, target: str, condition: str = "",
               interval_s: float = 5.0, once: bool = True,
+              region: str = "", expect: str = "出现",
               max_minutes: float = DEFAULT_MAX_MINUTES) -> Watch:
         what = _KIND_WORDS.get(str(kind or "").strip().lower())
         if what is None:
@@ -131,7 +138,10 @@ class Watcher:
             self._counter += 1
             item = Watch(id="watch" + str(self._counter), kind=what,
                          target=target, condition=str(condition or "").strip(),
-                         interval_s=interval, once=bool(once))
+                         interval_s=interval, once=bool(once),
+                         region=str(region or "").strip(),
+                         expect=("消失" if str(expect or "").strip() in
+                                 ("消失", "不见", "没有", "disappear") else "出现"))
             self._items[item.id] = item
             self._order.append(item.id)
         self.log("[watch] 开始轮询 " + item.id + "：" + item.summary())
@@ -246,13 +256,24 @@ class Watcher:
         return self._check_screen(watch)
 
     def _check_image(self, watch: Watch) -> tuple[bool, str]:
+        """找图。支持"只在范围1 里找"和"等它消失"两种玩法。"""
+        from . import marks as marks_mod
         from . import screen as screen_mod
 
-        hits = screen_mod.find_template(watch.target, confidence=0.8, limit=1)
+        rect = None
+        if watch.region:
+            rect = marks_mod.resolve_region(watch.region)
+            if rect is None:
+                raise RuntimeError("看不懂这个范围：" + str(watch.region))
+        hits = screen_mod.find_template(watch.target, confidence=0.8, region=rect, limit=1)
+        where = ("在 " + watch.region + " 里") if watch.region else "屏幕上"
+        if watch.expect == "消失":
+            if not hits:
+                return True, where + "的那张图已经不见了"
+            return False, where + "还能看到它"
         if hits:
-            where = str(hits[0]["x"]) + "," + str(hits[0]["y"])
-            return True, "屏幕上找到了那张图，在 " + where
-        return False, "屏幕上还没有"
+            return True, where + "找到了那张图，在 " + str(hits[0]["x"]) + "," + str(hits[0]["y"])
+        return False, where + "还没有"
 
     def _check_command(self, watch: Watch) -> tuple[bool, str]:
         import subprocess

@@ -12,11 +12,14 @@ from pathlib import Path
 
 from ..config import PROJECT_ROOT
 
-__all__ = ["PROJECT_ROOT", "HOME", "SCREENSHOT_DIR", "MEMORY_FILE", "DEFAULT_SEARCH",
-           "TURN", "reset_turn", "keep_listening"]
+__all__ = ["PROJECT_ROOT", "HOME", "SCREENSHOT_DIR", "REFERENCE_DIR", "MEMORY_FILE",
+           "DEFAULT_SEARCH", "TURN", "reset_turn", "keep_listening"]
 
 HOME = Path.home()
 SCREENSHOT_DIR = HOME / "Pictures" / "voice-agent"
+#: 参考图片目录：把「下载按钮.png」丢进去，就能说「找一下下载按钮」。
+#: 用户不用记路径，模型也不用猜 —— 名字就是文件名。
+REFERENCE_DIR = SCREENSHOT_DIR / "reference"
 # 长期记忆存哪。默认在项目目录下；测试（或只读安装）可以用
 # VOICE_AGENT_BUILD_DIR 把它挪到别处，别写进用户真实的记忆里。
 BUILD_DIR = Path(os.environ["VOICE_AGENT_BUILD_DIR"]) if os.environ.get(

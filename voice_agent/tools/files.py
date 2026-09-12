@@ -266,6 +266,35 @@ def _resolve_path(raw: str) -> Path:
     drive = re.fullmatch(r"([A-Za-z])\s*(盘|:)?", value)
     if drive:
         return Path(drive.group(1).upper() + ":\\")
+    # 最后查一次应用映射表：用户可以把目录映射成好记的名字
+    # （「我的项目」→ D 盘的 code 目录），之后 list_files / read_file
+    # 直接用那个名字就行 —— 这就是"映射目录"最实用的地方。
+    try:
+        from .. import screen as screen_mod  # noqa: PLC0415
+
+        # 先试整个值（「我的项目」），再试第一段（「我的项目\src\main.py」）——
+        # 映射的是目录，用户接着往下写子路径是很自然的用法。
+        head, _, tail = value.replace("/", "\\").partition("\\")
+        # 先按第一段找（"我的项目\src" → 映射"我的项目"），再按整个值找。
+        # 整个值只允许**精确**命中：resolve_app 还会做"互相包含"的模糊匹配，
+        # 拿它当路径用会把"我的项目\报告.txt"整体当成映射名。
+        for candidate, rest in ((head, tail), (value, "")):
+            found = screen_mod.resolve_app(candidate)
+            if not found.get("hit"):
+                continue
+            if not rest and not found.get("exact"):
+                continue
+            mapped = Path(os.path.expandvars(os.path.expanduser(
+                str(found.get("target") or ""))))
+            if not mapped.exists():
+                continue
+            if not rest:
+                return mapped
+            joined = mapped / rest.replace("\\", os.sep)
+            if joined.exists():
+                return joined
+    except Exception:  # noqa: BLE001 - 映射表坏了就按普通路径走
+        pass
     return Path(expanded)
 
 

@@ -88,34 +88,67 @@ def mouse_scroll_tool(amount: int = 3, horizontal: bool = False) -> str:
         return "滚动失败：" + str(exc)[:60]
 
 
-def find_on_screen_tool(image: str = "", confidence: float = 0.8) -> str:
-    """在屏幕上找一张图，返回它的位置坐标。"""
+def find_on_screen_tool(image: str = "", confidence: float = 0.8,
+                        region: str = "", monitor: int = 0) -> str:
+    """在屏幕上找一张图，返回它的位置坐标。
+
+    image 可以直接给路径，也可以只给**名字**（参考图片目录里的文件名）。
+    region 限定了只在框选过的范围里找 —— 又快又不容易认错。
+    """
     if not str(image).strip():
+        names = _screen().list_reference_images()
+        if names:
+            return "没说要找哪张图片。参考图片目录里现有的：" + "、".join(names)
         return "没说要找哪张图片"
+    rect = None
+    if str(region or "").strip():
+        from .. import marks as marks_mod  # noqa: PLC0415
+
+        rect = marks_mod.resolve_region(region)
+        if rect is None:
+            return "看不懂这个范围：" + str(region)
+    if rect is None and int(monitor or 0) > 0:
+        rect = _screen().monitor_rect(int(monitor))
     try:
-        hits = _screen().find_template(image, confidence=float(confidence))
+        hits = _screen().find_template(image, confidence=float(confidence), region=rect)
     except FileNotFoundError as exc:
         return str(exc)
     except Exception as exc:  # noqa: BLE001
         return "找图失败：" + str(exc)[:80]
+    where = ("，只在 " + str(region) + " 里找") if str(region or "").strip() else ""
     if not hits:
-        return "屏幕上没找到这张图（阈值 " + str(round(float(confidence), 2)) + "）"
+        return ("屏幕上没找到这张图" + where + "（阈值 "
+                + str(round(float(confidence), 2)) + "）")
     best = hits[0]
     extra = ("，另外还有 " + str(len(hits) - 1) + " 处相似位置") if len(hits) > 1 else ""
     return ("找到了，在屏幕 " + str(best["x"]) + "," + str(best["y"])
-            + " 位置，相似度 " + str(round(best["score"] * 100)) + "%" + extra)
+            + " 位置，相似度 " + str(round(best["score"] * 100)) + "%" + where + extra)
 
 
 def click_image_tool(image: str = "", times: int = 1, interval_ms: int = 200,
-                     confidence: float = 0.8, button: str = "left") -> str:
-    """找到屏幕上的图片并点击它（连点器）。"""
+                     confidence: float = 0.8, button: str = "left",
+                     region: str = "", monitor: int = 0) -> str:
+    """找到屏幕上的图片并点击它（连点器）。
+
+    image 可以是路径，也可以是参考图片目录里的名字；region 限定只在这一块里找
+    —— "点范围1 里的那个按钮"就是这么用的。
+    """
     if not str(image).strip():
         return "没说要点击哪张图片"
     count = max(1, min(int(times or 1), 30))
     gap = max(60, int(interval_ms or 200))
+    rect = None
+    if str(region or "").strip():
+        from .. import marks as marks_mod  # noqa: PLC0415
+
+        rect = marks_mod.resolve_region(region)
+        if rect is None:
+            return "看不懂这个范围：" + str(region)
+    if rect is None and int(monitor or 0) > 0:
+        rect = _screen().monitor_rect(int(monitor))
     try:
         module = _screen()
-        hits = module.find_template(image, confidence=float(confidence), limit=1)
+        hits = module.find_template(image, confidence=float(confidence), region=rect, limit=1)
         if not hits:
             return "屏幕上没找到这张图，没有点击"
         spot = hits[0]

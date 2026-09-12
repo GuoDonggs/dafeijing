@@ -321,6 +321,39 @@ def window_smoke() -> None:
                       str(combo.currentData() or "").isalpha() or "_" in str(combo.currentData()),
                       str(combo.currentData()))
 
+            # 屏幕标记页：列得出来、改得动、删得掉（菜单里的「屏幕标记…」开的就是它）
+            from voice_agent import marks as marks_mod
+
+            marks_mod.store.clear()
+            marks_mod.store.add_region(10, 20, 210, 120, name="范围1", note="下载按钮")
+            marks_mod.store.add_point(300, 400, name="点1")
+            window.show_marks()
+            pump(app, 200)
+            marks_page = window.pages["marks"]
+            marks_page._version = -1
+            marks_page.reload()
+            pump(app, 200)
+            check("屏幕标记页列出了所有标记", len(marks_page._rows) == 2,
+                  str(len(marks_page._rows)))
+            rows = {row.mark.name: row for row in marks_page._rows}
+            check("范围那行有四个坐标框", len(rows["范围1"].fields) == 4,
+                  str(len(rows["范围1"].fields)))
+            check("点那行只有两个坐标框", len(rows["点1"].fields) == 2,
+                  str(len(rows["点1"].fields)))
+            rows["范围1"].fields[2].setText("500")
+            rows["范围1"].apply()
+            check("改坐标会写回仓库",
+                  (marks_mod.store.get("范围1") or rows["范围1"].mark).rect == (10, 20, 500, 120),
+                  str((marks_mod.store.get("范围1")).rect))
+            rows["点1"].name.setText("登录按钮")
+            rows["点1"].apply()
+            check("改名也写回仓库", marks_mod.store.get("登录按钮") is not None,
+                  str([m.name for m in marks_mod.store.all()]))
+            marks_page.remove(marks_mod.store.get("登录按钮"))
+            check("页面上删得掉", marks_mod.store.get("登录按钮") is None)
+            marks_page.clear()
+            check("全部擦掉", not marks_mod.store.all())
+
             # 开新会话：菜单和对话页各有一个入口，点了要真的清掉上下文
             live_agent = settings.page.console.ensure_agent()
             live_agent.brain.history.append({"role": "user", "content": "上一轮说过的话"})
