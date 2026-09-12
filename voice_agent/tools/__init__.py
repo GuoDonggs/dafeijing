@@ -39,6 +39,7 @@ from .marks import (
     mark_region_tool,
     remove_mark_tool,
     set_marks_handler,
+    show_marks_tool,
 )
 from .selfctl import (
     new_session_tool,
@@ -664,6 +665,7 @@ _BUILTIN_TITLES = {
     "list_marks": "看标记",
     "remove_mark": "擦掉标记",
     "clear_marks": "清空标记",
+    "show_marks": "显示或藏起标记",
     "start_watch": "盯着看",
     "list_watches": "看进度",
     "stop_watch": "别盯了",

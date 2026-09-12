@@ -97,6 +97,10 @@ class MarkStore:
         self._items: dict[str, Mark] = {}
         self._order: list[str] = []
         self._lock = threading.Lock()
+        #: 屏幕上画不画这些标记。**只是显示开关**，跟"有没有标记"是两回事：
+        #: 藏起来之后名字照样能引用（「点它」「看看范围1」照常有效），
+        #: 只是不画在屏幕上 —— 框完一堆东西之后嫌挡视线时就靠它换个清净。
+        self._visible = True
         #: 显式给了路径就固定用它；否则每次都现算 —— 用户改了数据目录之后，
         #: 标记要跟着写到新目录去（import 期算死的路径改不动）
         self._fixed_path = Path(path) if path else None
@@ -129,6 +133,8 @@ class MarkStore:
             # 任何改动都会把这份还能救的文件覆盖掉。改成备份 + 说清楚。
             self._quarantine(target, exc)
             return
+        if isinstance(data, dict) and "visible" in data:
+            self._visible = bool(data.get("visible"))
         items = data.get("marks") if isinstance(data, dict) else data
         if not isinstance(items, list):
             self._quarantine(target, ValueError("顶层不是 marks 列表"))
@@ -173,6 +179,7 @@ class MarkStore:
         try:
             with self._lock:
                 marks = []
+                visible = bool(self._visible)
                 for key in list(self._order):
                     mark = self._items.get(key)
                     if mark is None:
@@ -182,7 +189,7 @@ class MarkStore:
                                   "x2": mark.x2, "y2": mark.y2, "note": mark.note})
             target = self.path
             target.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"version": 1, "marks": marks}
+            payload = {"version": 1, "visible": visible, "marks": marks}
             temp = target.with_suffix(target.suffix + ".tmp")
             temp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
                             encoding="utf-8")
@@ -195,6 +202,31 @@ class MarkStore:
     def version(self) -> int:
         with self._lock:
             return self._version
+
+    # ── 显示开关 ──
+    @property
+    def visible(self) -> bool:
+        """屏幕上画不画这些标记（和"有没有标记"无关）。"""
+        with self._lock:
+            return bool(self._visible)
+
+    def set_visible(self, value: bool) -> bool:
+        """开 / 关显示，返回设置后的状态。会落盘（下次开机保持）。"""
+        with self._lock:
+            changed = bool(self._visible) != bool(value)
+            self._visible = bool(value)
+            if changed:
+                self._version += 1     # 界面靠它知道该重画了
+                result = self._visible
+            else:
+                result = bool(self._visible)
+        if changed:
+            self._save()
+        return result
+
+    def toggle_visible(self) -> bool:
+        """切换显示开关，返回切换后的状态。"""
+        return self.set_visible(not self.visible)
 
     def add_region(self, x1: int, y1: int, x2: int, y2: int,
                    name: str = "", note: str = "") -> Mark:
@@ -337,7 +369,11 @@ class MarkStore:
         marks = self.all()
         if not marks:
             return "还没有标记。说「框一下这块」或者报个范围都行。"
-        return "；".join(mark.summary() for mark in marks[-6:])
+        text = "；".join(mark.summary() for mark in marks[-6:])
+        if not self.visible:
+            # 说清楚"没画出来 ≠ 没有"：不然模型/用户会以为标记丢了
+            text += "（这些标记现在是**隐藏**的，屏幕上不显示，但名字照样能用；"                     "说「显示标记」就画回来）"
+        return text
 
 
 #: 全局一份：工具层和界面层都从这里读写

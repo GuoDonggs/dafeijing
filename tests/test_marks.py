@@ -113,6 +113,43 @@ def main() -> int:
     check("清空之后文件里也没了",
           not marks_mod.MarkStore(saved).all())
 
+    print("\n显示开关：只是不画，不是删除")
+    store.clear()
+    store.set_visible(True)
+    store.add_region(1, 2, 300, 400, name="范围1")
+    store.add_point(700, 800, name="点1")
+    check("默认是显示着的", store.visible)
+    check("隐藏返回新状态", store.set_visible(False) is False and not store.visible)
+    check("隐藏之后标记一个都没少", len(store.all()) == 2, str(store.all()))
+    check("隐藏之后名字照样能用（这才是重点）",
+          (store.get("范围1") or first).rect == (1, 2, 300, 400))
+    check("隐藏之后照样能解析成范围（截图/看图不受影响）",
+          marks_mod.resolve_region("范围1") == (1, 2, 300, 400))
+    check("隐藏状态会落盘", marks_mod.MarkStore(saved).visible is False)
+    shown = marks_mod.MarkStore(saved)
+    shown.set_visible(True)
+    check("显示状态也落盘", marks_mod.MarkStore(saved).visible is True)
+    check("切一下能翻转", (store.set_visible(True), store.toggle_visible())[1] is False)
+    store.set_visible(True)
+
+    print("\n工具层：语音也能藏 / 显示")
+    hidden = tools.call_result("show_marks", {"action": "隐藏"})
+    check("说「隐藏」就藏起来", hidden.ok and not store.visible, hidden.text)
+    check("回答里说清了「没删」和「怎么找回」",
+          "还在" in hidden.text and "显示标记" in hidden.text, hidden.text)
+    check("藏起来之后 list_marks 仍列得出来，并说明是隐藏的",
+          "隐藏" in tools.call("list_marks") and "范围1" in tools.call("list_marks"),
+          tools.call("list_marks"))
+    check("留空 = 只查询", "隐藏" in tools.call("show_marks", {}), tools.call("show_marks", {}))
+    check("说「显示」就画回来",
+          tools.call_result("show_marks", {"action": "显示"}).ok and store.visible)
+    check("切换也认", "藏起来" in tools.call("show_marks", {"action": "切换"}) and not store.visible,
+          tools.call("show_marks", {}))
+    check("认不出的说法不会乱动",
+          "没听懂" in tools.call("show_marks", {"action": "翻个面"}) and not store.visible)
+    store.set_visible(True)
+    check("标记数量自始至终没变过", len(store.all()) == 2)
+
     print("\n改名：名字是引用它的唯一凭据")
     store.clear()
     store.add_region(0, 0, 100, 100, name="范围1")
@@ -188,6 +225,24 @@ def main() -> int:
               str(overlay.width()) + "x" + str(overlay.height()))
         overlay.grab()          # 真的画一遍：画错会抛异常
         check("画得出来（范围 + 点）", True)
+
+        # 隐藏开关：只是不画，不是删。这一步用真实像素验，别只看代码
+        def painted_pixels() -> int:
+            overlay._sync()
+            app.processEvents()
+            image = overlay.grab().toImage()
+            return sum(1 for x in range(0, 600, 5) for y in range(0, 600, 5)
+                       if image.pixelColor(x, y).alpha() > 40)
+
+        store.set_visible(True)
+        before = painted_pixels()
+        store.set_visible(False)
+        after = painted_pixels()
+        check("显示时屏幕上画得出东西", before > 0, str(before))
+        check("隐藏之后一个像素都不画", after == 0, str(after))
+        check("隐藏不会删标记", len(store.all()) == 2)
+        store.set_visible(True)
+        check("再显示能画回来", painted_pixels() == before, str(painted_pixels()))
 
         overlay.start_selection("region")
         check("进入框选模式后能接收鼠标", overlay._selecting == "region", overlay._selecting)

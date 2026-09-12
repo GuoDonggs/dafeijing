@@ -33,6 +33,7 @@ from .marks import (
     mark_point_tool,
     mark_region_tool,
     remove_mark_tool,
+    show_marks_tool,
 )
 from .selfctl import (
     new_session_tool,
@@ -189,6 +190,20 @@ _register(Tool(
     description="列出屏幕上现有的框选范围和标记点。",
     parameters=_params(),
     handler=list_marks_tool,
+))
+
+_register(Tool(
+    name="show_marks",
+    description=(
+        "把屏幕上的标记**藏起来或者显示出来**（只是画不画，不删任何东西）。"
+        "用户说「把标记藏起来」「太挡视线了」时用 action=隐藏；"
+        "说「显示标记」「标记怎么不见了」时用 action=显示；留空表示只查询当前状态。"
+        "注意：隐藏期间名字照样能引用（「点点1」还有效），只是屏幕上不画。"
+    ),
+    parameters=_params(
+        action={"type": "string", "description": "显示 / 隐藏 / 切换，留空 = 只查看当前状态"},
+    ),
+    handler=show_marks_tool,
 ))
 
 _register(Tool(

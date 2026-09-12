@@ -578,7 +578,12 @@ class Brain:
                                      + str(mark.center[1]) + "，" + str(mark.width)
                                      + "×" + str(mark.height)
                                      + (("，" + mark.note) if mark.note else "") + ")")
-                parts.append("屏幕标记（用户框过/标过的，可以直接用这些名字）：" + "；".join(items))
+                line = "屏幕标记（用户框过/标过的，可以直接用这些名字）：" + "；".join(items)
+                if not marks_mod.store.visible:
+                    # 藏起来了要说清楚：模型看不见屏幕，只能靠这句话知道
+                    # "名字能用，但屏幕上没画出来"，否则它会跟用户说"屏幕上标着呢"。
+                    line += "（这些标记现在是隐藏的，屏幕上不显示；说「显示标记」可以画回来）"
+                parts.append(line)
         except Exception:  # noqa: BLE001 - 拿不到就当没有
             pass
         try:

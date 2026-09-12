@@ -380,6 +380,50 @@ def window_smoke() -> None:
             check("「闪一下」不会炸", overlay._flash_name == "范围1", overlay._flash_name)
             overlay._end_flash()
 
+            # 显示开关：按钮点一下只是不画了，标记一个都不能少
+            marks_mod.store.set_visible(True)
+            marks_page._version = -1
+            marks_page.reload()
+            total_before = len(marks_mod.store.all())
+            check("默认按钮写的是「隐藏标记」",
+                  marks_page.visible_button.text() == "隐藏标记",
+                  marks_page.visible_button.text())
+            marks_page.visible_button.click()
+            check("点一下真的隐藏了", not marks_mod.store.visible)
+            check("隐藏之后标记没少", len(marks_mod.store.all()) == total_before,
+                  str(len(marks_mod.store.all())))
+            check("按钮跟着变成「显示标记」",
+                  marks_page.visible_button.text() == "显示标记",
+                  marks_page.visible_button.text())
+            check("界面上一句话说明白「还在、名字照样能用」",
+                  "还在" in marks_page.visible_hint.text()
+                  and "显示标记" in marks_page.visible_hint.text(),
+                  marks_page.visible_hint.text())
+            check("藏起来之后屏幕上一个像素都不画",
+                  sum(1 for x in range(0, 600, 7) for y in range(0, 600, 7)
+                      if overlay.grab().toImage().pixelColor(x, y).alpha() > 40) == 0)
+            # 模型也能调这个开关（语音说一句「把标记藏起来」），
+            # 这时候按钮必须跟着走，否则界面在说谎
+            marks_page.visible_button.click()
+            check("再点一下显示回来",
+                  marks_mod.store.visible and marks_page.visible_button.text() == "隐藏标记")
+            # 模型/语音那条路：工具改了开关，页面按钮必须跟着走
+            from voice_agent import tools as tools_mod
+            tools_mod.call("show_marks", {"action": "隐藏"})
+            marks_page._version = -1        # 相当于下一次 300ms 心跳
+            marks_page.reload()
+            check("语音（工具）隐藏之后，按钮跟着变成「显示标记」",
+                  not marks_mod.store.visible
+                  and marks_page.visible_button.text() == "显示标记",
+                  marks_page.visible_button.text())
+            tools_mod.call("show_marks", {"action": "显示"})
+            marks_page._version = -1
+            marks_page.reload()
+            check("语音说显示，按钮也回到「隐藏标记」",
+                  marks_mod.store.visible
+                  and marks_page.visible_button.text() == "隐藏标记",
+                  marks_page.visible_button.text())
+
             marks_page.clear()
             check("全部擦掉", not marks_mod.store.all())
 

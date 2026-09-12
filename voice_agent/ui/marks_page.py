@@ -4,6 +4,10 @@
 为什么值得单独一页：标记是**语音指代**的凭据（"点它"说的是哪个"它"），
 看不见就会用错。这里把每个标记摊开 —— 名字、类型、坐标、备注都能改，
 改完立刻落盘（build/marks.json），下次开机还在。
+
+右上角还有一个**显示开关**：把范围和点藏起来（不是删除）。框了一堆东西之后
+嫌挡视线时用它，藏起来期间名字照样能引用 —— 「点点1」「看看范围1」都还有效，
+只是屏幕上不画。语音也能使唤（show_marks 工具），按钮会跟着状态变。
 """
 
 from __future__ import annotations
@@ -142,11 +146,21 @@ class MarksPage(Page):
         region.clicked.connect(lambda: self.add("region"))
         point = ui.plain_button("标记点", "plus")
         point.clicked.connect(lambda: self.add("point"))
+        # 显示开关：**不是删除**，只是屏幕上画不画。框完一堆东西嫌挡视线时用，
+        # 藏起来期间名字照样能引用（「点点1」「看看范围1」照旧有效）。
+        self.visible_button = ui.plain_button("隐藏标记", "eyeoff")
+        self.visible_button.setToolTip(
+            "把屏幕上的范围和点藏起来（不删除，名字照样能用）")
+        self.visible_button.clicked.connect(self.toggle_visible)
         wipe = ui.plain_button("全部擦掉")
         wipe.clicked.connect(self.clear)
-        for widget in (region, point, wipe):
+        for widget in (region, point, self.visible_button, wipe):
             head.addWidget(widget, 0, Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(head)
+
+        self.visible_hint = QLabel("")
+        self.visible_hint.setObjectName("Hint")
+        layout.addWidget(self.visible_hint)
 
         self.area, self.list_layout = scroll_page()
         layout.addWidget(self.area, 1)
@@ -155,6 +169,7 @@ class MarksPage(Page):
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.list_layout.insertWidget(0, self.empty)
         self._version = -1
+        self._visible_shown = None
         self._rows: list[MarkRow] = []
         self.reload()
 
@@ -166,6 +181,7 @@ class MarksPage(Page):
         if store.version == self._version:
             return
         self._version = store.version
+        self._sync_visible()
         for row in self._rows:
             row.setParent(None)
             row.deleteLater()
@@ -176,6 +192,39 @@ class MarksPage(Page):
             row = MarkRow(mark, self)
             self.list_layout.addWidget(row)
             self._rows.append(row)
+
+    def _sync_visible(self) -> None:
+        """按钮文字和图标跟着**真实状态**走。
+
+        必须每轮刷新、不能只在点按钮时改：模型也能调这个开关（show_marks 工具），
+        语音说一句「把标记藏起来」，这里的按钮就得跟着变成「显示标记」，
+        否则界面在说谎（用户点一下反而把它显示回来了）。
+        """
+        visible = store.visible
+        if visible == self._visible_shown:
+            return
+        self._visible_shown = visible
+        self.visible_button.setText("隐藏标记" if visible else "显示标记")
+        self.visible_button.setIcon(theme.icon(
+            "eyeoff" if visible else "eye", theme.TEXT, 16))
+        self.visible_button.setToolTip(
+            "把屏幕上的范围和点藏起来（不删除，名字照样能用）" if visible
+            else "把藏起来的标记画回屏幕上")
+        count = len(store.all())
+        if visible:
+            self.visible_hint.setText("")
+        else:
+            self.visible_hint.setText(
+                "标记已经藏起来了（" + str(count) + " 个还在，只是屏幕上不画）——"
+                "「点点1」「看看范围1」照样有效，想画回来就说「显示标记」或者点上面的按钮。")
+
+    def toggle_visible(self) -> None:
+        """切换标记的显示开关（不删任何东西）。"""
+        visible = store.toggle_visible()
+        self.console.log("[ui] 标记已" + ("显示" if visible else "隐藏")
+                         + "（共 " + str(len(store.all())) + " 个，没有删除任何东西）")
+        self._sync_visible()
+        self.reload()
 
     # ── 操作 ──
     def main_window(self):

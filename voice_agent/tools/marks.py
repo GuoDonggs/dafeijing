@@ -13,6 +13,7 @@ from __future__ import annotations
 __all__ = [
     "set_marks_handler", "mark_region_tool", "mark_point_tool",
     "list_marks_tool", "remove_mark_tool", "clear_marks_tool",
+    "show_marks_tool",
 ]
 
 #: 界面注册的回调：("select_region"|"select_point", timeout) -> 用户选出来的几何
@@ -103,6 +104,36 @@ def remove_mark_tool(name: str = "") -> str:
         return "没有叫「" + key + "」的标记。"
     marks_mod.store.remove(mark.name)
     return "好，「" + mark.name + "」擦掉了。"
+
+
+def show_marks_tool(action: str = "") -> str:
+    """把屏幕上的标记**藏起来 / 显示出来**（只是画不画，不删任何东西）。
+
+    用户框了一堆范围之后嫌挡视线，就说「把标记藏起来」；
+    想核对位置时说「显示标记」。藏起来期间名字照样能引用
+    （「点点1」「看看范围1」都还有效）—— 所以藏起来之后必须说清楚这一点，
+    否则用户会以为标记丢了。
+    """
+    from .. import marks as marks_mod
+
+    what = str(action or "").strip().lower()
+    store = marks_mod.store
+    if not what or what in ("查询", "查看", "状态", "status", "query"):
+        return ("标记现在是" + ("显示着的" if store.visible else "隐藏的")
+                + "（一共 " + str(len(store.all())) + " 个；隐藏只是不画在屏幕上，"
+                "名字照样能用）")
+    if what in ("隐藏", "藏起来", "藏", "看不见", "hide", "off", "false"):
+        store.set_visible(False)
+        return ("好，标记藏起来了（" + str(len(store.all())) + " 个还在，"
+                "说「显示标记」就能画回来）")
+    if what in ("显示", "显示出来", "show", "on", "true", "画出来"):
+        store.set_visible(True)
+        return ("好，标记又显示出来了（" + str(len(store.all())) + " 个）"
+                if store.all() else "好，标记已经设为显示了（现在还没有标记）")
+    if what in ("切换", "换一下", "toggle", "反过来"):
+        now = store.toggle_visible()
+        return "好，标记现在" + ("显示出来了" if now else "藏起来了")
+    return ("没听懂要显示还是隐藏（" + str(action) + "）。说「显示标记」或者「把标记藏起来」。")
 
 
 def clear_marks_tool(kind: str = "") -> str:

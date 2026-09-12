@@ -132,7 +132,13 @@ class MarksOverlay(QWidget):
         font = QFont()
         font.setPointSize(9)
         painter.setFont(font)
+        # 「隐藏标记」只是**不画**，不是删掉：名字照样能引用（「点点1」还有效），
+        # 用户框完一堆东西嫌挡视线时就靠它换个清净。
+        # 例外是「闪一下」的那一个：那是用户明确说「给我看这个」，得画出来。
+        visible = marks_mod.store.visible
         for mark in marks_mod.store.all():
+            if not visible and mark.name != self._flash_name:
+                continue
             self._paint_mark(painter, mark, dpr)
         if self._selecting and self._pressed and not self._current.isNull():
             pen = QPen(QColor(theme.ACCENT), 2, Qt.PenStyle.DashLine)
@@ -143,8 +149,13 @@ class MarksOverlay(QWidget):
         painter.end()
 
     def flash(self, name: str, milliseconds: int = 1400) -> None:
-        """把某个标记闪一下（粗边框 + 亮一点），用来回答"是哪一个"。"""
+        """把某个标记闪一下（粗边框 + 亮一点），用来回答"是哪一个"。
+
+        「隐藏」状态下也照闪：用户点「闪一下」的意图就是"让我看看它在哪"，
+        这时候不画反而是不听话（paintEvent 里对正在闪的那个开了例外）。
+        """
         self._flash_name = str(name or "")
+        self.show_overlay()
         self.update()
         self._flash_timer.start(max(200, int(milliseconds)))
 
