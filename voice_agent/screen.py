@@ -900,14 +900,20 @@ def resolve_app(name: str) -> dict:
         if matched(entry_key, entry):
             return {"hit": True, "key": entry_key, "entry": entry,
                     "target": entry["target"], "exact": True, "mapping": mapping}
-    for entry_key, entry in mapping.items():
-        names = [entry_key.lower()] + [a.lower() for a in entry["aliases"]]
-        # 短名字不做模糊匹配：别名只写了一个"微"或"a"时，"打开微信"会命中它，
-        # 而"打开 X"里任何含这个字的说法都会跟着打开一个完全无关的目标，
-        # 结果还取决于 YAML 里谁写在前面 —— 这种"随机命中"比匹配不上更糟。
-        if any(len(n) >= 2 and (n in key or key in n) for n in names):
-            return {"hit": True, "key": entry_key, "entry": entry,
-                    "target": entry["target"], "exact": False, "mapping": mapping}
+    # 短名字不做模糊匹配：别名只写了一个"微"或"a"时，"打开微信"会命中它，
+    # 而"打开 X"里任何含这个字的说法都会跟着打开一个完全无关的目标，
+    # 结果还取决于 YAML 里谁写在前面 —— 这种"随机命中"比匹配不上更糟。
+    fuzzy = [entry_key for entry_key, entry in mapping.items()
+             if any(len(n) >= 2 and (n in key or key in n)
+                    for n in [entry_key.lower()] + [a.lower() for a in entry["aliases"]])]
+    if len(fuzzy) == 1:
+        entry = mapping[fuzzy[0]]
+        return {"hit": True, "key": fuzzy[0], "entry": entry,
+                "target": entry["target"], "exact": False, "unique": True,
+                "mapping": mapping}
+    if fuzzy:
+        # 好几个都能对上：宁可不猜（下面会如实报"没找到"），也不要随便挑一个
+        return {"hit": False, "ambiguous": fuzzy[:5], "mapping": mapping}
     return {"hit": False, "mapping": mapping}
 
 

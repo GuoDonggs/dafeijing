@@ -63,7 +63,8 @@ def find_in_image_tool(image: str = "", template: str = "",
     return ("找到了，在这张图的 " + str(best["x"]) + "," + str(best["y"])
             + " 位置，相似度 " + str(round(best["score"] * 100)) + "%"
             + _how(best) + extra +
-            "。要接着在屏幕上找就把它交给 find_on_screen，找到位置后可以用 mark_region 框下来。")
+            "。要接着在屏幕上找就把它交给 find_on_screen（本地找，别去看图）；"
+            "屏幕上找到之后用 mark_point / mark_region 把位置固定下来。")
 
 
 def list_reference_tool() -> str:

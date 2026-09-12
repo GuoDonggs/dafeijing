@@ -100,6 +100,8 @@ class MarkStore:
         #: 屏幕上画不画这些标记。**只是显示开关**，跟"有没有标记"是两回事：
         #: 藏起来之后名字照样能引用（「点它」「看看范围1」照常有效），
         #: 只是不画在屏幕上 —— 框完一堆东西之后嫌挡视线时就靠它换个清净。
+        #: 但**加/改标记时会自动打开**（见 _add）：刚标完却看不见，
+        #: 用户会以为这个功能坏了。
         self._visible = True
         #: 显式给了路径就固定用它；否则每次都现算 —— 用户改了数据目录之后，
         #: 标记要跟着写到新目录去（import 期算死的路径改不动）
@@ -243,6 +245,7 @@ class MarkStore:
         用户说的是"改那块"，不是"再框一块"。
         """
         with self._lock:
+            self._visible = True     # 同上：改一个已有标记也要看得见改动
             existing = self._items.get(str(name or "").strip())
             if existing is not None and existing.kind == kind:
                 # 检查和改写必须在**同一个**临界区里：分两次加锁的话，
@@ -265,6 +268,10 @@ class MarkStore:
     def _add(self, kind: str, x1: int, y1: int, x2: int, y2: int,
              name: str, note: str) -> Mark:
         with self._lock:
+            # **加标记就自动显示**：刚标完一个点，屏幕上却什么都不画，
+            # 这个功能看起来就是坏的（用户实测反馈过："LLM 加的标记不显示"）。
+            # 之前藏着的状态在这里让位给"刚加的东西得让人看见"。
+            self._visible = True
             final = str(name or "").strip() or self._next_name(kind)
             if final in self._items:
                 final = self._next_name(kind)

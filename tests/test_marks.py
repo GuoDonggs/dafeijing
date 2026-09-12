@@ -132,6 +132,22 @@ def main() -> int:
     check("切一下能翻转", (store.set_visible(True), store.toggle_visible())[1] is False)
     store.set_visible(True)
 
+    print("\n加标记会自动显示出来（不然看起来就像没成功）")
+    store.set_visible(False)
+    answer = tools.call("mark_point", {"x": 12, "y": 34, "name": "自动显示的点"})
+    check("藏起来的状态下加一个点 → 自动显示", store.visible, answer)
+    check("回答里说明了这件事", "显示" in answer and "藏" in answer, answer)
+    store.set_visible(False)
+    answer = tools.call("mark_region", {"x1": 1, "y1": 2, "x2": 60, "y2": 80, "name": "自动显示的范围"})
+    check("范围也一样会自动显示", store.visible, answer)
+    store.set_visible(False)
+    answer = tools.call("mark_point", {"x": 15, "y": 16, "name": "自动显示的点"})
+    check("改一个已有的标记也会显示出来", store.visible and "挪到" in answer, answer)
+    store.set_visible(True)
+    # 收拾干净：后面那一段假设"标记就是最开始那两个"
+    store.remove("自动显示的点")
+    store.remove("自动显示的范围")
+
     print("\n工具层：语音也能藏 / 显示")
     hidden = tools.call_result("show_marks", {"action": "隐藏"})
     check("说「隐藏」就藏起来", hidden.ok and not store.visible, hidden.text)

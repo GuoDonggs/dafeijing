@@ -423,6 +423,34 @@ def folder_mapping() -> None:
                   "内容" in str(tools.call("read_file", {"path": "我的项目\\报告.txt"}))
                   or "内容" in str(tools.call("read_file", {"path": "我的项目/报告.txt"})),
                   "按名字读文件")
+            # 映射名 + 子路径
+            (Path(tmp) / "子目录").mkdir()
+            (Path(tmp) / "子目录" / "里面.txt").write_text("子", encoding="utf-8")
+            check("「映射名\\子路径」也解析得开",
+                  "里面" in str(tools.call("list_files", {"path": "我的项目\\子目录"})),
+                  str(tools.call("list_files", {"path": "我的项目\\子目录"})))
+            # 「唯一模糊」：用户说的是映射名的一部分（真事：映射叫「对焦介绍」，
+            # 用户说「对焦」，于是精确匹配落空、模型只好去满盘找）
+            check("唯一模糊匹配也认（说「我的」对上「我的项目」）",
+                  "里面" in str(tools.call("list_files", {"path": "我的\\子目录"}))
+                  or "报告" in str(tools.call("list_files", {"path": "我的"})),
+                  str(tools.call("list_files", {"path": "我的"})))
+            # 口语目录名 + 子路径（真事：「桌面\\对焦」以前解析成
+            # C:\\Users\\xx\\桌面\\对焦，不存在 —— 模型于是去满盘搜）
+            from voice_agent.tools import files as files_mod
+
+            desktop = files_mod._desktop()
+            check("「桌面\\子目录」拼得出真实路径",
+                  str(files_mod._resolve_path("桌面\\随便一个子目录"))
+                  == str(desktop / "随便一个子目录"),
+                  str(files_mod._resolve_path("桌面\\随便一个子目录")))
+            check("「D盘\\子目录」也一样",
+                  str(files_mod._resolve_path("D盘\\随便一个子目录"))
+                  == str(Path("D:\\随便一个子目录")),
+                  str(files_mod._resolve_path("D盘\\随便一个子目录")))
+            check("写成正斜杠也认",
+                  str(files_mod._resolve_path("桌面/随便一个子目录"))
+                  == str(desktop / "随便一个子目录"))
         finally:
             screen.save_app_map(saved)
 
@@ -731,6 +759,40 @@ def tool_tags() -> None:
           skills_mod.normalize_tags(None) == () and skills_mod.normalize_tags("") == ())
 
 
+def next_step_messages() -> None:
+    """找图成功之后，回答里必须给出**可以直接照抄的下一步**。
+
+    用户实测反馈：find_on_screen 明明找到了（99%），模型却反手去调 look_at_screen
+    再看一眼屏幕 —— 白花 8 秒钟和一次模型调用。原因是那句话只说"可以用 mark_region"，
+    既没给参数、也没提 mark_point。模型就是照着这句话决定下一个调用的。
+    """
+    print("找图之后：下一步给可以直接照抄的调用")
+    from voice_agent import screen as screen_mod
+    from voice_agent.tools import images as images_mod
+    from voice_agent.tools import vision as vision_mod
+
+    hit = [{"x": 1058, "y": 315, "score": 0.99, "scale": 1.0, "w": 40, "h": 30,
+            "method": "template"}]
+    original = screen_mod.find_template
+    original_in_image = screen_mod.find_in_image
+    screen_mod.find_template = lambda *a, **k: list(hit)  # noqa: ARG005
+    screen_mod.find_in_image = lambda *a, **k: list(hit)  # noqa: ARG005
+    try:
+        answer = vision_mod.find_on_screen_tool("随便一张图")
+        in_image = images_mod.find_in_image_tool("某张截图.png", "某个按钮.png")
+    finally:
+        screen_mod.find_template = original
+        screen_mod.find_in_image = original_in_image
+    check("回答里给了 mark_point 的现成参数",
+          "mark_point(x=1058, y=315)" in answer, answer[:120])
+    check("也给了 mark_region 的现成参数（按图的大小算出四角）",
+          "mark_region(x1=" in answer, answer[:160])
+    check("想直接点它也给了 mouse_click", "mouse_click(x=1058" in answer)
+    check("明确写了「不要再去看图」", "不要再去看图" in answer)
+    check("图片里找到之后也提醒别去看图、用标记固定",
+          "别去看图" in in_image or "mark_point" in in_image, in_image[-80:])
+
+
 def main() -> int:
     print("=== 工具层体检 ===")
     static_audit()
@@ -739,6 +801,7 @@ def main() -> int:
     vision_path()
     image_tools()
     sift_matching()
+    next_step_messages()
     tool_tags()
     confirm_prompts()
     continuous_talk()

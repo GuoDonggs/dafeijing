@@ -56,10 +56,13 @@ class MarkRow(QWidget):
             capture.setToolTip("把这块存成图片，存到图片文件夹")
             capture.clicked.connect(lambda: self.page.capture(mark))
             head.addWidget(capture)
-            locate = ui.plain_button("闪一下")
-            locate.setToolTip("在屏幕上闪一下这个位置")
-            locate.clicked.connect(lambda: self.page.flash(mark))
-            head.addWidget(locate)
+        # 「闪一下」对**点**同样要有：点本来就小，光看坐标根本找不到它在哪。
+        # 以前这一排按钮只在 region 分支里建，于是"只标了几个点"的人会觉得
+        # 这个功能按钮消失了。
+        locate = ui.plain_button("闪一下")
+        locate.setToolTip("在屏幕上闪一下这个" + ("位置" if mark.kind == "point" else "范围"))
+        locate.clicked.connect(lambda: self.page.flash(mark))
+        head.addWidget(locate)
         remove = ui.plain_button("删除")
         remove.clicked.connect(lambda: self.page.remove(mark))
         head.addWidget(remove)

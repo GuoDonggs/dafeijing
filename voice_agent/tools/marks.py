@@ -43,21 +43,35 @@ def mark_region_tool(x1: int = 0, y1: int = 0, x2: int = 0, y2: int = 0,
     # 任意一个数非 0 就当作"给了坐标"：只说「框住 100,200」时 x2/y2 是 0，
     # 以前这里会把整对坐标丢掉，转而去要求用户在屏幕上手动框 —— 明明报了坐标。
     if x1 or y1 or x2 or y2:
+        hidden = not marks_mod.store.visible      # 之前是藏着的要说一声（见下）
         mark, updated = marks_mod.store.add_or_update(
             "region", int(x1), int(y1), int(x2 or x1), int(y2 or y1),
             name=name, note=note)
         if updated:
-            return "好，「" + mark.name + "」改成 " + mark.summary().split(" 是 ", 1)[-1] + "。"
+            return ("好，「" + mark.name + "」改成 " + mark.summary().split(" 是 ", 1)[-1]
+                    + "。" + _shown_note(hidden))
         return ("好，这块记成「" + mark.name + "」了（" + mark.summary().split(" 是 ", 1)[-1]
-                + "）。之后说「看看" + mark.name + "」就行。")
+                + "）。之后说「看看" + mark.name + "」就行。" + _shown_note(hidden))
     picked = _interactive("region")
     if not picked:
         return ("要框哪一块？你可以直接说坐标（比如「框住 100,200 到 600,500」），"
                 "或者在界面上用菜单里的「框选范围」拖一个框出来。")
+    hidden = not marks_mod.store.visible
     mark = marks_mod.store.add_region(picked["x1"], picked["y1"], picked["x2"], picked["y2"],
                                       name=name, note=note or "用户框选")
     return ("好，框好了，这块叫「" + mark.name + "」（"
-            + str(mark.width) + "×" + str(mark.height) + "）。")
+            + str(mark.width) + "×" + str(mark.height) + "）。"
+            + _shown_note(hidden))
+
+
+def _shown_note(was_hidden: bool) -> str:
+    """刚加的标记如果是"从藏着变显示"，说一句。
+
+    用户实测反馈过："LLM 加的标记不显示" —— 那时候标记层是隐藏状态，
+    标完了屏幕上什么都没有，看起来就是没成功。现在加标记会自动显示，
+    但还是要说出来，用户才知道屏幕上那个点是他刚让标的。
+    """
+    return "（之前标记是藏着的，我顺手显示出来了）" if was_hidden else ""
 
 
 def mark_point_tool(x: int = 0, y: int = 0, name: str = "", note: str = "") -> str:
@@ -65,18 +79,22 @@ def mark_point_tool(x: int = 0, y: int = 0, name: str = "", note: str = "") -> s
     from .. import marks as marks_mod
 
     if x or y:
+        hidden = not marks_mod.store.visible
         mark, updated = marks_mod.store.add_or_update("point", int(x), int(y),
                                                       name=name, note=note)
         if updated:
-            return "好，「" + mark.name + "」挪到 " + str(mark.x1) + "," + str(mark.y1) + " 了。"
-        return "好，" + mark.summary() + "，我记成「" + mark.name + "」了。"
+            return ("好，「" + mark.name + "」挪到 " + str(mark.x1) + "," + str(mark.y1)
+                    + " 了。" + _shown_note(hidden))
+        return ("好，" + mark.summary() + "，我记成「" + mark.name + "」了。"
+                + _shown_note(hidden))
     picked = _interactive("point")
     if not picked:
         return ("要标哪个点？说坐标也行（比如「标在 800,450」），"
                 "或者在界面上用菜单里的「标记点」点一下。")
+    hidden = not marks_mod.store.visible
     mark = marks_mod.store.add_point(picked["x"], picked["y"], name=name,
                                      note=note or "用户标点")
-    return "好，" + mark.summary() + "，我记成「" + mark.name + "」了。"
+    return "好，" + mark.summary() + "，我记成「" + mark.name + "」了。" + _shown_note(hidden)
 
 
 def list_marks_tool() -> str:

@@ -174,10 +174,18 @@ def find_on_screen_tool(image: str = "", confidence: float = 0.8,
     extra = ("，另外还有 " + str(len(hits) - 1) + " 处相似位置") if len(hits) > 1 else ""
     how = "（SIFT 特征匹配：这张图和你给的模板有缩放/旋转差异）" if str(
         best.get("method")) == "sift" else ""
-    return ("找到了，在屏幕 " + str(best["x"]) + "," + str(best["y"])
+    # 下一步给**能直接照抄的调用**：只说"可以用 mark_region"时，模型经常
+    # 反手去调 look_at_screen 再看一眼屏幕（几秒钟 + 一次模型调用白花）。
+    cx, cy = int(best["x"]), int(best["y"])
+    return ("找到了，在屏幕 " + str(cx) + "," + str(cy)
             + " 位置，相似度 " + str(round(best["score"] * 100)) + "%"
             + where + extra + how
-            + "。下一步可以直接 mouse_click 这个坐标，或者用 mark_region 把它框下来记成「范围N」")
+            + "。**位置已经拿到了，不要再去看图**："
+            "要标一个点就调 mark_point(x=" + str(cx) + ", y=" + str(cy)
+            + ")，要标一块区域就调 mark_region(x1=" + str(max(0, cx - best["w"] // 2))
+            + ", y1=" + str(max(0, cy - best["h"] // 2))
+            + ", x2=" + str(cx + best["w"] // 2) + ", y2=" + str(cy + best["h"] // 2)
+            + ")，想直接点它就 mouse_click(x=" + str(cx) + ", y=" + str(cy) + ")")
 
 
 def click_image_tool(image: str = "", times: int = 1, interval_ms: int = 200,

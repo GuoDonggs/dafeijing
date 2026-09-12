@@ -176,7 +176,15 @@ class MarksOverlay(QWidget):
             # 闪的时候加粗并提亮，扫一眼就能看到是哪一块
             painter.setPen(QPen(theme.qcolor(theme.ACCENT, 1.0), 4))
             painter.setBrush(theme.qcolor(theme.ACCENT, 0.20))
-            painter.drawRect(QRect(QPoint(x1, y1), QPoint(x2, y2)))
+            if mark.kind == "point":
+                # 点没有面积：画一个零大小的矩形等于什么都没画（以前就是这样，
+                # 所以"闪一下"对点不起作用）。改成一个明显的圆环。
+                painter.drawEllipse(QPoint(x1, y1), 22, 22)
+                painter.setPen(QPen(theme.qcolor(theme.ACCENT, 0.6), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(QPoint(x1, y1), 34, 34)
+            else:
+                painter.drawRect(QRect(QPoint(x1, y1), QPoint(x2, y2)))
             self._paint_label(painter, mark.name, x1 + 4, y1 - 6)
             return
         if mark.kind == "point":

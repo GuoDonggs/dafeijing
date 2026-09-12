@@ -424,6 +424,25 @@ def window_smoke() -> None:
                   and marks_page.visible_button.text() == "隐藏标记",
                   marks_page.visible_button.text())
 
+            # 「闪一下」对**点**同样要有：点本来就小，光看坐标找不到它在哪
+            marks_mod.store.clear()
+            marks_mod.store.add_point(100, 200, name="一个点")
+            marks_page._version = -1
+            marks_page.reload()
+            row = marks_page._rows[0]
+            from PyQt6.QtWidgets import QPushButton
+
+            buttons = [b.text() for b in row.findChildren(QPushButton)]
+            check("点这一行也有「闪一下」按钮", "闪一下" in buttons, str(buttons))
+            check("点不显示「截这块」（那是范围才有的）", "截这块" not in buttons, str(buttons))
+            marks_page.flash(marks_mod.store.get("一个点"))
+            check("点也能闪（叠加层把名字记下来了）", overlay._flash_name == "一个点",
+                  overlay._flash_name)
+            check("闪一个点的时候屏幕上真的画了东西",
+                  sum(1 for x in range(0, 600, 5) for y in range(0, 600, 5)
+                      if overlay.grab().toImage().pixelColor(x, y).alpha() > 40) > 0)
+            overlay._end_flash()
+
             marks_page.clear()
             check("全部擦掉", not marks_mod.store.all())
 

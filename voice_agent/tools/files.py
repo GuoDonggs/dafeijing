@@ -485,6 +485,24 @@ def _resolve_path(raw: str) -> Path:
     lowered = value.lower()
     if lowered in ("主目录", "用户目录", "home"):
         return HOME
+    # 「桌面\对焦」「D盘\对焦」「下载\报告.txt」：**第一段**是口语写法时，
+    # 后面接着写子路径是再自然不过的用法。以前只认"整个值恰好是桌面"，
+    # 于是「桌面\对焦」这种写法一路落到"相对路径 → 用户目录"上，
+    # 得到 C:\Users\xx\桌面\对焦 —— 不存在，模型只好去满盘找。
+    head, _, rest = value.replace("/", "\\").partition("\\")
+    head_low = head.strip().lower()
+    if rest:
+        base: Path | None = None
+        if head_low in _NAMED_DIRS:
+            base = _desktop() if _NAMED_DIRS[head_low] == "Desktop" else HOME / _NAMED_DIRS[head_low]
+        elif head_low in ("主目录", "用户目录", "home"):
+            base = HOME
+        else:
+            drive_prefix = re.fullmatch(r"([A-Za-z])\s*(?:盘|:)?", head.strip())
+            if drive_prefix:
+                base = Path(drive_prefix.group(1).upper() + ":\\")
+        if base is not None:
+            return base / rest.replace("\\", os.sep)
     if lowered in _NAMED_DIRS:
         return _desktop() if _NAMED_DIRS[lowered] == "Desktop" else HOME / _NAMED_DIRS[lowered]
     drive = re.fullmatch(r"([A-Za-z])\s*(盘|:)?", value)
@@ -519,7 +537,9 @@ def _resolve_path(raw: str) -> Path:
             found = screen_mod.resolve_app(candidate)
             if not found.get("hit"):
                 continue
-            if not rest and not found.get("exact"):
+            # "唯一模糊"也算数：用户说「对焦」而映射叫「对焦介绍」时，精确匹配落空，
+            # 但只有一个候选 —— 这比"找不到，于是满盘搜"有用得多。
+            if not rest and not found.get("exact") and not found.get("unique"):
                 continue
             mapped = Path(os.path.expandvars(os.path.expanduser(
                 str(found.get("target") or ""))))
