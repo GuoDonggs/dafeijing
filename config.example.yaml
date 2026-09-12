@@ -102,6 +102,11 @@ tts:
   target_rms: 0.10
   target_peak: 0.9          # 软限幅上限，超过就压圆，不做硬削波
   noise_gate: -55.0         # 低于这个电平（dBFS）往下压，最大 8 dB；-100 表示关掉
+  # 朗读前把英文单词音译成汉字：vits-zh 念不出拉丁词，deepseek / hello 这种
+  # 会被当成 OOV **整词丢掉**（听起来就是"这句话少了一截"）。
+  # 内置 80 多个常见词，学过的写进 build/translit.json，都是零延迟；
+  # 只有没见过的新词才会问一次模型。关掉就退回"逐字母念"。
+  translit: true
   # 语气：不同场景用不同语速
   styles:
     wake:    {speed: 1.06}
@@ -122,6 +127,8 @@ llm:
   max_rounds: 6             # 一次指令最多几轮「思考-调工具」；写 0 = 不限制
   # 看图（look_at_screen）送给视觉模型的截图最长边。4K 屏一张截图几百万像素，
   # 又慢又贵而识别效果几乎一样；但界面字小的时候缩太狠会看不清。
+  # 另外：工具支持只看某一块屏幕或某个框选范围（monitor / region 参数），
+  # 只截要看的那一块，比把整屏缩小更清楚。
   vision_max_side: 1280
   # 多模型：routes 决定"哪个用途用哪个档案"，profiles 定义档案。
   # 设置 → 大脑（LLM）→「配置多模型…」里有图形界面，不用手写这一段。
@@ -150,6 +157,11 @@ security:
   max_prompts_per_minute: 6
   # 同一个操作连着要几次就拦下，0 = 不限
   max_same_action: 3
+  # 一律拒绝的工具（最高优先级，任何模式都不放行）：
+  # 例：["run_command", "write_file"] —— 只想让它查、不想让它改。
+  deny_tools: []
+  # 额外要求确认的工具（在"永远要确认"那份名单之外再加）
+  always_confirm: []
   # 审计日志：build/audit.jsonl，记录每次敏感决定的工具、参数、批没批
   audit: true
 
@@ -165,8 +177,8 @@ agent:
   # ── 子代理：把「要跑好几步」的事丢到后台单独做 ──
   # 主对话先回一句"我让人去查了"，用户可以接着说别的，做完它自己回来汇报。
   subagent_enabled: true
-  subagent_max: 3            # 同时最多几个
-  subagent_rounds: 8         # 每个子代理最多调几次工具
+  subagent_max: 3            # 同时最多几个；0 = 不限制（内部仍有 20 个的硬上限）
+  subagent_rounds: 8         # 每个子代理最多调几次工具；0 = 不限制（硬上限 60 步）
   subagent_announce: true    # 做完主动念一句结果；关掉就只记在对话记录里
   cues: true                 # 收音 / 确认 / 结束 的提示音，让你知道什么时候该说话
   max_utterance_ms: 15000    # 单句话最长录音

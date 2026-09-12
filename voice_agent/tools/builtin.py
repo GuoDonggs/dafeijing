@@ -26,6 +26,13 @@ from .files import (
     search_files,
     write_file,
 )
+from .marks import (
+    clear_marks_tool,
+    list_marks_tool,
+    mark_point_tool,
+    mark_region_tool,
+    remove_mark_tool,
+)
 from .selfctl import (
     new_session_tool,
     permission_mode_tool,
@@ -110,6 +117,57 @@ _register(Tool(
     ),
     parameters=_params(reason={"type": "string", "description": "可选：为什么换话题"}),
     handler=new_session_tool,
+))
+
+_register(Tool(
+    name="mark_region",
+    description=(
+        "在屏幕上框一块区域，记成「范围1」「范围2」…。用户说「框一下这块」"
+        "「记住这个区域」时用它；没有坐标就留空，界面会让用户自己拖一个框。"
+        "框过之后说「看看范围1」「截一下范围2」就能直接引用。"
+    ),
+    parameters=_params(
+        x1=_I, y1=_I, x2=_I, y2=_I,
+        name={"type": "string", "description": "给它起个名字，留空自动叫范围N"},
+        note={"type": "string", "description": "这块是什么，例如「下载按钮」"},
+    ),
+    handler=mark_region_tool,
+))
+
+_register(Tool(
+    name="mark_point",
+    description=(
+        "在屏幕上标一个点，记成「点1」「点2」…（画一个半透明圆点）。"
+        "用户说「记住这个位置」「标一下这儿」时用它；没有坐标就留空，"
+        "界面会让用户自己点一下。"
+    ),
+    parameters=_params(
+        x=_I, y=_I,
+        name={"type": "string", "description": "给它起个名字，留空自动叫点N"},
+        note={"type": "string", "description": "这个点是什么，例如「登录按钮」"},
+    ),
+    handler=mark_point_tool,
+))
+
+_register(Tool(
+    name="list_marks",
+    description="列出屏幕上现有的框选范围和标记点。",
+    parameters=_params(),
+    handler=list_marks_tool,
+))
+
+_register(Tool(
+    name="remove_mark",
+    description="擦掉一个标记（留空 = 最近画的那个）。",
+    parameters=_params(name={"type": "string", "description": "标记名，例如 范围1、点2"}),
+    handler=remove_mark_tool,
+))
+
+_register(Tool(
+    name="clear_marks",
+    description="清掉屏幕上的标记。kind 填「区域」只清框，填「点」只清点，留空全清。",
+    parameters=_params(kind={"type": "string", "description": "区域 / 点，留空 = 全部"}),
+    handler=clear_marks_tool,
 ))
 
 _register(Tool(
@@ -349,8 +407,16 @@ _register(Tool(
 
 _register(Tool(
     name="screenshot",
-    description="截取整个屏幕并保存到图片文件夹。",
-    parameters=_params(),
+    description=(
+        "截屏并保存到图片文件夹。多显示器时用 monitor 指定哪一块屏幕"
+        "（1 = 主屏，2、3… 从左到右，0 = 全部）；也可以只截框选过的"
+        "「范围1」或「左,上,右,下」。只截需要的那一块更快、存下来的图也更有用。"
+    ),
+    parameters=_params(
+        monitor={"type": "integer", "description": "第几块屏幕，1 = 主屏，0 = 全部"},
+        region={"type": "string", "description": "范围1 / 点1 / 左,上,右,下"},
+        name={"type": "string", "description": "给这张图起个短名字，方便回头找"},
+    ),
     handler=screenshot,
 ))
 
@@ -483,8 +549,15 @@ _register(Tool(
 
 _register(Tool(
     name="look_at_screen",
-    description="看一眼当前屏幕并回答关于它的问题（需要配置支持图片输入的视觉模型）。",
-    parameters=_params(question={"type": "string", "description": "想问屏幕上的什么"}),
+    description=(
+        "看一眼屏幕并回答关于它的问题（需要配置支持图片输入的视觉模型）。"
+        "可以只用主屏（monitor=1）或只看框选过的「范围1」—— 图小看得更准，也更省。"
+    ),
+    parameters=_params(
+        question={"type": "string", "description": "想问屏幕上的什么"},
+        region={"type": "string", "description": "范围1 / 点1 / 左,上,右,下，留空 = 整个桌面"},
+        monitor={"type": "integer", "description": "第几块屏幕，1 = 主屏，0 = 全部"},
+    ),
     handler=look_at_screen_tool,
 ))
 

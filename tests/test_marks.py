@@ -1,0 +1,199 @@
+# -*- coding: utf-8 -*-
+"""屏幕标记：框选范围（范围1、范围2…）、标记点（点1、点2…），以及它们怎么被用起来。
+
+这套东西的价值在于"语音指代"：跟助手说话没法用手指，于是先框一下，
+之后说「看看范围1」「截一下范围2」它就知道说的是哪儿。
+
+运行：python tests/test_marks.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+_BUILD = tempfile.TemporaryDirectory()
+os.environ["VOICE_AGENT_BUILD_DIR"] = _BUILD.name
+
+from voice_agent import marks as marks_mod  # noqa: E402
+from voice_agent import screen, tools  # noqa: E402
+
+failures: list[str] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    print(("  [通过] " if ok else "  [失败] ") + name + ("  " + detail if detail else ""))
+    if not ok:
+        failures.append(name)
+
+
+def main() -> int:
+    print("=== 屏幕标记 ===")
+    store = marks_mod.store
+
+    print("命名与增删")
+    store.clear()
+    first = store.add_region(100, 200, 500, 400)
+    second = store.add_region(-900, 50, -400, 300)
+    check("框选自动编号", (first.name, second.name) == ("范围1", "范围2"),
+          first.name + "/" + second.name)
+    check("尺寸和中心算得对",
+          (first.width, first.height, first.center) == (400, 200, (300, 300)),
+          str(first.as_dict()))
+    check("坐标反着给也能用", store.add_region(900, 500, 300, 100).rect == (300, 100, 900, 500))
+    point = store.add_point(800, 450)
+    check("点自动编号", point.name == "点1", point.name)
+    check("点也能算中心", point.center == (800, 450))
+    check("列得出来", "范围1" in store.describe() and "点1" in store.describe(),
+          store.describe()[:60])
+
+    print("\n按名字找（认各种写法）")
+    for alias in ("范围1", "范围 1", "region1", "REGION 1"):
+        check("认「" + alias + "」", (store.get(alias) or type("x", (), {"name": ""})()).name == "范围1",
+              alias)
+    check("只写「范围」给最近的那个",
+          (store.get("范围") or first).name == "范围3", (store.get("范围") or first).name)
+    check("认「点1」", (store.get("点1") or point).name == "点1")
+    check("不存在的名字返回空", store.get("范围9") is None)
+
+    print("\n解析成矩形（给截图 / 看图用）")
+    check("名字能解析", marks_mod.resolve_region("范围1") == (100, 200, 500, 400),
+          str(marks_mod.resolve_region("范围1")))
+    check("点会解析成一小块（不是 1×1 的图）",
+          marks_mod.resolve_region("点1") == (640, 330, 960, 570),
+          str(marks_mod.resolve_region("点1")))
+    check("四个数也能解析", marks_mod.resolve_region("10,20,300,400") == (10, 20, 300, 400),
+          str(marks_mod.resolve_region("10,20,300,400")))
+    check("数不够就不认", marks_mod.resolve_region("10,20") is None)
+    check("乱七八糟的不认", marks_mod.resolve_region("那块地方") is None)
+
+    print("\n工具层")
+    check("列标记工具", "范围1" in tools.call("list_marks", {}))
+    answer = tools.call("mark_region", {"x1": 10, "y1": 10, "x2": 210, "y2": 110,
+                                        "note": "下载按钮"})
+    check("新增范围会回一句人话", "范围4" in answer and "200×100" in answer, answer[:60])
+    check("note 存下来了", (store.get("范围4") or first).note == "下载按钮")
+    # 同名再框一次 = 调整那块，而不是又建一块
+    before = len(store.all())
+    answer = tools.call("mark_region", {"x1": 0, "y1": 0, "x2": 500, "y2": 400,
+                                        "name": "范围4"})
+    check("同名是「改」不是「再建一块」",
+          len(store.all()) == before and (store.get("范围4") or first).rect == (0, 0, 500, 400),
+          answer[:50])
+    check("改动也会说清楚", "改成" in answer, answer[:40])
+    answer = tools.call("remove_mark", {"name": "范围4"})
+    check("删得掉", "擦掉" in answer and store.get("范围4") is None, answer[:40])
+    check("删不存在的会说清楚", "没有叫" in tools.call("remove_mark", {"name": "范围9"}))
+    check("留空删最近一个", "擦掉" in tools.call("remove_mark", {}))
+    check("按类型清：只清点", tools.call("clear_marks", {"kind": "点"}) and store.get("点1") is None)
+    check("框还在", store.get("范围1") is not None)
+    check("全清", "擦掉" in tools.call("clear_marks", {}) and not store.all())
+    check("没标记时清会说实话", "本来就没有" in tools.call("clear_marks", {}))
+
+    print("\n截图真的只截那一块")
+    store.add_region(0, 0, 400, 300, name="左上角")
+    out = tools.call("screenshot", {"region": "左上角", "name": "crop"})
+    check("截图工具认范围名", "左上角" in out and "crop" in out and "400×300" in out,
+          out[:70])
+    saved = None
+    for token in out.replace("，", " ").split():
+        if token.endswith(".png"):
+            from voice_agent.tools._shared import SCREENSHOT_DIR
+
+            candidate = SCREENSHOT_DIR / token
+            if candidate.is_file():
+                saved = candidate
+    check("文件真的存下来了", saved is not None, str(saved))
+    if saved is not None:
+        from PIL import Image
+
+        with Image.open(saved) as img:
+            check("截出来的就是框里那一块（400×300）", img.size == (400, 300), str(img.size))
+    bad = tools.call("screenshot", {"region": "不存在的地方"})
+    check("看不懂的范围会说人话", "看不懂" in bad, bad[:40])
+
+    print("\n看图也只看那一块")
+    from voice_agent.tools import vision as vision_mod
+
+    seen: dict = {}
+    original = vision_mod._VISION_HANDLER[0]
+    try:
+        vision_mod.set_vision_handler(
+            lambda path, question, meta=None: (seen.update(meta or {}), "看图完成")[1])
+        store.clear()
+        store.add_region(500, 400, 900, 700, name="范围1")
+        answer = vision_mod.look_at_screen_tool("这儿写了什么", region="范围1")
+        check("看图工具认范围名", answer == "看图完成", answer[:40])
+        check("送出去的是裁剪后的小图", tuple(seen.get("original") or ()) == (400, 300),
+              str(seen.get("original")))
+        check("坐标原点跟着变成框的左上角", tuple(seen.get("origin") or ()) == (500, 400),
+              str(seen.get("origin")))
+        check("按屏幕截：主屏和二号屏尺寸对",
+              screen.grab_screen(monitor=1).shape[1] == 1920
+              and screen.grab_screen(monitor=2).shape[1] == 1920,
+              str(screen.list_monitors())[:40])
+        check("整屏比单屏大", screen.grab_screen().shape[1]
+              > screen.grab_screen(monitor=1).shape[1])
+    finally:
+        vision_mod.set_vision_handler(original)
+
+    print("\n界面层（offscreen 下也要能画、能选）")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from PyQt6.QtCore import QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+        from PyQt6.QtWidgets import QApplication
+
+        from voice_agent.ui.overlay import MarksOverlay
+
+        app = QApplication.instance() or QApplication([])
+        store.clear()
+        store.add_region(100, 100, 500, 400, name="范围1")
+        store.add_point(300, 500, name="点1")
+        overlay = MarksOverlay()
+        overlay.show_overlay()
+        overlay._version = -1
+        overlay._sync()
+        check("标记层的范围覆盖所有显示器", overlay.width() > 0 and overlay.height() > 0,
+              str(overlay.width()) + "x" + str(overlay.height()))
+        overlay.grab()          # 真的画一遍：画错会抛异常
+        check("画得出来（范围 + 点）", True)
+
+        overlay.start_selection("region")
+        check("进入框选模式后能接收鼠标", overlay._selecting == "region", overlay._selecting)
+        start = QPointF(20, 30)
+        end = QPointF(220, 130)
+        def _event(kind, pos, button, buttons):  # noqa: ANN001
+            return QMouseEvent(kind, pos, QPointF(overlay.mapToGlobal(pos.toPoint())),
+                               button, buttons, Qt.KeyboardModifier.NoModifier)
+
+        overlay.mousePressEvent(_event(QMouseEvent.Type.MouseButtonPress, start,
+                                       Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton))
+        overlay.mouseMoveEvent(_event(QMouseEvent.Type.MouseMove, end,
+                                      Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton))
+        got: list = []
+        overlay.selection_done.connect(got.append)
+        overlay.mouseReleaseEvent(_event(QMouseEvent.Type.MouseButtonRelease, end,
+                                         Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton))
+        app.processEvents()
+        check("拖完会交出一个矩形", bool(got) and got[0]["kind"] == "region", str(got))
+        check("拖完之后不再拦鼠标", overlay._selecting == "", overlay._selecting)
+        overlay.cancel_selection()
+        overlay.deleteLater()
+    except ImportError as exc:
+        print("  [跳过] 没有 PyQt6：" + str(exc)[:60])
+
+    print()
+    if failures:
+        print("失败 " + str(len(failures)) + " 项：" + "、".join(failures))
+        return 1
+    print("屏幕标记全部通过。")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

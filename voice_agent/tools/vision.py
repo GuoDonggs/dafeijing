@@ -147,14 +147,28 @@ def resize_image_tool(image: str = "", width: int = 0, height: int = 0,
             + "，文件 " + str(saved) + " KB，存在 " + result["path"])
 
 
-def look_at_screen_tool(question: str = "") -> str:
-    """看屏幕：截图后交给视觉模型回答。"""
+def look_at_screen_tool(question: str = "", region: str = "", monitor: int = 0) -> str:
+    """看屏幕：截图后交给视觉模型回答。
+
+    region 可以是框选过的「范围1」，也可以写 "左,上,右,下"；monitor=1 只看主屏。
+    **只截要看的那一块**：整屏缩到 1280 宽之后细节本来就糊了，
+    裁成一小块再送，同样的 token 花在真正要看的地方。
+    """
     handler = _VISION_HANDLER[0]
     if handler is None:
         return ("还没配置视觉模型。在 config.yaml 的 llm.profiles 里加一个 vision: true 的档案，"
                 "再把 llm.routes.vision 指过去")
+    rect = None
+    if str(region or "").strip():
+        from .. import marks as marks_mod  # noqa: PLC0415
+
+        rect = marks_mod.resolve_region(region)
+        if rect is None:
+            return ("看不懂这个范围：" + str(region)
+                    + "（可以先用「框一下这块」框出来，或者写成 左,上,右,下）")
     try:
-        shot = _screen().save_for_vision(None, max_side=max_side())
+        shot = _screen().save_for_vision(None, max_side=max_side(), region=rect,
+                                         monitor=int(monitor or 0))
     except Exception as exc:  # noqa: BLE001
         return "截屏失败：" + str(exc)[:80]
     try:

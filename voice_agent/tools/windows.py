@@ -174,23 +174,38 @@ def media_control(action: str = "play_pause") -> str:
     return words.get(key, "已经发送了媒体控制键")
 
 
-def screenshot() -> str:
-    """全屏截图并存到「图片」目录。"""
+def screenshot(monitor: int = 0, region: str = "", name: str = "") -> str:
+    """截屏并存到「图片」目录。
+
+    monitor：1 = 主屏，2、3… 其它屏（从左到右），0 = 全部（整个虚拟桌面）。
+    region ：框选过的「范围1」「点2」，或者 "左,上,右,下" 四个数。
+    name   ：存成 screen-<name>-时间.png，方便回头找。
+    """
+    from .. import marks as marks_mod
+    from .. import screen as screen_mod
+    from PIL import Image  # noqa: PLC0415
+
+    rect = marks_mod.resolve_region(region) if str(region or "").strip() else None
+    if str(region or "").strip() and rect is None:
+        return "看不懂这个范围：" + str(region) + "（可以先用「框选」框一块，或写成 左,上,右,下）"
+    try:
+        shot = screen_mod.grab_screen(region=rect, monitor=int(monitor or 0))
+    except Exception as exc:  # noqa: BLE001
+        return "截屏失败：" + str(exc)[:80]
+    if shot.size == 0:
+        return "截屏失败：没有拿到画面"
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    path = SCREENSHOT_DIR / ("screen-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".png")
-    script = (
-        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
-        "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
-        "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;"
-        "$g=[System.Drawing.Graphics]::FromImage($bmp);"
-        "$g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size);"
-        "$bmp.Save('" + str(path).replace("'", "''") + "',[System.Drawing.Imaging.ImageFormat]::Png);"
-        "$g.Dispose();$bmp.Dispose();"
-    )
-    _ps(script, timeout=25.0)
-    if path.is_file():
-        return "已经截屏，存到图片文件夹里的 " + path.name
-    return "截屏失败了"
+    tag = "-" + re.sub(r"\W+", "", str(name))[:16] if str(name or "").strip() else ""
+    path = SCREENSHOT_DIR / ("screen" + tag + "-"
+                             + datetime.now().strftime("%Y%m%d-%H%M%S") + ".png")
+    try:
+        Image.fromarray(shot[:, :, ::-1]).save(path)
+    except Exception as exc:  # noqa: BLE001
+        return "截屏存不下来：" + str(exc)[:80]
+    where = ("范围 " + str(region)) if rect else (
+        ("第 " + str(int(monitor)) + " 块屏幕") if int(monitor or 0) > 0 else "整个桌面")
+    return ("已经截屏（" + where + "，" + str(shot.shape[1]) + "×" + str(shot.shape[0])
+            + "），存到图片文件夹里的 " + path.name)
 
 
 def clipboard(action: str = "get", text: str = "") -> str:

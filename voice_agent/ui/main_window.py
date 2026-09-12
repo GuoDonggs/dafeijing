@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 
 from ..agent import VoiceAgent
 from ..console import Console
+from ..tools import marks as tools_marks
 from . import components as ui
 from . import pages as pages_mod
 from . import theme
@@ -207,6 +208,8 @@ class MainWindow(QWidget):
 
     #: 助手要求「重启 / 退出程序本身」时发出（带着 "restart" / "quit"）
     self_control_requested = pyqtSignal(str)
+    #: 工具要求"让用户在屏幕上框一下 / 点一下"（工作线程 → 界面线程）
+    marks_select_requested = pyqtSignal(str)
 
     def __init__(self, config_path: Path | None = None, autostart: bool = True) -> None:
         super().__init__()
@@ -235,6 +238,11 @@ class MainWindow(QWidget):
         # 工具是在工作线程里跑的，直接动 Qt 的窗口会崩。
         self.self_control_requested.connect(self._on_self_control)
         self.console.app_hook = self.self_control_requested.emit
+        # 标记层：助手说「框一下这块」时，由它出面让用户拖一个框出来
+        self.marks_select_requested.connect(self._begin_selection)
+        self._marks_overlay = None
+        self._marks_wait: dict | None = None
+        tools_marks.set_marks_handler(self.request_selection)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -328,6 +336,67 @@ class MainWindow(QWidget):
         self._dialogs[key] = dialog
         return dialog
 
+    # ───────────────── 屏幕上的标记（框选 / 标点）─────────────────
+
+    def _ensure_overlay(self):
+        """标记层按需创建 —— 没框过东西就不该多一个全屏窗口。"""
+        if self._marks_overlay is None:
+            from .overlay import MarksOverlay
+
+            self._marks_overlay = MarksOverlay(self)
+            self._marks_overlay.selection_done.connect(self._on_selection_done)
+        return self._marks_overlay
+
+    def start_marks(self, kind: str = "region") -> None:
+        """菜单入口：让用户框一块 / 点一下。"""
+        self._marks_wait = None
+        self._begin_selection(kind)
+
+    def request_selection(self, kind: str, timeout: float = 45.0) -> dict | None:
+        """工具（工作线程）调过来的：等用户在屏幕上选完。
+
+        Qt 的东西只能在界面线程碰，所以这里发个信号过去，自己在这儿等。
+        """
+        import threading
+
+        self._marks_wait = {"done": threading.Event(), "result": None}
+        self.marks_select_requested.emit(kind)
+        wait = self._marks_wait
+        if wait is None or not wait["done"].wait(timeout):
+            self.console.log("[ui] 框选超时了（没等到你在屏幕上选）")
+            self._marks_wait = None
+            return None
+        result = wait["result"]
+        self._marks_wait = None
+        return result
+
+    def _begin_selection(self, kind: str) -> None:
+        overlay = self._ensure_overlay()
+        overlay.show_overlay()
+        self.console.log("[ui] 请在屏幕上"
+                         + ("点一下" if kind == "point" else "拖一个框")
+                         + "（按 Esc 取消）")
+        overlay.start_selection(kind)
+
+    def _on_selection_done(self, result) -> None:
+        """用户选完了：要么交给等着的工具，要么直接存成标记（菜单进来的）。"""
+        wait, self._marks_wait = self._marks_wait, None
+        if wait is not None:
+            wait["result"] = result
+            wait["done"].set()
+            return
+        if not result:
+            self.console.log("[ui] 已取消")
+            return
+        from .. import marks as marks_mod
+
+        if result.get("kind") == "point":
+            mark = marks_mod.store.add_point(result["x"], result["y"], note="界面标点")
+        else:
+            mark = marks_mod.store.add_region(result["x1"], result["y1"],
+                                              result["x2"], result["y2"], note="界面框选")
+        self.console.log("[ui] 记好了：" + mark.summary())
+
     # ───────────────── 控制程序自己 ─────────────────
 
     def _on_self_control(self, action: str) -> None:
@@ -391,6 +460,9 @@ class MainWindow(QWidget):
             # 「对话记录」和「文字指令」本来就是同一个页面，合并成一条
             ("chat", "对话与指令", "Ctrl+K", self.show_chat),
             ("plus", "开始新会话", "", self.new_session),
+            ("search", "框选范围", "", lambda: self.start_marks("region")),
+            ("chat", "标记点", "", lambda: self.start_marks("point")),
+            ("close", "擦掉所有标记", "", self.clear_marks),
             (None, None, None, None),
             ("tools", "工具", "Ctrl+T", self.show_tools),
             ("skills", "技能", "", self.show_skills),
@@ -421,6 +493,14 @@ class MainWindow(QWidget):
     def show_command(self) -> None:
         """兼容旧调用（Ctrl+R 等）：打开的就是对话页。"""
         self.show_chat()
+
+    def clear_marks(self) -> None:
+        """擦掉屏幕上所有标记。"""
+        from .. import marks as marks_mod
+
+        count = marks_mod.store.clear()
+        self.console.log("[ui] 擦掉了 " + str(count) + " 个标记"
+                         if count else "[ui] 本来就没有标记")
 
     def new_session(self) -> None:
         """开一个新会话：清掉上下文，界面上的历史留着。"""

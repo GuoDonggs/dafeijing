@@ -18,8 +18,12 @@ import numpy as np
 
 from . import audio as audio_io
 from . import textutil
+from . import translit
 from . import voices as voice_table
 from .config import Config
+
+#: 用来区分"还没建过"和"建过但建不出来（None）"
+_UNSET = object()
 
 __all__ = ["WakeWord", "VadSegmenter", "Asr", "Tts"]
 
@@ -348,6 +352,8 @@ class Tts:
         self.failed = 0
         self.interrupted = 0
         self.device = None
+        # 英文音译用的模型客户端（懒建；没配 Key 就是 None，走纯离线兜底）
+        self._translit_client: object = _UNSET
         print("[tts] 引擎：" + self.engine + " — " + self.engine_note
               + "；音色：" + self.voice_label
               + "；算力：" + self.provider_text, file=sys.stderr, flush=True)
@@ -703,9 +709,31 @@ class Tts:
         self.failed += 1
         print("[tts] 播放没成功（声卡被占用？）—— 这条回复没能出声", file=sys.stderr, flush=True)
 
+    def _translit(self) -> object:
+        """音译用的模型客户端；只建一次，没配 Key 就是 None。"""
+        if self._translit_client is not _UNSET:
+            return self._translit_client
+        self._translit_client = None
+        if bool(getattr(self.cfg.tts, "translit", True)):
+            try:
+                from .llm import Llm  # noqa: PLC0415
+
+                resolved = self.cfg.llm.resolve("judge")   # 判定档最便宜最快
+                if resolved.available:
+                    self._translit_client = Llm(resolved)
+            except Exception as exc:  # noqa: BLE001 - 建不出来就用离线兜底
+                print("[tts] 音译客户端没建起来：" + str(exc)[:80], file=sys.stderr, flush=True)
+        return self._translit_client
+
     def chunks(self, text: str) -> list[str]:
         """把要念的话切成合成单元：第一块短（快点出声），其余按整句。"""
         clean = textutil.clean_for_tts(text)
+        if not clean:
+            return []
+        # vits-zh 是纯中文模型，lexicon 里没有拉丁词：deepseek、hello 这种
+        # 会被当成 OOV **整词丢掉**（用户听到的是"这句话少了一截"）。
+        # 内置表 + 学习缓存的常见词是零延迟的，只有新词才会问一次模型。
+        clean = translit.apply(clean, client=self._translit(), log=self._log_translit)
         if not clean:
             return []
         parts = textutil.split_sentences(
@@ -718,6 +746,10 @@ class Tts:
             if 0 < cut < len(head):
                 parts = [head[:cut], head[cut:]] + list(parts[1:])
         return [p for p in (s.strip() for s in parts) if p]
+
+    @staticmethod
+    def _log_translit(message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
 
     def _cut_at(self, text: str, limit: int) -> int:
         """在 limit 附近找停顿点；实在没有标点就硬切，但尽量别切在正中间。"""

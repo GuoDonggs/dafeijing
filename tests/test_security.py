@@ -195,6 +195,28 @@ def main() -> int:
     check("记录了限流", "rate_limited" in text)
     check("记录了明文链路降级", "transport_downgrade" in text)
 
+    print("\n用户自己定的名单")
+    security.configure(make_config())
+    security.reset_limits()
+    cfg = make_config()
+    cfg.security.deny_tools = ["write_file"]
+    cfg.security.always_confirm = ["open_app"]
+    security.configure(cfg)
+    banned = security.check(tools.REGISTRY["write_file"])
+    check("禁止名单里的工具直接拒绝（连确认都不给）",
+          not banned.allowed and banned.reason == "deny_tools", banned.reason)
+    check("拒绝理由说清了是被禁止使用", "禁止使用" in banned.text, banned.text[:36])
+    check("禁止名单不影响别的工具",
+          security.check(tools.REGISTRY["read_file"]).allowed)
+    extra = security.check(tools.REGISTRY["open_app"])
+    check("额外要求确认的工具会弹确认", extra.needs_confirm, extra.code)
+    check("快照里能看到这两张名单",
+          security.snapshot()["deny"] == ["write_file"]
+          and security.snapshot()["confirm"] == ["open_app"],
+          str(security.snapshot()["deny"]) + str(security.snapshot()["confirm"]))
+    security.configure(make_config())
+    security.reset_limits()
+
     print("\n工具层的整体行为")
     security.configure(make_config("read-only"))
     security.reset_turn()

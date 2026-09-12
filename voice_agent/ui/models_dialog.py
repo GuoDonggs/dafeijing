@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -51,10 +52,13 @@ EFFORT_LABELS = {"": "跟随默认", "off": "不思考", "low": "浅", "medium":
 class ProfileCard(QFrame):
     """一个模型档案的编辑卡片。"""
 
-    def __init__(self, name: str, data: dict, on_remove) -> None:  # noqa: ANN001
+    def __init__(self, name: str, data: dict, on_remove,  # noqa: ANN001
+                 defaults: dict | None = None, on_test=None) -> None:
         super().__init__()
         self.setObjectName("Card")
         self.removed = False
+        defaults = defaults or {}
+        self.on_test = on_test
         body = QVBoxLayout(self)
         body.setContentsMargins(14, 12, 14, 12)
         body.setSpacing(8)
@@ -62,19 +66,25 @@ class ProfileCard(QFrame):
         head = QHBoxLayout()
         head.setSpacing(8)
         self.name = QLineEdit(name)
-        self.name.setPlaceholderText("档案名，例如 fast")
+        self.name.setPlaceholderText("档案名，例如 fast / vlm")
+        self.name.editingFinished.connect(self._maybe_test_label)
         head.addWidget(self.name, 1)
+        if on_test is not None:
+            self.test_button = ui.plain_button("测试")
+            self.test_button.setToolTip("真的调一次这个模型，确认地址和密钥能用")
+            self.test_button.clicked.connect(lambda: on_test(self))
+            head.addWidget(self.test_button)
         remove = ui.plain_button("删除")
         remove.clicked.connect(lambda: on_remove(self))
         head.addWidget(remove)
         body.addLayout(head)
+        self.result = QLabel("")
+        self.result.setObjectName("RowSubtitle")
+        self.result.setWordWrap(True)
+        body.addWidget(self.result)
 
         self.fields: dict[str, Any] = {}
-        for key, label, placeholder in (
-            ("model", "模型名", "deepseek-chat"),
-            ("base_url", "服务地址", "https://api.deepseek.com/v1"),
-            ("api_key", "API Key", "留空 = 用顶层那把密钥"),
-        ):
+        for key, label in (("model", "模型名"), ("base_url", "服务地址"), ("api_key", "API Key")):
             row = QHBoxLayout()
             row.setSpacing(8)
             caption = QLabel(label)
@@ -82,7 +92,8 @@ class ProfileCard(QFrame):
             caption.setFixedWidth(64)
             row.addWidget(caption)
             editor = QLineEdit(str(data.get(key) or ""))
-            editor.setPlaceholderText(placeholder)
+            # 占位符写"跟随默认"的那个值 —— 空着不等于没配，而是继承顶层
+            editor.setPlaceholderText("跟随默认" + (("：" + defaults[key]) if defaults.get(key) else ""))
             if key == "api_key":
                 editor.setEchoMode(QLineEdit.EchoMode.Password)
             row.addWidget(editor, 1)
@@ -111,6 +122,13 @@ class ProfileCard(QFrame):
         bottom.addWidget(QLabel("会看图"))
         bottom.addWidget(self.vision)
         body.addLayout(bottom)
+
+    def _maybe_test_label(self) -> None:
+        return
+
+    def show_result(self, text: str, ok: bool) -> None:
+        self.result.setText(text)
+        self.result.setStyleSheet("color: " + (theme.GREEN if ok else theme.ORANGE))
 
     def collect(self) -> tuple[str, dict] | None:
         """读出这一行的内容；名字为空表示这行作废（返回 None）。"""
@@ -197,7 +215,13 @@ class ProfilesDialog(QDialog):
         return box
 
     def _routes_card(self) -> QWidget:
+        """一排「用途 → 档案」。留空就是跟随默认那一组参数。"""
         card = ui.Card()
+        note = QLabel("没挂档案的用途，用的就是设置页里「默认模型」那一组参数 —— "
+                      "所以只想给看图换个模型时，给看图挂个档案就行。")
+        note.setObjectName("CardSubtitle")
+        note.setWordWrap(True)
+        card.body.addWidget(note)
         for purpose, label, hint in PURPOSES:
             row = QHBoxLayout()
             row.setSpacing(8)
@@ -208,13 +232,15 @@ class ProfilesDialog(QDialog):
             row.addWidget(combo, 1)
             sub = QLabel(hint)
             sub.setObjectName("RowSubtitle")
+            sub.setWordWrap(True)
             row.addWidget(sub, 2)
             card.body.addLayout(row)
             self.routes[purpose] = combo
         return card
 
     def add_card(self, name: str, data: dict) -> None:
-        card = ProfileCard(name, data, self.remove_card)
+        card = ProfileCard(name, data, self.remove_card,
+                           defaults=self.defaults(), on_test=self.test_profile)
         self.cards.append(card)
         self.list_box.addWidget(card)
         self.refresh_routes()
@@ -229,14 +255,57 @@ class ProfilesDialog(QDialog):
     def refresh_routes(self) -> None:
         """路由下拉框跟着档案列表走（档案改名、删掉都要重新填）。"""
         names = [card.name.text().strip() for card in self.cards if card.name.text().strip()]
+        default_model = str(self.console.cfg.llm.model or "默认")
         for purpose, combo in self.routes.items():
             previous = combo.currentData() or ""
             combo.clear()
-            combo.addItem("跟随默认", "")
+            combo.addItem("跟随默认（" + default_model + "）", "")
             for name in names:
                 combo.addItem(name, name)
             index = combo.findData(previous)
             combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def defaults(self) -> dict:
+        """顶层那一组参数 —— 档案里没填的字段就是跟着它们走。"""
+        llm = self.console.cfg.llm
+        return {"model": str(llm.model or ""), "base_url": str(llm.base_url or ""),
+                "api_key": "（已配置）" if llm.resolved_key() else ""}
+
+    def test_profile(self, card: "ProfileCard") -> None:
+        """真的调一次这个档案，确认地址、密钥、模型名都对得上。
+
+        这一步很值得有：多模型最容易踩的坑就是"地址填错/密钥没权限"，
+        而症状是"助手突然不说话了"，很难往这上面想。
+        """
+        name, data = card.collect() or ("", {})
+        if not name:
+            card.show_result("先给它起个名字", False)
+            return
+        merged = dict(self.console.cfg.llm.__dict__)
+        merged.update({key: value for key, value in data.items() if key != "vision"})
+        merged["timeout_s"] = 8.0
+        merged.pop("purpose", None)
+        merged.pop("name", None)
+        merged.pop("profiles", None)
+        merged.pop("routes", None)
+        card.show_result("测试中……", True)
+        QApplication.processEvents()
+        try:
+            from ..llm import Llm, LlmError  # noqa: PLC0415
+            from ..config import LlmCfg  # noqa: PLC0415
+
+            config = LlmCfg(**merged)
+            if not config.available:
+                card.show_result("这个档案还缺地址 / 模型名 / 密钥", False)
+                return
+            client = Llm(config)
+            message = client.chat([{"role": "user", "content": "只回两个字：可以"}])
+            text = str(message.get("content") or "").strip()[:20]
+            card.show_result("通了，它回了：" + (text or "（空）"), True)
+        except LlmError as exc:
+            card.show_result("没通：" + str(exc)[:100], False)
+        except Exception as exc:  # noqa: BLE001
+            card.show_result("没通：" + str(exc)[:100], False)
 
     # ── 读 / 写 ──
     def load(self) -> None:
@@ -246,6 +315,8 @@ class ProfilesDialog(QDialog):
             self.add_card(str(name), dict(data or {}))
         if not self.cards:
             self.add_card("", {})
+        for card in self.cards:
+            card.name.editingFinished.connect(self.refresh_routes)
         self.refresh_routes()
         for purpose, combo in self.routes.items():
             index = combo.findData(str(routes.get(purpose) or ""))

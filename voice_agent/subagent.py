@@ -31,6 +31,10 @@ from .llm import Llm, LlmError
 
 __all__ = ["SubAgent", "SubAgentManager"]
 
+#: "不限制"时的硬上限。不是给正常任务用的，纯粹防止模型绕圈烧穿额度。
+HARD_MAX_RUNNING = 20
+HARD_MAX_ROUNDS = 60
+
 # 这些工具在后台没有意义，甚至会污染主对话：
 # - keep_listening 改的是「主对话这一轮要不要接着听」的全局状态；
 # - spawn_subagent 是子代理再派子代理，没人管得住它们的数量。
@@ -104,6 +108,23 @@ class SubAgentManager:
     def enabled(self) -> bool:
         return bool(self.cfg.agent.subagent_enabled)
 
+    def max_running(self) -> int:
+        """同时最多几个子代理。配 0 = 不限制，但仍然有个硬上限兜底 ——
+        模型一旦绕起圈来，"不限制"就是把自己拖死的开关。"""
+        try:
+            want = int(self.cfg.agent.subagent_max)
+        except (TypeError, ValueError):
+            want = HARD_MAX_RUNNING
+        return want if want > 0 else HARD_MAX_RUNNING
+
+    def max_rounds(self) -> int:
+        """每个子代理最多几步。0 = 不限制（同样有硬上限）。"""
+        try:
+            want = int(self.cfg.agent.subagent_rounds)
+        except (TypeError, ValueError):
+            want = HARD_MAX_ROUNDS
+        return want if want > 0 else HARD_MAX_ROUNDS
+
     def spawn(self, task: str, name: str = "") -> SubAgent:
         """派一个子代理。返回它的状态对象（state=running）。"""
         text = (task or "").strip()
@@ -111,9 +132,12 @@ class SubAgentManager:
             raise ValueError("没说要让子代理做什么")
         with self._lock:
             running = sum(1 for item in self._items.values() if item.state == "running")
-            if running >= max(1, int(self.cfg.agent.subagent_max)):
-                raise RuntimeError("同时最多 " + str(self.cfg.agent.subagent_max)
-                                   + " 个子代理在跑，等一个做完再派")
+            limit = self.max_running()
+            if running >= limit:
+                raise RuntimeError(
+                    ("同时最多 " + str(limit) + " 个子代理在跑，等一个做完再派")
+                    if limit < HARD_MAX_RUNNING else
+                    ("同时在跑的子代理太多了（" + str(limit) + " 个），先等几个做完"))
             self._counter += 1
             item = SubAgent(id="sub" + str(self._counter), task=text,
                             name=(name or "").strip() or ("子代理" + str(self._counter)))
@@ -198,7 +222,7 @@ class SubAgentManager:
             client = self._client()
             if client is None:
                 raise RuntimeError("没有可用的模型（先配 llm.api_key）")
-            rounds = max(1, int(self.cfg.agent.subagent_rounds))
+            rounds = self.max_rounds()
             messages: list[dict] = [
                 {"role": "system", "content": _SUBAGENT_PROMPT},
                 {"role": "user", "content": item.task},
@@ -240,7 +264,8 @@ class SubAgentManager:
                         "content": str(outcome.text)[:800],
                     })
             else:
-                item.result = "这件事步骤太多，我先停下来，把已经查到的说一下。"
+                item.result = ("这件事步骤太多（已经做了 " + str(item.rounds)
+                               + " 步），我先停下来，把已经查到的说一下。")
             if item.state == "cancelled":
                 return
             item.state = "done"

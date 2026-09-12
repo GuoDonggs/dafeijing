@@ -30,6 +30,14 @@ from .. import security
 from ._shared import TURN, reset_turn
 from .apps import open_app, open_url, web_search
 from .files import list_files, read_file, recall, remember, search_files
+from .marks import (
+    clear_marks_tool,
+    list_marks_tool,
+    mark_point_tool,
+    mark_region_tool,
+    remove_mark_tool,
+    set_marks_handler,
+)
 from .selfctl import (
     new_session_tool,
     permission_mode_tool,
@@ -112,16 +120,50 @@ class Tool:
 
         必须说人话：直接拿 description 拼会念出「关机、重启、睡眠或注销电脑。
         属于敏感操作，调用前应先跟用户确认。：shutdown」，听起来像在念文档。
+
+        **命令和长文本不念原文**：命令是给机器看的（一串路径、参数、引号），
+        念出来用户听不懂、还要等好几秒。这一类只报"要干什么"
+        （能认出常见动作就说出来），原文留在日志里给需要的人查。
         """
-        detail = "、".join(
-            _ARG_WORDS.get(str(value).strip().lower(), str(value))
-            for value in args.values()
-            if str(value).strip()
-        )
+        detail = self._spoken_detail(args or {})
         question = "要" + self.display
         if detail:
             question += "：" + detail
         return question + "，确认吗？"
+
+    def _spoken_detail(self, args: dict) -> str:
+        """把参数压成"能听懂的一小句"。
+
+        三类参数分开处理，一刀切都会出问题：
+        - **命令/脚本/代码**：念出来是一串路径和引号，用户听不懂 —— 只说"要干什么"；
+        - **正文/文本**：太长就没必要念，说"有内容"即可；
+        - **路径**：路径本身有用（用户要知道动的是哪个文件），太长就只念文件名；
+        - 其余：短的原样念，长的省略。
+        """
+        words: list[str] = []
+        for key, value in args.items():
+            name = str(key).strip().lower()
+            text = " ".join(str(value).split())
+            if not text:
+                continue
+            if name in ("command", "script", "code"):
+                hint = _command_hint(text)
+                if hint:
+                    words.append(hint)
+                continue
+            if name in ("content", "text", "body"):
+                words.append(text if len(text) <= 16 else "一段内容")
+                continue
+            if name in ("path", "file", "target", "out", "source"):
+                words.append(text if len(text) <= 24 else _tail_name(text))
+                continue
+            label = _ARG_LABELS.get(name)
+            if label and re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+                words.append(label[0] + text + label[1])
+                continue
+            mapped = _ARG_WORDS.get(text.lower())
+            words.append(mapped or (text if len(text) <= 24 else ""))
+        return "、".join(word for word in words if word)
 
     def schema(self) -> dict:
         return {
@@ -262,6 +304,21 @@ def describe() -> str:
     return "\n".join(lines)
 
 
+def _tail_name(path: str) -> str:
+    """长路径只念最后一段（文件名），前面那些目录念了也没人记得住。"""
+    parts = re.split(r"[\\/]+", str(path).strip())
+    return parts[-1] if parts and parts[-1] else str(path)
+    
+    
+def _command_hint(command: str) -> str:
+    """一条命令大致在干什么；认不出来就返回空串（确认提示就只说"执行命令"）。"""
+    low = " " + str(command or "").lower() + " "
+    for keys, label in _COMMAND_HINTS:
+        if any(key in low for key in keys):
+            return label
+    return ""
+
+
 def _audit_args(args: Any, limit: int = 160) -> str:
     """审计里记参数，但要截断：别把一整篇文件内容写进日志。"""
     try:
@@ -361,6 +418,32 @@ __all__ = [
     "reset_skills",
     "tool_names",
 ]
+#: 这些参数是"给机器看的"，念出来听不懂（命令、脚本、代码、正文）
+_OPAQUE_ARGS = ("command", "script", "code", "content", "text")
+#: 数字参数的念法：（前缀，后缀）。"延迟 60 秒"比"60"清楚得多
+_ARG_LABELS = {
+    "delay": ("延迟 ", " 秒"), "delay_s": ("延迟 ", " 秒"), "seconds": ("", " 秒"),
+    "timeout_s": ("超时 ", " 秒"), "interval_s": ("每 ", " 秒"), "max_minutes": ("最长 ", " 分钟"),
+    "count": ("", " 次"), "times": ("", " 次"), "steps": ("", " 步"),
+    "amount": ("", " 格"), "percent": ("", "%"), "limit": ("最多 ", " 个"),
+    "rounds": ("最多 ", " 轮"), "max": ("最多 ", " 个"),
+}
+#: 从命令里认出常见动作，好让确认提示说得出"要干什么"
+_COMMAND_HINTS = (
+    (("get-childitem", "dir ", " gci ", "ls "), "列出文件"),
+    (("start-process", "start ", "saps "), "打开程序"),
+    (("stop-process", "taskkill", "kill "), "结束进程"),
+    (("remove-item", " del ", "rm ", "erase "), "删除文件"),
+    (("copy-item", "copy ", " cp ", "xcopy", "robocopy"), "复制文件"),
+    (("move-item", "move ", " mv "), "移动文件"),
+    (("new-item", "mkdir", " md "), "新建文件或目录"),
+    (("test-connection", "ping "), "测试网络"),
+    (("invoke-webrequest", "invoke-restmethod", "curl", "wget"), "联网获取内容"),
+    (("shutdown",), "关机"),
+    (("restart-computer",), "重启电脑"),
+    (("get-process", "tasklist"), "查看进程"),
+    (("get-service",), "查看服务"),
+)
 _PS_UTF8 = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;"
 _ARG_WORDS = {
     "shutdown": "关机", "restart": "重启", "reboot": "重启", "sleep": "睡眠", "logoff": "注销",
@@ -402,9 +485,36 @@ _BUILTIN_TITLES = {
     "restart_self": "重启程序",
     "quit_self": "退出程序",
     "permission_mode": "调整权限",
+    "mark_region": "框选范围",
+    "mark_point": "标记点",
+    "list_marks": "看标记",
+    "remove_mark": "擦掉标记",
+    "clear_marks": "清空标记",
     "start_watch": "盯着看",
     "list_watches": "看进度",
     "stop_watch": "别盯了",
+    # 鼠标 / 屏幕这一批：确认提示是念 display 的，措辞要能听懂
+    "mouse_position": "查鼠标位置",
+    "mouse_move": "移动鼠标",
+    "mouse_click": "点击鼠标",
+    "mouse_drag": "拖拽鼠标",
+    "mouse_scroll": "滚动鼠标",
+    "find_on_screen": "在屏幕上找图",
+    "click_image": "点屏幕上的图",
+    "resize_image": "缩放图片",
+    "look_at_screen": "看屏幕",
+    "app_map": "改应用映射表",
+    "open_path": "打开文件夹",
+    "write_file": "写文件",
+    "edit_file": "改文件",
+    "find_files": "按通配符找文件",
+    "grep_files": "在文件里搜内容",
+    "list_windows": "看窗口列表",
+    "focus_window": "切到某个窗口",
+    "list_processes": "看进程列表",
+    "kill_process": "结束进程",
+    "wait": "等一会儿",
+    "keep_listening": "继续听你说",
 }
 SKILL_INFOS: list = []
 _SKILLS_LOADED = False

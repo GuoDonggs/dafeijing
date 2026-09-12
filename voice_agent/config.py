@@ -281,6 +281,11 @@ class SecurityCfg:
     max_prompts_per_minute: int = 6
     # 同一个操作连着要几次就拦下，0 = 不限
     max_same_action: int = 3
+    # 一律拒绝的工具名（最高优先级，任何模式都不放行）。
+    # 例：["run_command", "write_file"] —— 只想让它查、不想让它改的用法。
+    deny_tools: list[str] = field(default_factory=list)
+    # 额外要求确认的工具名（在"永远要确认"的名单之外再加）
+    always_confirm: list[str] = field(default_factory=list)
     # 审计日志（build/audit.jsonl）
     audit: bool = True
 
@@ -344,6 +349,10 @@ class TtsCfg:
     # 只想碰到真正的静音，不碰软辅音；设成 -100 就是关掉。
     noise_gate: float = -55.0
     max_gain: float = 3.0
+    # 朗读前把英文单词音译成汉字：vits-zh 念不出拉丁词，deepseek / hello
+    # 这种会被当成 OOV **整词丢掉**（听起来就是"这句话少了一截"）。
+    # 内置表 + 学习缓存零延迟，只有没见过的新词才会问一次模型。
+    translit: bool = True
     styles: dict[str, dict] = field(default_factory=dict)
 
     def style(self, kind: str) -> dict:
@@ -499,8 +508,8 @@ class AgentCfg:
     # 把"要跑好几步"的事丢到后台单独做：主对话先回一句"我去查"，
     # 做完再播报结果。只有长任务才会用到它。
     subagent_enabled: bool = True
-    subagent_max: int = 3           # 同时最多几个
-    subagent_rounds: int = 8        # 每个子代理最多调几次工具
+    subagent_max: int = 3           # 同时最多几个；0 = 不限制（内部仍有硬上限）
+    subagent_rounds: int = 8        # 每个子代理最多调几次工具；0 = 不限制
     subagent_announce: bool = True  # 做完要不要主动播报
     exit_words: list[str] = field(default_factory=lambda: ["退下", "再见"])
     persona: str = ("你是运行在用户电脑上的语音助手，名字叫「大肥鲸」。"
@@ -676,6 +685,7 @@ class Config:
                 target_rms=float(_get(raw, "tts.target_rms", 0.10)),
                 target_peak=float(_get(raw, "tts.target_peak", 0.9)),
                 noise_gate=float(_get(raw, "tts.noise_gate", -55.0)),
+                translit=bool(_get(raw, "tts.translit", True)),
                 max_gain=float(_get(raw, "tts.max_gain", 3.0)),
                 styles=dict(_get(raw, "tts.styles", None) or {}),
             ),
@@ -728,6 +738,8 @@ class Config:
                 allow_insecure=bool(_get(raw, "security.allow_insecure", False)),
                 max_prompts_per_minute=int(_get(raw, "security.max_prompts_per_minute", 6)),
                 max_same_action=int(_get(raw, "security.max_same_action", 3)),
+                deny_tools=_str_list(_get(raw, "security.deny_tools", None), []),
+                always_confirm=_str_list(_get(raw, "security.always_confirm", None), []),
                 audit=bool(_get(raw, "security.audit", True)),
             ),
             ui=UiCfg(

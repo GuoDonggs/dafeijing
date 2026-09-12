@@ -125,6 +125,8 @@ class Decision:
 
 _state = {
     "mode": "workspace-write",
+    "deny": set(),
+    "confirm": set(),
     "allow_insecure": False,
     "max_prompts": 6,
     "max_same": 3,
@@ -174,6 +176,12 @@ def configure(cfg: Any) -> None:
         _state["max_prompts"] = max(0, int(getattr(security, "max_prompts_per_minute", 6)))
         _state["max_same"] = max(0, int(getattr(security, "max_same_action", 3)))
         _state["audit"] = bool(getattr(security, "audit", True))
+        # 用户自己定的两张名单：一律拒绝的、额外要确认的
+        _state["deny"] = {str(x).strip() for x in (getattr(security, "deny_tools", None) or [])
+                          if str(x).strip()}
+        _state["confirm"] = {str(x).strip()
+                             for x in (getattr(security, "always_confirm", None) or [])
+                             if str(x).strip()}
         wanted = str(getattr(security, "mode", "") or "").strip().lower()
         if wanted in MODES:
             _state["mode"] = wanted
@@ -299,6 +307,15 @@ def check(tool: Any, args: Any = None) -> Decision:
     name = str(getattr(tool, "name", tool) or "")
     tier = tier_of(tool)
     current = mode()
+    with _lock:
+        banned = name in _state["deny"]
+        extra_confirm = name in _state["confirm"]
+    if banned:
+        # 用户点名的工具：连"问一句"都不问，直接拒绝（最高优先级）
+        audit({"event": "blocked", "tool": name, "tier": tier, "mode": current,
+               "reason": "deny_tools", "args": _short(args)})
+        return Decision(code="denied", tier=tier, reason="deny_tools",
+                        text=DELIMITER.format("「" + name + "」被设置成了禁止使用，这条不能执行"))
     if tier == "read":
         return Decision(tier=tier)
     if current == "read-only":
@@ -309,7 +326,7 @@ def check(tool: Any, args: Any = None) -> Decision:
             text=DELIMITER.format("只读模式下不能" + _verb(tier) + "，这条被拒绝了")
                  + " " + ESCALATION_HINT,
         )
-    force = name in ALWAYS_CONFIRM
+    force = name in ALWAYS_CONFIRM or extra_confirm
     if current == "danger-full-access" and not force:
         return Decision(tier=tier)
     if force or tier == "exec" or bool(getattr(tool, "confirm", False)):
@@ -379,6 +396,7 @@ def snapshot() -> dict:
             "transport_ok": bool(_state["transport_ok"]),
             "transport_note": str(_state["transport_note"]),
             "allow_insecure": bool(_state["allow_insecure"]),
+            "deny": sorted(_state["deny"]), "confirm": sorted(_state["confirm"]),
             "tainted": bool(_state["tainted"]),
             "prompts_last_minute": sum(1 for _ts in _prompts if time.monotonic() - _ts <= 60.0),
         }

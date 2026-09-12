@@ -334,7 +334,8 @@ class Console:
             message + ("（原文件备份为 " + backup + "）" if backup else ""), keys=keys)
 
     # 界面上用逗号写、配置文件里是列表的项
-    LIST_KEYS = ("wake.keywords", "wake.replies", "agent.exit_words")
+    LIST_KEYS = ("wake.keywords", "wake.replies", "agent.exit_words",
+                 "security.deny_tools", "security.always_confirm")
 
     def settings(self) -> dict:
         """给设置表单用的一份扁平常量快照（不暴露真实 API Key）。"""
@@ -374,6 +375,10 @@ class Console:
             "security.mode": cfg.security.mode,
             "security.allow_insecure": cfg.security.allow_insecure,
             "security.max_prompts_per_minute": cfg.security.max_prompts_per_minute,
+            "security.max_same_action": cfg.security.max_same_action,
+            "security.audit": cfg.security.audit,
+            "security.deny_tools": "、".join(cfg.security.deny_tools),
+            "security.always_confirm": "、".join(cfg.security.always_confirm),
             "llm.reasoning_effort": cfg.llm.reasoning_effort,
             "llm.vision_max_side": cfg.llm.vision_max_side,
             "llm.extra_body": "（高级：直接编辑 YAML）" if cfg.llm.extra_body else "",

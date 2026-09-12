@@ -34,8 +34,6 @@ build/conversation.json
 build/audit.jsonl
 build/audit.1.jsonl
 
-# 某些库会把中间产物写到 ./media（2048×2048 的 PNG 之类），是运行时产物，不入库
-media/
 # 临时文件：提交信息（git commit -F 用）与排查用的小脚本
 build/commit-msg*.txt
 build/cmsg*.txt

@@ -212,10 +212,78 @@ def open_cv_ready() -> bool:
         return False
 
 
-def grab_screen(region: tuple[int, int, int, int] | None = None) -> np.ndarray:
-    """截屏成 BGR 数组（OpenCV 习惯的顺序）。region 是 (left, top, right, bottom)。"""
+# ── 显示器 ──────────────────────────────────────────────────────
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = (("cbSize", ctypes.c_ulong), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", ctypes.c_ulong))
+
+
+def list_monitors() -> list[dict]:
+    """所有显示器，**主屏排第一**，其余按从左到右。
+
+    多屏时"截屏"到底截哪一块，用户和模型都说不清 —— 给它们一个稳定的编号：
+    1 = 主屏，2、3… = 其它屏（从左到右）。
+    """
+    if _user32 is None:
+        return []
+    found: list[dict] = []
+
+    def _callback(hmonitor, _hdc, _rect, _data):  # noqa: ANN001
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        primary = False
+        if _user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            primary = bool(info.dwFlags & 1)
+            box = info.rcMonitor
+        else:
+            box = _rect.contents
+        found.append({
+            "left": int(box.left), "top": int(box.top),
+            "right": int(box.right), "bottom": int(box.bottom),
+            "width": int(box.right - box.left), "height": int(box.bottom - box.top),
+            "primary": primary,
+        })
+        return 1
+
+    try:
+        callback = ctypes.WINFUNCTYPE(
+            ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.POINTER(wintypes.RECT), ctypes.c_double)(_callback)
+        _user32.EnumDisplayMonitors(None, None, callback, 0)
+    except Exception:  # noqa: BLE001 - 枚举失败就当只有一块屏
+        return []
+    found.sort(key=lambda item: (not item["primary"], item["left"]))
+    return found
+
+
+def monitor_rect(index: int) -> tuple[int, int, int, int] | None:
+    """第 index 块显示器的矩形（1 = 主屏，0/负数 = 整个虚拟桌面 → None）。"""
+    try:
+        want = int(index)
+    except (TypeError, ValueError):
+        return None
+    if want <= 0:
+        return None
+    monitors = list_monitors()
+    if not monitors:
+        return None
+    if want > len(monitors):
+        return None
+    item = monitors[want - 1]
+    return item["left"], item["top"], item["right"], item["bottom"]
+
+
+def grab_screen(region: tuple[int, int, int, int] | None = None,
+                monitor: int = 0) -> np.ndarray:
+    """截屏成 BGR 数组（OpenCV 习惯的顺序）。
+
+    region 是 (left, top, right, bottom)。也可以只给 monitor（1 = 主屏），
+    多显示器时按屏截比"截全屏再裁"省一大半像素 —— 送视觉模型前尤其值钱。
+    """
     from PIL import ImageGrab  # noqa: PLC0415
 
+    if region is None and monitor:
+        region = monitor_rect(int(monitor))
     image = ImageGrab.grab(bbox=region, all_screens=True)
     return np.array(image.convert("RGB"))[:, :, ::-1].copy()
 
@@ -332,7 +400,9 @@ def resize_image(image: str | Path, width: int = 0, height: int = 0,
 
 
 def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
-                    quality: int = 75) -> dict:
+                    quality: int = 75,
+                    region: tuple[int, int, int, int] | None = None,
+                    monitor: int = 0) -> dict:
     """把（截屏或指定图片）压成适合送给视觉模型的小图。
 
     返回一个字典而不是光一个路径：**模型给出的坐标要能换算回屏幕像素**。
@@ -349,12 +419,16 @@ def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
     VISION_CACHE.mkdir(parents=True, exist_ok=True)
     origin = (0, 0)
     if image is None:
-        shot = grab_screen()
+        # 只截需要的那一块：整屏 3840×1080 缩到 1280 宽后，很多细节就糊了；
+        # 裁成用户框的那一块再送，等于把同样的 token 花在真正要看的地方。
+        if region is None and monitor:
+            region = monitor_rect(int(monitor))
+        shot = grab_screen(region)
         from PIL import Image  # noqa: PLC0415
 
         source = VISION_CACHE / "screen.png"
         Image.fromarray(shot[:, :, ::-1]).save(source)
-        origin = _virtual_screen()[:2]
+        origin = (int(region[0]), int(region[1])) if region else _virtual_screen()[:2]
     else:
         source = Path(image)
     stamp = time.strftime("%H%M%S")
