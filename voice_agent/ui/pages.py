@@ -274,6 +274,12 @@ class HomePage(Page):
         if state == "off":
             return theme.STATE_HINTS["off"]
         if state == "listen":
+            if status.get("listen_heard"):
+                # 已经在说话了：这时候不该再显示"还剩几秒过期"，
+                # 用户会以为必须赶时间，越急越说不清
+                seconds = int((status.get("listen_ms") or 0) / 1000)
+                return ("我在听，说完停一下就行" if seconds < 3
+                        else "还在听（已录 " + str(seconds) + " 秒），说完停一下就行")
             seconds = int((status.get("listen_timeout_ms") or 8000) / 1000)
             return "说指令就好，" + str(seconds) + " 秒内没有提问我会回到待命"
         if state == "think":
@@ -283,6 +289,10 @@ class HomePage(Page):
         words = status.get("wake_words") or []
         voice = status.get("voiceprint") or {}
         extra = "（已开启声纹，只认你的声音）" if voice.get("ready") else ""
+        mode = str((status.get("security") or {}).get("label") or "")
+        if mode and mode != "标准":
+            # 权限被改过就要一直看得见 —— 忘了自己开过只读，只会觉得"它坏了"
+            extra += "（当前「" + mode + "」模式）"
         return "喊「" + (words[0] if words else "唤醒词") + "」叫我" + extra
 
 
@@ -839,6 +849,18 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
         ("llm.vision_max_side", "看图分辨率", "截图送给视觉模型前的最长边；越小越省 token，字小就看不清",
          "choice", ["768", "1024", "1280", "1600", "1920"]),
         ("llm.api_key", "API Key", "留空表示不改动；也可以读环境变量", "password", None),
+    ]),
+    ("权限", [
+        ("security.mode", "权限模式",
+         "只读：只能查；标准：敏感操作先问你；放开：敏感操作直接做（关机和执行命令仍要确认）",
+         "choice", ["read-only", "workspace-write", "danger-full-access"],
+         {"read-only": "只读", "workspace-write": "标准", "danger-full-access": "放开"}),
+        ("security.max_prompts_per_minute", "每分钟最多问几次",
+         "防「反复弹确认把你问烦」：超过就一律拒绝，0 = 不限", "choice",
+         ["3", "6", "10", "0"], {"0": "不限"}),
+        ("security.allow_insecure", "允许明文 HTTP 模型地址",
+         "关着时：非本机的 http 地址会自动降到只读（那种链路上任何人都能改写模型的回答）",
+         "bool", None),
     ]),
     ("外观", [
         ("ui.accent", "主题色", "换主色，整个界面跟着变；不用重启", "accent", None),

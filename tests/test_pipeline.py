@@ -265,6 +265,72 @@ def main() -> int:
     check("采集循环会持续检查超时", fake.blocks > 20, "喂了 " + str(fake.blocks) + " 块")
     check("超时后回到待命", agent._state == "idle", agent._state)
 
+
+    print("\n场景 5b：指令说得长，不会被丢掉")
+    # 老毛病：超时拿"说了多久"算（语音起点 + max_utterance_ms），
+    # 于是话说得长一点，到点直接回待命 —— 已经录到的一整段被扔了，
+    # 用户听到的是一声"叮"，然后助手又不理人了。
+    # 现在改成按"静了多久"算，而且到点也要把录到的内容交出去识别。
+    agent.mic = None
+    agent.cfg.agent.listen_timeout_ms = 8000
+    agent.cfg.agent.listen_hard_limit_ms = 60000
+    agent.cfg.agent.max_utterance_ms = 300        # 故意调得很小：旧代码在这里就会走人
+    agent._begin_listen("command")
+    agent._arm_listening()
+
+    class StubVad:
+        """只为输入检测准备的假 VAD：永远说"没听到人声"。"""
+
+        speech_detected = False
+
+        def feed(self, block):  # noqa: ANN001, ANN201
+            return None
+
+        def flush(self):  # noqa: ANN201
+            return None
+
+        def reset(self) -> None:
+            return
+
+    real_vad = agent.vad
+    agent.vad = StubVad()
+    agent._mark_voice(np.full(512, 0.05, dtype=np.float32))
+    check("电平够大就算用户在说话（不依赖 VAD）", agent._heard_speech)
+    agent._heard_speech = False
+    agent._last_voice_at = 0.0
+    agent._mark_voice(np.zeros(512, dtype=np.float32))
+    check("静音不会被当成说话", not agent._heard_speech)
+    agent.vad = real_vad
+
+    # 一直说、不停顿：旧代码会在 max_utterance_ms 之后回待命
+    agent._begin_listen("command")
+    agent._arm_listening()
+    speech = speak_to_pcm(agent, "现在几点了")
+    for _round in range(3):
+        feed(agent, np.concatenate([speech, speech]))
+        agent._check_timeout()
+        time.sleep(0.35)
+        agent._check_timeout()
+    check("一直在说话时不会回待命", agent._state == "listen", agent._state)
+    check("累计说话时长被记下来了", agent._voice_ms > 500, str(round(agent._voice_ms)))
+
+    # 说到超过硬上限：把已经录到的一段交出去，而不是丢掉
+    captured: list = []
+    real_utterance = agent._on_utterance
+    agent._on_utterance = lambda samples: captured.append(samples)  # type: ignore[assignment]
+    try:
+        agent.cfg.agent.listen_hard_limit_ms = 100
+        time.sleep(0.15)
+        agent._check_timeout()
+    finally:
+        agent._on_utterance = real_utterance   # type: ignore[assignment]
+    check("说到超时也要把录到的内容交出去识别",
+          bool(captured) and captured[0].size > 0,
+          str([int(s.size) for s in captured]))
+    agent._state = "idle"
+    agent.cfg.agent.listen_hard_limit_ms = 45000
+    agent.cfg.agent.max_utterance_ms = 15000
+
     print("\n场景 6：文本模式下敏感操作默认被拒绝")
     import voice_agent.tools as tools_mod
     from dataclasses import replace as dc_replace

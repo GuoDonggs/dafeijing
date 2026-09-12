@@ -30,6 +30,7 @@ import numpy as np
 
 from . import audio as audio_io
 from . import rules
+from . import security
 from . import tools
 from .brain import Brain
 from .config import Config
@@ -83,6 +84,10 @@ class VoiceAgent:
         self._listen_follow_up = False
         self._heard_speech = False
         self._speech_started_at = 0.0
+        # 输入检测用的状态：最后一次听到人声的时刻、累计说了多久。
+        # 超时判定从"说了多久"改成"静了多久"，全靠这两个值。
+        self._last_voice_at = 0.0
+        self._voice_ms = 0.0
         # 收音保护期：唤醒词和提示音的尾音还没散干净，这段音频不参与录音，
         # 否则会出现「喊完唤醒词，助手把唤醒词本身当成一条指令执行了」。
         # 按**样本数**而不是墙上时间来算：麦克风本来就是实时的，两者等价，
@@ -277,9 +282,14 @@ class VoiceAgent:
             "follow_up_ms": int(self.cfg.agent.follow_up_ms),
             "follow_up_mode": str(self.cfg.agent.follow_up_mode),
             "listen_timeout_ms": int(self.cfg.agent.listen_timeout_ms),
+            # 输入检测：界面据此显示「听到你开口了，慢慢说」
+            "listen_heard": bool(self._heard_speech),
+            "listen_ms": int(self._voice_ms),
             # 后台子代理 / 定时轮询：界面拿它显示「派出去的活还在跑」
             "subagents": self.brain.subagents.snapshot(),
             "watches": self.brain.watcher.snapshot(),
+            # 权限：界面拿它显示当前模式和"链路可不可信"
+            "security": security.snapshot(),
             "turns": self.turns,
             "mic_level": round(float(self.mic.level), 4) if self.mic else 0.0,
             "asr_rtf": round(self.asr.rtf, 4) if self.asr else 0.0,
@@ -349,10 +359,7 @@ class VoiceAgent:
                 # 还在保护期：丢掉唤醒词/提示音的尾音
                 self._guard_samples = max(0, self._guard_samples - int(block.size))
                 return
-            if self.vad.speech_detected:
-                self._heard_speech = True
-                if not self._speech_started_at:
-                    self._speech_started_at = time.monotonic()
+            self._mark_voice(block)
             utterance = self.vad.feed(block)
             if utterance is None:
                 return
@@ -361,36 +368,112 @@ class VoiceAgent:
                 return
             self._on_utterance(utterance)
 
-    def _check_timeout(self) -> None:
-        """唤醒了却没等来一句提问 → 自动回到待命，别一直占着麦克风。
+    def _mark_voice(self, block: np.ndarray) -> None:
+        """输入检测：这一小块音频里有没有人在说话。
 
-        两种情况都要兜住：
-        1. 一直没人说话 —— 到 listen_timeout_ms 就收工；
-        2. 听到了动静（咳嗽、翻书、电视声）但始终没形成完整句子 ——
-           从开口那一刻起再给「一整句话」的时间，到点同样收工。
-        早先的实现只要检测到过人声就永不过期，于是助手会一直卡在「正在听」。
+        两路一起看，缺一路都会漏：
+
+        - VAD 说有人在说 —— 最可靠，但它要攒够一小段才敢下结论；
+        - 电平高于 voice_floor —— 说话轻、离麦远的人 VAD 可能一直不触发，
+          只看 VAD 的话助手会认为"你没开口"，于是窗口提前过期走人。
+
+        顺便记录"最后一次听到人声的时刻"和累计说话时长，超时判定要用。
         """
-        if self._state != _LISTEN or self._listen_target != "command":
-            return
-        if not self._listen_started:
+        try:
+            voiced = self.vad.speech_detected
+        except Exception:  # noqa: BLE001 - VAD 读不到就当没听到
+            voiced = False
+        if not voiced:
+            samples = np.asarray(block, dtype=np.float32).reshape(-1)
+            if samples.size:
+                level = float(np.sqrt(np.mean(samples ** 2)))
+                voiced = level >= float(getattr(self.cfg.agent, "voice_floor", 0.008))
+        if not voiced:
             return
         now = time.monotonic()
-        if self._speech_started_at:
-            deadline = self._speech_started_at + self.cfg.agent.max_utterance_ms / 1000.0
-        else:
-            deadline = self._listen_started + self._listen_timeout_ms / 1000.0
-        if now <= deadline:
-            return
+        self._last_voice_at = now
+        self._voice_ms += block.size * 1000.0 / max(1, self.cfg.audio.sample_rate)
+        if not self._heard_speech:
+            self._heard_speech = True
+            self.log("[agent] 听到你开口了，慢慢说")
+        if not self._speech_started_at:
+            self._speech_started_at = now
+
+    def _stand_down(self, note: str = "（没听到你说话）") -> None:
+        """收工回待命（没形成指令）。"""
         self._state = _IDLE
         if self.vad is not None:
             self.vad.reset()
         if self._listen_follow_up:
             # 追问窗口静默结束：不要每次答完都“叮”一声，太吵
             self.log("[agent] 追问窗口结束，回到待命")
+            return
+        self.log("[agent] 等待超时，回到待命：" + note)
+        self._note("system", note)
+        self._cue("timeout")
+
+    def _flush_utterance(self) -> None:
+        """把 VAD 里已经录到的一段交出去识别 —— **不丢**。
+
+        这是这次改动的核心：以前到了时限就把状态清回待命，用户说了十几秒的
+        一段话直接没了（他听到的是一声"叮"，然后助手又回到待命）。
+        现在只有两种情况才会真的放弃：压根没听到人声，或者录到的比
+        min_speech_ms 还短（那确实不成句子）。
+        """
+        samples = None
+        try:
+            samples = self.vad.flush() if self.vad is not None else None
+        except Exception as exc:  # noqa: BLE001 - 收尾失败也不能卡住主循环
+            self.log("[agent] 收音收尾失败：" + str(exc)[:60])
+        min_samples = int(self.cfg.audio.sample_rate * self.cfg.agent.min_speech_ms / 1000)
+        if samples is None or samples.size < min_samples:
+            self._stand_down("（没听清，回到待命）")
+            return
+        self.log("[agent] 收尾，把已录到的 {:.1f} 秒交给识别".format(
+            samples.size / self.cfg.audio.sample_rate))
+        self._on_utterance(samples)
+
+    def _check_timeout(self) -> None:
+        """唤醒之后一直没等到一句完整的指令 → 该收尾就收尾。
+
+        判定分三段。**关键是别再拿"说了多久"当超时** —— 那正是
+        "话稍微长一点就被丢掉"的原因：
+
+        1. 一直没听到人说话 → listen_timeout_ms 到点回待命（原样保留）；
+        2. 听到了人声 → 计时基准换成**静音时长**：只要还在说就一直等，
+           停下来超过 max(min_silence*2, 0.8s) 才收尾（正常是 VAD 先给出整句，
+           这里是兜底：VAD 没切出句子时，把已经录到的一段交出去）；
+        3. 说个没完（超过 listen_hard_limit_ms，默认 45 秒）→ 不再等，
+           同样把已经录到的一段交出去识别，而不是丢掉重来。
+        """
+        if self._state != _LISTEN or self._listen_target != "command":
+            return
+        if not self._listen_started:
+            return
+        now = time.monotonic()
+        config = self.cfg.agent
+
+        if not self._heard_speech:
+            if now <= self._listen_started + self._listen_timeout_ms / 1000.0:
+                return
+            self._stand_down()
+            return
+
+        limit = int(getattr(config, "listen_hard_limit_ms", 45000))
+        if limit > 0 and now > self._listen_started + limit / 1000.0:
+            self.log("[agent] 这一轮已经说了 {:.0f} 秒，先按已经录到的内容处理".format(
+                now - self._listen_started))
+            self._flush_utterance()
+            return
+
+        quiet_for = now - max(self._last_voice_at, self._listen_started)
+        grace = max(0.8, config.min_silence_ms * 2 / 1000.0)
+        if quiet_for < grace:
+            return
+        if self._voice_ms >= config.min_speech_ms:
+            self._flush_utterance()
         else:
-            self.log("[agent] 等待超时，回到待命")
-            self._note("system", "（没听到你说话）")
-            self._cue("timeout")
+            self._stand_down("（没听到完整的句子）")
 
     # ───────────────────── 控制程序自己 ─────────────────────
 
@@ -590,6 +673,8 @@ class VoiceAgent:
         self._listen_started = time.monotonic()
         self._heard_speech = False
         self._speech_started_at = 0.0
+        self._last_voice_at = 0.0
+        self._voice_ms = 0.0
         # 防止上一轮的尾音被当成这一轮的开头（arm 时会重新设成完整保护期）
         self._guard_samples = int(self.cfg.audio.sample_rate * 0.15)
 
@@ -611,6 +696,8 @@ class VoiceAgent:
         self._listen_started = time.monotonic()
         self._heard_speech = False
         self._speech_started_at = 0.0
+        self._last_voice_at = 0.0
+        self._voice_ms = 0.0
         self._guard_samples = int(self.cfg.audio.sample_rate * 0.2)
 
     def _note(self, role: str, text: str) -> None:

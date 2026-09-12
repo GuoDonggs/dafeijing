@@ -176,12 +176,22 @@ def end_to_end() -> None:
             print("  [跳过] 拿不到前台焦点，键盘部分不测"
                   "（绝不能把字打到别的窗口里）")
             return
-        windows.type_text("大肥鲸 测试 123 abc")
+        try:
+            windows.type_text("大肥鲸 测试 123 abc")
+        except RuntimeError as exc:
+            # SendInput 返回 0：锁屏、安全桌面（UAC）、或者前台是更高权限的窗口。
+            # 那不是"工具坏了"，是系统此刻不接受模拟输入 —— 跳过，别报成失败。
+            print("  [跳过] 系统拒绝了键盘事件（" + str(exc)[:60] + "）")
+            return
         pump(25)
         printed = text_of()
         check("type_text 真的打进去了",
               "大肥鲸" in printed and "abc" in printed, "[" + printed + "]")
-        windows.press_keys("ctrl+a")
+        try:
+            windows.press_keys("ctrl+a")
+        except RuntimeError as exc:
+            print("  [跳过] 系统拒绝了组合键（" + str(exc)[:60] + "）")
+            return
         pump(8)
         windows.type_text("覆盖成功")
         pump(25)

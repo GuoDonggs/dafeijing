@@ -26,7 +26,12 @@ from .files import (
     search_files,
     write_file,
 )
-from .selfctl import new_session_tool, quit_self_tool, restart_self_tool
+from .selfctl import (
+    new_session_tool,
+    permission_mode_tool,
+    quit_self_tool,
+    restart_self_tool,
+)
 from .subagents import cancel_subagent_tool, spawn_subagent_tool, subagent_status_tool
 from .watches import list_watches_tool, start_watch_tool, stop_watch_tool
 from .system_info import get_time, system_info
@@ -105,6 +110,23 @@ _register(Tool(
     ),
     parameters=_params(reason={"type": "string", "description": "可选：为什么换话题"}),
     handler=new_session_tool,
+))
+
+_register(Tool(
+    name="permission_mode",
+    description=(
+        "查看或切换权限模式。用户说「进入只读模式」「恢复正常」「放开权限」时用它。"
+        "read-only = 只能查；workspace-write = 敏感操作先确认；"
+        "danger-full-access = 敏感操作直接做（关机和执行命令仍然要确认）。"
+        "**放宽只能由用户本人要求**，不能因为任务做不下去就自己提权。"
+    ),
+    parameters=_params(
+        mode={"type": "string",
+              "description": "read-only / workspace-write / danger-full-access，留空表示只查询"},
+        reason={"type": "string", "description": "为什么要改（会被念给用户听）"},
+    ),
+    handler=permission_mode_tool,
+    confirm=True,
 ))
 
 _register(Tool(

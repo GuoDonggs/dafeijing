@@ -33,6 +33,10 @@ TURN: dict = {"follow_up": False, "reason": ""}
 def reset_turn() -> None:
     TURN["follow_up"] = False
     TURN["reason"] = ""
+    # 新一轮对话：上一轮碰过外部内容的标记一起清掉（权限模式不清）
+    from .. import security  # noqa: PLC0415 - 避免包初始化期的循环导入
+
+    security.reset_turn()
 
 
 def keep_listening(reason: str = "") -> str:

@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 
-__all__ = ["set_self_handler", "new_session_tool", "restart_self_tool", "quit_self_tool"]
+__all__ = ["set_self_handler", "new_session_tool", "restart_self_tool", "quit_self_tool",
+           "permission_mode_tool"]
 
 _SELF_HANDLER: list = [None]
 
@@ -40,3 +41,28 @@ def restart_self_tool() -> str:
 def quit_self_tool() -> str:
     """退出助手程序。"""
     return _run("quit")
+
+
+def permission_mode_tool(mode: str = "", reason: str = "") -> str:
+    """查看或切换权限模式（只读 / 标准 / 放开）。
+
+    放宽必须由用户本人确认 —— 工具本身带 confirm，确认提示里会原样带上
+    模型给的理由（和 DSH 的 escalation 审计理由一个意思）。
+    """
+    from .. import security
+
+    target = str(mode or "").strip().lower()
+    snapshot = security.snapshot()
+    if not target:
+        return ("现在是「" + str(snapshot["label"]) + "」模式："
+                + {"read-only": "只能查，写和操作都会被拒绝",
+                   "workspace-write": "敏感操作会先问你一句",
+                   "danger-full-access": "敏感操作直接做，但关机和执行命令仍要确认",
+                   }.get(str(snapshot["mode"]), ""))
+    was = security.mode()
+    ok, message = security.set_mode(target, reason)
+    if not ok:
+        return message
+    if was != security.mode() and str(reason or "").strip():
+        return message + "（原因：" + str(reason)[:40] + "）"
+    return message

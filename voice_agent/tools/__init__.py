@@ -26,11 +26,13 @@ from dataclasses import replace as _replace
 from pathlib import Path
 from typing import Any, Callable
 
+from .. import security
 from ._shared import TURN, reset_turn
 from .apps import open_app, open_url, web_search
 from .files import list_files, read_file, recall, remember, search_files
 from .selfctl import (
     new_session_tool,
+    permission_mode_tool,
     quit_self_tool,
     restart_self_tool,
     set_self_handler,
@@ -260,6 +262,15 @@ def describe() -> str:
     return "\n".join(lines)
 
 
+def _audit_args(args: Any, limit: int = 160) -> str:
+    """审计里记参数，但要截断：别把一整篇文件内容写进日志。"""
+    try:
+        text = json.dumps(args, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(args)
+    return text[:limit]
+
+
 def call(name: str, arguments: Any = None, on_confirm: Callable[[str], bool] | None = None) -> str:
     """执行一个工具，只要那句话（大多数调用方只关心这个）。"""
     return call_result(name, arguments, on_confirm).text
@@ -290,11 +301,43 @@ def call_result(name: str, arguments: Any = None,
     if not isinstance(args, dict):
         args = {}
 
-    if tool.confirm:
+    # ── 权限闸门 ──
+    # 判定放在这里，而不是让每个工具自己判断：模型（以及它背后的中转站）
+    # 说不上话的地方只有这一处。结果词汇沿用 DSH 的审批语义：
+    # allowed-once / rejected / unavailable。
+    decision = security.check(tool, args)
+    if not decision.allowed and not decision.needs_confirm:
+        security.audit({"event": "blocked", "tool": tool.name, "code": decision.code,
+                        "tier": decision.tier, "mode": security.mode(),
+                        "tainted": security.tainted(), "args": _audit_args(args)})
+        return ToolResult(decision.text, False, "denied")
+
+    if decision.needs_confirm or tool.confirm:
         if on_confirm is None:
+            # 拿不到确认通道 = 拒绝（和 DSH 的 unavailable 一样，fail closed）
+            security.audit({"event": "unavailable", "tool": tool.name,
+                            "tier": decision.tier, "mode": security.mode()})
             return ToolResult(CANCEL_REPLY, False, "denied")
-        if not on_confirm(tool.confirm_question(args)):
+        # 限流：一分钟最多问几次、同一个操作最多连着问几次。
+        # 中转站最爱的就是"反复构造危险调用，把用户问到麻木"。
+        ok, why = security.note_prompt(tool.name)
+        if not ok:
+            security.audit({"event": "rate_limited", "tool": tool.name})
+            return ToolResult(security.DELIMITER.format(why) + " " + security.ESCALATION_HINT,
+                              False, "denied")
+        question = tool.confirm_question(args)
+        if security.tainted():
+            # 这一轮碰过网页/文件/屏幕——那些内容里可能藏着"去执行 xxx"的指令
+            question = "注意，这是看过外部内容之后发起的操作。" + question
+        if not on_confirm(question):
+            security.audit({"event": "rejected", "tool": tool.name, "tier": decision.tier,
+                            "mode": security.mode(), "tainted": security.tainted(),
+                            "args": _audit_args(args)})
             return ToolResult(CANCEL_REPLY, False, "denied")
+        # 一次确认只够一次调用：这里没有"记住你同意过"的状态可以重放
+        security.audit({"event": "allowed-once", "tool": tool.name, "tier": decision.tier,
+                        "mode": security.mode(), "tainted": security.tainted(),
+                        "args": _audit_args(args)})
 
     try:
         return ToolResult(str(tool.handler(**args)))
@@ -358,6 +401,7 @@ _BUILTIN_TITLES = {
     "new_session": "开新会话",
     "restart_self": "重启程序",
     "quit_self": "退出程序",
+    "permission_mode": "调整权限",
     "start_watch": "盯着看",
     "list_watches": "看进度",
     "stop_watch": "别盯了",

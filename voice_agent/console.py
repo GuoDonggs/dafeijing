@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from . import __version__, audio as audio_io, tools
+from . import __version__, audio as audio_io, security, tools
 from . import voices as voice_table
 from .agent import VoiceAgent
 from .config import (
@@ -117,8 +117,17 @@ class Console:
         if not self.config_path.is_file() and EXAMPLE_CONFIG_PATH.is_file():
             # 首次运行：没有 config.yaml 就用示例兜底，界面里点保存才真正落盘
             self.log("[ui] 没有 " + self.config_path.name + "，先按示例配置运行")
-            return Config.load(EXAMPLE_CONFIG_PATH)
-        return Config.load(self.config_path)
+            config = Config.load(EXAMPLE_CONFIG_PATH)
+        else:
+            config = Config.load(self.config_path)
+        security.configure(config)
+        if not security.snapshot()["transport_ok"]:
+            # 这条必须吵一点：明文中转站能改写模型的回答，也就能塞工具调用
+            self.log("[安全] " + str(security.snapshot()["transport_note"])
+                     + " → 已自动降为「只读」模式。"
+                     + "要照用请把 security.allow_insecure 设成 true（不建议）")
+            security.audit({"event": "transport_downgrade", "mode": security.mode()})
+        return config
 
     def log(self, message: str) -> None:
         self._log_seq += 1
@@ -361,6 +370,10 @@ class Console:
             "ui.accent": cfg.ui.accent,
             "ui.accent_hex": cfg.ui.accent_hex(),
             "ui.show_turn": cfg.ui.show_turn,
+            # 权限：模式与两条限流
+            "security.mode": cfg.security.mode,
+            "security.allow_insecure": cfg.security.allow_insecure,
+            "security.max_prompts_per_minute": cfg.security.max_prompts_per_minute,
             "llm.reasoning_effort": cfg.llm.reasoning_effort,
             "llm.vision_max_side": cfg.llm.vision_max_side,
             "llm.extra_body": "（高级：直接编辑 YAML）" if cfg.llm.extra_body else "",
@@ -562,6 +575,8 @@ class Console:
         except ConfigError as exc:
             return {"ok": False, "error": str(exc)}
         self.cfg.update_from(fresh)
+        # 权限设置也是"改完立刻生效"，而且它决定工具层放不放行
+        security.configure(self.cfg)
         self._apply_voice_live()
         # 看图分辨率是"下次截图时读一次"，改完立刻推给工具层
         tools.set_vision_max_side(self.cfg.llm.vision_max_side)
@@ -832,6 +847,7 @@ class Console:
             "input_device": None, "output_device": None,
             "transcript": [], "follow_up_ms": int(self.cfg.agent.follow_up_ms),
             "listen_timeout_ms": int(self.cfg.agent.listen_timeout_ms),
+            "listen_heard": False, "listen_ms": 0,
             "subagents": {"enabled": bool(self.cfg.agent.subagent_enabled),
                           "total": 0, "running": 0, "text": ""},
             "watches": {"total": 0, "running": 0, "text": ""},
@@ -851,4 +867,14 @@ class Console:
             # 有设置改了但还没重启引擎：主界面据此弹重启提示
             "restart_needed": bool(self.missing_restart),
             "restart_items": self.pending_restart(),
+            # 权限状态：界面上要能一眼看到"现在是什么模式、链路可不可信"
+            "security": security.snapshot(),
         }
+
+    def set_permission_mode(self, value: str) -> dict:
+        """换权限模式（界面上的用户操作，不需要再确认一遍）。"""
+        ok, message = security.set_mode(value, "界面操作")
+        if not ok:
+            return {"ok": False, "error": message}
+        self.log("[ui] " + message)
+        return {"ok": True, "message": message, "mode": security.mode()}

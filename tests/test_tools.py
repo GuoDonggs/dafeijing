@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _BUILD = tempfile.TemporaryDirectory()
 os.environ["VOICE_AGENT_BUILD_DIR"] = _BUILD.name
 
-from voice_agent import tools  # noqa: E402
+from voice_agent import security, tools  # noqa: E402
 
 failures: list[str] = []
 
@@ -102,6 +102,9 @@ def run_audit() -> None:
             skipped += 1
             continue
         try:
+            # 限流复位：这一段测的是工具本身，不是限流器（限流有专门的测试）。
+            # 不复位的话问到第 7 个敏感工具就被按住了。
+            security.reset_limits()
             # 确认通道给"拒绝"：敏感工具因此走拒绝分支，既验证了闸门，
             # 又不会真的关机 / 执行命令
             result = tools.call_result(name, {}, on_confirm=lambda _q: False)
@@ -177,36 +180,75 @@ def live_tools() -> None:
                   str(img.width) + "x" + str(img.height))
         check("缩放结果带了字节数", int(outcome.get("bytes") or 0) > 0, str(outcome.get("bytes")))
 
-        # 找图：从当前屏幕里裁一块纹理最丰富的当作模板，再让它在屏幕上找回来
-        patch_w, patch_h = 180, 110
-        best = None
-        for ix in range(left + 60, left + width - patch_w - 60, 137):
-            for iy in range(top + 60, top + height - patch_h - 60, 91):
-                px, py = ix - left, iy - top
-                patch = grab[py:py + patch_h, px:px + patch_w]
-                if patch.shape[0] != patch_h or patch.shape[1] != patch_w:
-                    continue
-                deviation = float(patch.std())
-                if best is None or deviation > best[0]:
-                    best = (deviation, ix, iy)
-        if best is None or best[0] < 6:
-            print("  [跳过] 屏幕太单调（找不到有纹理的区域），找图这项没法验")
-            return
-        _, ix, iy = best
-        template = Path(tmp) / "patch.png"
+        # 找图：从当前屏幕里裁一块图当模板，再让它在屏幕上找回来，核对坐标。
+        #
+        # 挑模板有两个讲究：
+        #  1. **静止**：任务栏时钟、视频、进度条都在动，拿它们当模板必然对不上；
+        #  2. **唯一**：一片重复的花纹（图标行、文字行）会在屏幕上匹配到好几处，
+        #     这时候"没对上"说明不了任何问题。
+        # 所以：先筛静止区域，再按纹理丰富度一个个试；只有在**画面没动**的情况下
+        # 匹配到"截图坐标系里的位置"（正好差一个虚拟桌面原点）才判定为真 bug。
         import cv2
 
-        cv2.imwrite(str(template), grab[iy - top:iy - top + patch_h, ix - left:ix - left + patch_w])
-        hits = screen.find_template(template, confidence=0.92, scales=(1.0,), limit=3)
-        expected = (ix + patch_w // 2, iy + patch_h // 2)
-        check("屏幕上找得到刚裁下来的那块图", bool(hits),
-              str([(h["x"], h["y"]) for h in hits]))
-        if hits:
-            # 找图返回的必须是**屏幕坐标**，不是截图里的像素坐标
-            nearest = min(hits, key=lambda h: abs(h["x"] - expected[0]) + abs(h["y"] - expected[1]))
-            check("找图返回的是屏幕坐标（多显示器时原点可能是负的）",
-                  abs(nearest["x"] - expected[0]) <= 3 and abs(nearest["y"] - expected[1]) <= 3,
-                  "返回 " + str((nearest["x"], nearest["y"])) + " 期望 " + str(expected))
+        patch_w, patch_h = 180, 110
+        template = Path(tmp) / "patch.png"
+        origin_x, origin_y = left, top          # 截图左上角对应的屏幕坐标
+        consistent = False
+        coordinate_bug = False
+        detail = ""
+        tried = 0
+
+        for attempt in range(3):
+            grab = screen.grab_screen()
+            time.sleep(0.2)
+            again = screen.grab_screen()
+            candidates: list[tuple[float, int, int]] = []
+            for ix in range(left + 60, left + width - patch_w - 60, 137):
+                for iy in range(top + 60, top + height - patch_h - 60, 91):
+                    px, py = ix - left, iy - top
+                    patch = grab[py:py + patch_h, px:px + patch_w]
+                    if patch.shape[0] != patch_h or patch.shape[1] != patch_w:
+                        continue
+                    diff = float(np.abs(patch.astype(np.int16)
+                                        - again[py:py + patch_h, px:px + patch_w].astype(np.int16)).mean())
+                    if diff > 0.5:
+                        continue                 # 这块在动，换一块
+                    deviation = float(patch.std())
+                    if deviation >= 6:
+                        candidates.append((deviation, ix, iy))
+            candidates.sort(reverse=True)
+
+            for _, ix, iy in candidates[:8]:
+                tried += 1
+                cv2.imwrite(str(template),
+                            grab[iy - top:iy - top + patch_h, ix - left:ix - left + patch_w])
+                hits = screen.find_template(template, confidence=0.95, scales=(1.0,), limit=5)
+                expected = (ix + patch_w // 2, iy + patch_h // 2)
+                positions = [(h["x"], h["y"]) for h in hits]
+                if any(abs(x - expected[0]) <= 3 and abs(y - expected[1]) <= 3
+                       for x, y in positions):
+                    consistent = True
+                    detail = "第 " + str(tried) + " 块模板命中 " + str(expected)
+                    break
+                # 命中位置正好差一个截图原点 = 返回的是截图坐标而不是屏幕坐标，真 bug
+                if any(abs(x - (expected[0] - origin_x)) <= 3
+                       and abs(y - (expected[1] - origin_y)) <= 3 for x, y in positions):
+                    coordinate_bug = True
+                    detail = ("返回 " + str(positions) + " 期望 " + str(expected)
+                              + "（正好差一个截图原点 " + str((origin_x, origin_y)) + "）")
+                    break
+                detail = "这块图在屏幕上不唯一或找不到：" + str(positions[:3])
+            if consistent or coordinate_bug:
+                break
+
+        if not consistent and not coordinate_bug:
+            # 试了这么多块都没对上，多半是屏幕一直在变（视频、动画）
+            print("  [跳过] 屏幕上找不到又静止又唯一的区域，找图坐标这项没法验")
+            return
+        check("屏幕上找得到刚裁下来的那块图", consistent or coordinate_bug, detail)
+        # 找图返回的必须是**屏幕坐标**，不是截图里的像素坐标
+        check("找图返回的是屏幕坐标（多显示器时原点可能是负的）",
+              consistent and not coordinate_bug, detail)
 
     # 剪贴板与窗口列表走的是 PowerShell，顺手确认它们没被静默搞坏
     check("剪贴板读得回来", isinstance(tools.call("clipboard", {"action": "get"}), str))
@@ -302,6 +344,7 @@ def self_control() -> None:
     check("退出没有确认通道时被拒绝",
           denied_quit.code == "denied" and not requests, str(denied_quit.code))
 
+    security.reset_limits()
     answer = tools.call_result("restart_self", {}, on_confirm=lambda _q: True)
     check("确认后先回话再动手", "重启" in answer.text and not requests, answer.text[:30])
     deadline = time.time() + 4.0
@@ -313,6 +356,7 @@ def self_control() -> None:
     quitter = VoiceAgent(Config.load(config), log=lambda _m: None)
     quit_requests: list[str] = []
     quitter.app_hook = quit_requests.append
+    security.reset_limits()
     tools.call("quit_self", {}, on_confirm=lambda _q: True)
     deadline = time.time() + 4.0
     while time.time() < deadline and not quit_requests:

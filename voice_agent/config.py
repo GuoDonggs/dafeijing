@@ -269,6 +269,23 @@ def resolve_accent(value: Any) -> str:
 
 
 @dataclass
+class SecurityCfg:
+    """权限：这个助手能动本机的什么。见 voice_agent/security.py 的长注释。"""
+
+    # 只读 / 标准 / 放开。名字沿用 DSH 的 sandbox 词表。
+    mode: str = "workspace-write"
+    # 明文 HTTP 的模型地址要不要照用。默认 False：那种链路上任何人都能
+    # 改写模型的回答（也就能塞工具调用），所以自动降到只读。
+    allow_insecure: bool = False
+    # 一分钟内最多弹几次确认（防"疲劳战术"），0 = 不限
+    max_prompts_per_minute: int = 6
+    # 同一个操作连着要几次就拦下，0 = 不限
+    max_same_action: int = 3
+    # 审计日志（build/audit.jsonl）
+    audit: bool = True
+
+
+@dataclass
 class UiCfg:
     # 主色：写预设名（blue / teal / …）或任意 #RRGGBB。空 = 用默认蓝。
     accent: str = ""
@@ -468,9 +485,16 @@ class AgentCfg:
     # 收音/确认/结束的提示音，让用户知道什么时候该说话
     cues: bool = True
     max_utterance_ms: int = 15000
+    # 一轮"听指令"最多听多久（毫秒）。到点不是丢掉重来，而是把已经录到的
+    # 那一段交给识别 —— 说得长不该被惩罚。0 = 不限。
+    listen_hard_limit_ms: int = 45000
     min_silence_ms: int = 700
     min_speech_ms: int = 250
     vad_threshold: float = 0.5
+    # 输入检测的电平门槛：指声音量（RMS）高于它就算"有人在说话"。
+    # 有些人说话轻、或者离麦克风远，光靠 VAD 会以为没人开口 ——
+    # 于是"等你说完"的窗口提前过期，话说到一半助手就走了。
+    voice_floor: float = 0.008
     # ── 子代理 ──
     # 把"要跑好几步"的事丢到后台单独做：主对话先回一句"我去查"，
     # 做完再播报结果。只有长任务才会用到它。
@@ -509,6 +533,7 @@ class Config:
     tts: TtsCfg
     llm: LlmCfg
     agent: AgentCfg
+    security: SecurityCfg
     ui: UiCfg
     raw: dict
 
@@ -679,9 +704,11 @@ class Config:
                 follow_up_ms=int(_get(raw, "agent.follow_up_ms", 6000)),
                 cues=bool(_get(raw, "agent.cues", True)),
                 max_utterance_ms=int(_get(raw, "agent.max_utterance_ms", 15000)),
+                listen_hard_limit_ms=int(_get(raw, "agent.listen_hard_limit_ms", 45000)),
                 min_silence_ms=int(_get(raw, "agent.min_silence_ms", 700)),
                 min_speech_ms=int(_get(raw, "agent.min_speech_ms", 250)),
                 vad_threshold=float(_get(raw, "agent.vad_threshold", 0.5)),
+                voice_floor=float(_get(raw, "agent.voice_floor", 0.008)),
                 subagent_enabled=bool(_get(raw, "agent.subagent_enabled", True)),
                 subagent_max=int(_get(raw, "agent.subagent_max", 3)),
                 subagent_rounds=int(_get(raw, "agent.subagent_rounds", 8)),
@@ -695,6 +722,13 @@ class Config:
                     no=_str_list(_get(raw, "agent.confirm.no", None), confirm_defaults.no),
                     prompt=str(_get(raw, "agent.confirm.prompt", confirm_defaults.prompt)),
                 ),
+            ),
+            security=SecurityCfg(
+                mode=str(_get(raw, "security.mode", "workspace-write") or "workspace-write"),
+                allow_insecure=bool(_get(raw, "security.allow_insecure", False)),
+                max_prompts_per_minute=int(_get(raw, "security.max_prompts_per_minute", 6)),
+                max_same_action=int(_get(raw, "security.max_same_action", 3)),
+                audit=bool(_get(raw, "security.audit", True)),
             ),
             ui=UiCfg(
                 accent=str(_get(raw, "ui.accent", "") or ""),
