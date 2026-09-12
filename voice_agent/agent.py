@@ -932,14 +932,14 @@ class VoiceAgent:
         return 0, ""
 
     def _confirm_for(self, token: "TurnToken"):
-        """把确认通道绑到这一轮的 token 上（工具层只认 (question, fingerprint)）。"""
+        """把确认通道绑到这一轮的 token 上（工具层按签名传 question/fingerprint/group）。"""
 
-        def ask(question: str, fingerprint: str = "") -> bool:
-            return self._ask_confirm(question, fingerprint, token)
+        def ask(question: str, fingerprint: str = "", group: str = "") -> bool:
+            return self._ask_confirm(question, fingerprint, group, token)
 
         return ask
 
-    def _ask_confirm(self, question: str, fingerprint: str = "",
+    def _ask_confirm(self, question: str, fingerprint: str = "", group: str = "",
                      token: "TurnToken | None" = None) -> bool:
         """敏感操作前的语音确认：问一句，听一句，再判断同意与否。
 
@@ -969,6 +969,15 @@ class VoiceAgent:
             self.log("[agent] 这一步刚才已经确认过（" + ("同意" if remembered else "拒绝")
                      + "），不再重复问")
             return remembered
+        # 同一条指令里，同一类操作（比如鼠标）已经同意过一次 → 不再问第二次。
+        # "把窗口拖过去、再拖一下" 是一条指令里的连续动作，每个都问一遍没法用。
+        # 只复用**同意**：拒绝某一次不等于拒绝这一类；换一条指令也会重新问
+        # （_confirm_memory 在 _handle_command 开头清空）。
+        group_key = ("group:" + group) if group else ""
+        if group_key and self._confirm_memory.get(group_key):
+            self.log("[agent] 这一轮的「" + group + "」刚才已经同意过，不再重复问")
+            self._confirm_memory[key] = True
+            return True
         answer = ""
         for attempt in range(2):
             # 先清队列**再开口**：上一句确认的迟到回答（用户答慢了、
@@ -1021,6 +1030,9 @@ class VoiceAgent:
             self._confirm_memory[key] = False
             return False
         self._confirm_memory[key] = bool(verdict)
+        if verdict and group_key:
+            # 只记"同意"：这样"不要拖"不会把同一条指令里后面那个点击也一起否掉
+            self._confirm_memory[group_key] = True
         return bool(verdict)
 
     def _confirm_verdict(self, answer: str) -> bool | None:

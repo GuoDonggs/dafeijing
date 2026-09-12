@@ -195,6 +195,44 @@ def main() -> int:
     check("记录了限流", "rate_limited" in text)
     check("记录了明文链路降级", "transport_downgrade" in text)
 
+    print("\n放开模式：声明了 confirm 的工具也不再问")
+    # 用户的抱怨："我都设成完全开放了，拖个鼠标还要确认"。根因是工具层那句
+    # `decision.needs_confirm or tool.confirm` —— 后半句让"模式说了算"永远不生效。
+    from voice_agent.tools import Tool as _Tool
+
+    original_drag = tools.REGISTRY["mouse_drag"]
+    tools.register(_Tool(
+        name="mouse_drag", title="拖拽鼠标", description="测试用：不会真的拖",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda **_kw: "拖好了", confirm=True), replace=True)
+    try:
+        drag = tools.REGISTRY["mouse_drag"]
+        check("鼠标工具带了操作类别（同类只问一次靠它）",
+              drag.group == "鼠标操作", drag.group)
+        security.configure(make_config("danger-full-access"))
+        security.reset_limits()
+        check("放开模式下拖拽不需要确认", not security.check(drag).needs_confirm)
+        asked: list = []
+        outcome = tools.call("mouse_drag", {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+                             on_confirm=lambda *a: (asked.append(a), True)[1])
+        check("真的调用一次也没问", asked == [], str(asked))
+        check("而且确实执行了", str(outcome) == "拖好了", str(outcome))
+        check("底线工具不受影响：放开模式下执行命令仍要确认",
+              security.check(tools.REGISTRY["run_command"]).needs_confirm)
+        # 这一条是安全回归：permission_mode 是"用户本人授权"的唯一通道，
+        # 它必须任何模式下都问 —— 不能因为"放开模式不问"就被顺手放过。
+        check("权限工具在放开模式下仍然要确认（不能靠模式悄悄提权）",
+              security.check(tools.REGISTRY["permission_mode"]).needs_confirm)
+        security.configure(make_config("workspace-write"))
+        security.reset_limits()
+        check("标准模式下拖拽仍然要先确认", security.check(drag).needs_confirm)
+        security.configure(make_config("read-only"))
+        check("只读模式下鼠标操作直接拒绝（连问都不问）",
+              security.check(drag).code == "denied")
+    finally:
+        tools.REGISTRY["mouse_drag"] = original_drag
+        security.configure(make_config("workspace-write"))
+
     print("\n参数坏掉时绝不拿默认值去调工具")
     # 模型的 arguments 被截断（max_tokens、网关只回半截 JSON）时，以前会
     # 当成 {} 直接调 handler —— 而 power 的默认动作是**关机**。这条断言守住它。

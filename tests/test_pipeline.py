@@ -361,6 +361,42 @@ def main() -> int:
           agent._action_words("要执行命令，确认吗？", ask=True) == "要不要执行命令？",
           agent._action_words("要执行命令，确认吗？", ask=True))
 
+    # 4d 同一条指令里，同一**类**操作只问一次
+    # 用户的抱怨："拖一下问一遍、再拖一下又问一遍"。语音里"把窗口拖过去、
+    # 再把右边那条也拖一下"是一条指令，每个动作都弹确认就没法用了。
+    print("\n场景 4d：同一条指令里的鼠标操作只问一次")
+    agent.cfg.agent.confirm.timeout_ms = 3000
+    agent._confirm_memory.clear()
+    while not agent._confirm_q.empty():
+        agent._confirm_q.get_nowait()
+    spoken.clear()
+    answer_later("确认")
+    first = agent._ask_confirm("要拖拽鼠标，确认吗？", "mouse_drag|{x1:1}", "鼠标操作")
+    asked = len(spoken)
+    second = agent._ask_confirm("要拖拽鼠标，确认吗？", "mouse_drag|{x1:2}", "鼠标操作")
+    check("第一次拖拽要问一句", first is True and asked >= 1, str(asked))
+    check("同一条指令里第二次拖拽不再问", second is True and len(spoken) == asked,
+          "问过 " + str(len(spoken)) + " 次")
+    check("复用记忆时连收音都不用（队列里没有残留）", agent._confirm_q.empty())
+    check("类别之外的操作不会跟着免问",
+          agent._confirm_memory.get("group:鼠标操作") is True
+          and agent._confirm_memory.get("group:键盘输入") is None)
+
+    # 拒绝某一次，不等于拒绝这一类：用户说"别拖"之后，后面那个点击还得问
+    agent._confirm_memory.clear()
+    while not agent._confirm_q.empty():
+        agent._confirm_q.get_nowait()
+    spoken.clear()
+    answer_later("取消")
+    rejected = agent._ask_confirm("要拖拽鼠标，确认吗？", "mouse_drag|{x1:3}", "鼠标操作")
+    answer_later("确认")
+    again = agent._ask_confirm("要拖拽鼠标，确认吗？", "mouse_drag|{x1:4}", "鼠标操作")
+    check("拒绝一次不会被当成拒绝这一类（下一个还会问）",
+          rejected is False and again is True, str((rejected, again)))
+    check("只有「同意」会被记进类别",
+          agent._confirm_memory.get("mouse_drag|{x1:3}") is False
+          and agent._confirm_memory.get("group:鼠标操作") is True)
+
     # 词表判定：**否定说法里也含「行 / 是 / 好」这些肯定字**，
     # 以前是 `word in answer` 的子串匹配，实测「不太行」「不是」全被判成同意 ——
     # 而确认是整个权限模型里唯一的人工闸门，判反了就是关机被放行。

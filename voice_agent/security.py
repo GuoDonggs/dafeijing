@@ -341,6 +341,12 @@ def check(tool: Any, args: Any = None) -> Decision:
         return Decision(code="denied", tier=tier, reason="deny_tools",
                         text=DELIMITER.format("「" + name + "」被设置成了禁止使用，这条不能执行"))
     if tier == "read":
+        # 只读档里也有"必须问一句"的：permission_mode（改权限只能由用户点头）。
+        # 它必须**任何模式下都问** —— 那是"用户本人授权"的唯一通道。
+        # 以前这一条是靠工具层的 `or tool.confirm` 兜的，于是"放开模式下
+        # 不再重复问"这类判断就没法只由模式决定；现在收到这里来。
+        if bool(getattr(tool, "confirm", False)):
+            return Decision(code="needs_confirm", needs_confirm=True, tier=tier)
         return Decision(tier=tier)
     if current == "read-only":
         audit({"event": "denied", "tool": name, "tier": tier, "mode": current,

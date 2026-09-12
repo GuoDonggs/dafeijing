@@ -109,6 +109,10 @@ class Tool:
     # LLM 模式不依赖它（模型自己看 description 判断），但没有 API Key 时
     # 它是自定义技能唯一能被「说出来」的入口。
     triggers: tuple = ()
+    #: 操作类别（例如「鼠标」）：**同一条指令里，同一类操作只问一次**。
+    #: 语音场景下"拖一下、再点一下、再拖一下"是一条指令的连续动作，
+    #: 每次都弹确认等于没法用；但跨指令必须重新问（一轮结束就清空）。
+    group: str = ""
     #: 用途标签：**同一件事有好几种做法时**，模型靠它一眼挑对的那个。
     #: 会写在给模型的说明最前面（【找图/本地/不花钱】…），词表见 _TAGS_DOC。
     tags: tuple = ()
@@ -265,6 +269,10 @@ def register(tool: Tool, replace: bool = False) -> None:
         tags = _BUILTIN_TAGS.get(tool.name, ())
         if tags:
             changes["tags"] = tags
+    if not tool.group:
+        group = _BUILTIN_GROUPS.get(tool.name, "")
+        if group:
+            changes["group"] = group
     if changes:
         tool = _replace(tool, **changes)
     REGISTRY[tool.name] = tool
@@ -445,12 +453,19 @@ def tool_fingerprint(name: str, args: Any) -> str:
     return name + "|" + payload[:400]
 
 
-def _ask_human(on_confirm: Callable, question: str, fingerprint: str) -> bool:
-    """问用户。确认通道愿意接收指纹就带上（引擎用它做"同一操作只问一次"）。"""
+def _ask_human(on_confirm: Callable, question: str, fingerprint: str,
+               group: str = "") -> bool:
+    """问用户。确认通道愿意接收就带上**指纹**和**操作类别**。
+
+    引擎用它们做两件事：同一个操作不重复问；同一条指令里同一类操作只问一次
+    （见 _BUILTIN_GROUPS）。按签名传参：只收一个参数的老通道照样能用。
+    """
     try:
         parameters = inspect.signature(on_confirm).parameters
     except (TypeError, ValueError):
         parameters = {}
+    if len(parameters) >= 3:
+        return bool(on_confirm(question, fingerprint, group))
     if len(parameters) >= 2:
         return bool(on_confirm(question, fingerprint))
     return bool(on_confirm(question))
@@ -523,7 +538,10 @@ def call_result(name: str, arguments: Any = None,
                         "tainted": security.tainted(), "args": _audit_args(args)})
         return ToolResult(decision.text, False, "denied")
 
-    if decision.needs_confirm or tool.confirm:
+    # 要不要问，**完全听 check() 的**（它知道当前模式、底线名单、额外名单）。
+    # 以前这里还挂着一个 `or tool.confirm`，于是"放开模式下一律不问"永远不生效：
+    # 声明了 confirm 的工具（拖鼠标、开始盯梢…）在最宽的模式下照样每次都问。
+    if decision.needs_confirm:
         if on_confirm is None:
             # 拿不到确认通道 = 拒绝（和 DSH 的 unavailable 一样，fail closed）
             security.audit({"event": "unavailable", "tool": tool.name,
@@ -544,7 +562,7 @@ def call_result(name: str, arguments: Any = None,
         if security.tainted():
             # 这一轮碰过网页/文件/屏幕——那些内容里可能藏着"去执行 xxx"的指令
             question = "注意，这是看过外部内容之后发起的操作。" + question
-        if not _ask_human(on_confirm, question, fingerprint):
+        if not _ask_human(on_confirm, question, fingerprint, tool.group):
             security.audit({"event": "rejected", "tool": tool.name, "tier": decision.tier,
                             "mode": security.mode(), "tainted": security.tainted(),
                             "args": _audit_args(args)})
@@ -786,6 +804,24 @@ _BUILTIN_TAGS: dict[str, tuple] = {
     "permission_mode": ("权限", "查或切"),
     "restart_self": ("程序自己", "重启", "要确认"),
     "quit_self": ("程序自己", "退出", "要确认"),
+}
+
+#: 操作类别：**同一条指令里，同一类操作只问一次**。
+#:
+#: 语音场景里"把窗口拖到左边、再拖一下右边那条""点这里、再点那里"往往是一条
+#: 指令里的连续动作；每个动作都弹一次确认，用户就没法用了（他刚说完"确认"，
+#: 下一个动作又来问一遍）。但**换一条指令必须重新问** —— 确认记忆一轮结束就清空。
+#:
+#: 只给"同一件事会连着做很多次"的类别打，而且只让**同意**在类别内复用：
+#: 拒绝某一次不等于拒绝这一类。
+_BUILTIN_GROUPS: dict[str, str] = {
+    "mouse_drag": "鼠标操作",
+    "mouse_click": "鼠标操作",
+    "click_image": "鼠标操作",
+    "mouse_move": "鼠标操作",
+    "mouse_scroll": "鼠标操作",
+    "type_text": "键盘输入",
+    "press_keys": "键盘输入",
 }
 
 SKILL_INFOS: list = []
