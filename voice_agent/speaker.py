@@ -288,12 +288,16 @@ class Voiceprint:
         self._set_progress(state="recording", seconds=0.0, speech=0.0, level=0.0,
                            left=round(seconds, 1), hint="请说话")
         device = audio_io.resolve_device(self.cfg.audio.input_device, "input")
+        # 和 agent 那边用**同一个**增益：声纹体检按 RMS 判断"有没有在说话"，
+        # 少了增益，说话轻或离麦远的人会被判成"没开口"，怎么录都过不了。
         mic = audio_io.Mic(device=device, sample_rate=rate,
-                           block_size=self.cfg.audio.block_size)
+                           block_size=self.cfg.audio.block_size,
+                           gain=self.cfg.audio.input_gain)
         mic.start()
         try:
             chunks: list[np.ndarray] = []
             started = time.monotonic()
+            speech_samples = 0
             while True:
                 elapsed = time.monotonic() - started
                 if elapsed >= seconds:
@@ -301,12 +305,18 @@ class Voiceprint:
                 block = mic.read(timeout=0.2)
                 if block is None:
                     continue
-                chunks.append(np.asarray(block, dtype=np.float32).reshape(-1))
-                if chunks:
-                    recent = np.concatenate(chunks[-8:])
-                    level = float(np.sqrt(np.mean(recent ** 2))) if recent.size else 0.0
-                    self._set_progress(seconds=round(elapsed, 1), level=round(min(1.0, level * 8), 3),
-                                       left=round(max(0.0, seconds - elapsed), 1))
+                samples = np.asarray(block, dtype=np.float32).reshape(-1)
+                chunks.append(samples)
+                level = float(np.sqrt(np.mean(samples ** 2))) if samples.size else 0.0
+                if level >= SPEECH_RMS:
+                    speech_samples += samples.size
+                self._set_progress(seconds=round(elapsed, 1), level=round(min(1.0, level * 8), 3),
+                                   left=round(max(0.0, seconds - elapsed), 1))
+                # 说满 MIN_SPEECH_S、而且已经录够 2.5 秒就收工（docstring 里承诺过，
+                # 但以前只有一个"到点"的出口，用户每次都得干等满 4 秒）。
+                if (speech_samples >= MIN_SPEECH_S * rate) and elapsed >= 2.5:
+                    self._set_progress(hint="够了，正在分析")
+                    break
         finally:
             mic.close()
         if not chunks:

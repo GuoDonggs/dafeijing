@@ -518,6 +518,10 @@ class AgentCfg:
     follow_up_ms: int = 6000
     # 收音/确认/结束的提示音，让用户知道什么时候该说话
     cues: bool = True
+    # 单句的**兜底**上限（毫秒）：VAD 内部的"最长一段"用它和
+    # listen_hard_limit_ms 里较大的那个，正常收尾靠的是静音判定。
+    # 别把它调得比 listen_hard_limit_ms 小 —— 那会让 VAD 抢在 agent 前面
+    # 把一句没说完的话切下来（说长指令被掐断就是这么来的）。
     max_utterance_ms: int = 15000
     # 一轮"听指令"最多听多久（毫秒）。到点不是丢掉重来，而是把已经录到的
     # 那一段交给识别 —— 说得长不该被惩罚。0 = 不限。

@@ -277,7 +277,8 @@
     list.innerHTML = '';
     var shown = ALL_TOOLS.filter(function (tool) {
       if (!keyword) { return true; }
-      return (tool.name + ' ' + tool.title + ' ' + tool.description).toLowerCase().indexOf(keyword) >= 0;
+      return (tool.name + ' ' + tool.title + ' ' + tool.description + ' '
+      + (tool.tags || []).join(' ')).toLowerCase().indexOf(keyword) >= 0;
     });
     if (!shown.length) { list.innerHTML = '<p class="note">没有匹配的工具。</p>'; return; }
     shown.forEach(function (tool) {
@@ -285,14 +286,25 @@
       item.className = 'item';
       var badges = '';
       if (tool.confirm) { badges += '<span class="badge warn">需确认</span>'; }
+      if (!tool.confirm && tool.confirm_if) { badges += '<span class="badge warn">动手前确认</span>'; }
       if (tool.source !== 'builtin') { badges += '<span class="badge ok">技能</span>'; }
+      // 用途标签：模型挑工具看的就是这几个词，界面上显示同一份，
+      // 用户才能对得上"它为什么选了这个工具"
+      (tool.tags || []).forEach(function (tag) {
+        badges += '<span class="badge">' + esc(tag) + '</span>';
+      });
       var params = tool.parameters.length
         ? '<span>参数：' + esc(tool.parameters.join('、')) + '</span>'
         : '<span>无参数</span>';
+      // 同一类操作在一条指令里只问一次（鼠标、键盘…）：写出来，
+      // 用户才知道"第二次点击为什么没再问"
+      var grouped = tool.group ? '<span>同类只问一次：' + esc(tool.group) + '</span>' : '';
+      var budget = tool.result_budget
+        ? '<span>结果上限 ' + tool.result_budget + ' 字</span>' : '';
       item.innerHTML = '<div class="title"><span class="name">' + esc(tool.title) + '</span>'
         + '<span class="id">' + esc(tool.name) + '</span></div>'
         + '<p class="desc">' + esc(tool.description) + '</p>'
-        + '<div class="meta">' + badges + params
+        + '<div class="meta">' + badges + params + grouped + budget
         + '<button class="link" data-run="' + esc(tool.name) + '">试运行</button></div>';
       list.appendChild(item);
     });
@@ -355,10 +367,17 @@
         var badge = skill.error
           ? '<span class="badge err">加载失败</span>'
           : '<span class="badge ok">' + esc(skill.kind) + '</span>';
+        var install = skill.needs_install
+          ? '<button class="link" data-install="' + esc(skill.source) + '">装依赖</button>'
+          : '';
         item.innerHTML = '<div class="title"><span class="name">' + esc(skill.title || skill.name) + '</span>'
           + '<span class="id">' + esc((skill.tools || []).join(', ')) + '</span></div>'
           + '<p class="desc">' + esc(skill.error || skill.description || '（没有写描述）') + '</p>'
+          + (skill.needs_install
+            ? '<p class="note">缺 Python 包：' + esc((skill.missing || []).join('、'))
+              + '　（点「装依赖」让它自己 pip install）</p>' : '')
           + '<div class="meta">' + badge + '<span>' + esc(skill.source) + '</span>'
+          + install
           + '<button class="link" data-edit="' + esc(skill.source) + '">编辑</button>'
           + '<button class="link" data-del="' + esc(skill.source) + '">删除</button></div>';
         list.appendChild(item);
@@ -369,6 +388,21 @@
           if (!window.confirm('确定删除 ' + path + ' 吗？')) { return; }
           api('/api/skills/delete', { path: path }).then(function (res) {
             toast(res.ok ? '已删除' : ('删除失败：' + res.error), res.ok ? 'ok' : 'err');
+            loadSkills(); loadTools(); poll();
+          });
+        });
+      });
+      list.querySelectorAll('[data-install]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          var path = button.getAttribute('data-install');
+          button.disabled = true;
+          button.textContent = '正在装…';
+          // pip 可能跑好几分钟：按钮先禁用，结果出来再说成没成
+          api('/api/skills/install', { path: path }).then(function (res) {
+            toast(res.ok ? (res.message || '依赖装好了') : ('装依赖失败：' + res.error),
+              res.ok ? 'ok' : 'err');
+            button.disabled = false;
+            button.textContent = '装依赖';
             loadSkills(); loadTools(); poll();
           });
         });
@@ -569,7 +603,33 @@
       VOICES = (pair[1] && pair[1].rows) ? pair[1] : null;
       if (!data.ok) { toast(data.error || '读不到设置', 'err'); return; }
       buildForm(data.settings || {});
+      // 刚填好的样子就是"原始值"：之后保存时只提交跟它不一样的键
+      SETTINGS_BASE = collectSettings();
     });
+  }
+
+  // 表单刚填好时的原始值（loadSettings 之后立刻打一次快照）。
+  // 保存时只提交**改动过**的键：整张表单提交会把界面上的派生值/只读值
+  // （tts.engine、speech.threads、音量百分比…）当成用户设置写回配置文件 ——
+  // 用户只改了一个字段，却把好几项钉死成"当前生效值"，以后再换显卡、换引擎
+  // 就不跟着自动走了。
+  var SETTINGS_BASE = {};
+
+  function sameSetting(a, b) {
+    if (a === b) { return true; }
+    if (Array.isArray(a) && Array.isArray(b)) {
+      return a.length === b.length && a.every(function (v, i) { return v === b[i]; });
+    }
+    return false;
+  }
+
+  function changedSettings() {
+    var now = collectSettings();
+    var updates = {};
+    Object.keys(now).forEach(function (key) {
+      if (!sameSetting(now[key], SETTINGS_BASE[key])) { updates[key] = now[key]; }
+    });
+    return updates;
   }
 
   function collectSettings() {
@@ -743,7 +803,12 @@
     });
 
     $('btn-save-settings').addEventListener('click', function () {
-      api('/api/config', { updates: collectSettings() }).then(function (res) {
+      var updates = changedSettings();
+      if (!Object.keys(updates).length) {
+        toast('没有改动', 'ok');
+        return;
+      }
+      api('/api/config', { updates: updates }).then(function (res) {
         if (res.ok) {
           toast(res.message + (res.restart_needed ? '（重启引擎后生效）' : ''), 'ok');
           loadRawConfig(); poll();

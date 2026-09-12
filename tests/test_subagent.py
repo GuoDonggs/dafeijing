@@ -156,7 +156,7 @@ def main() -> int:
     spy_results: list = []
     original_call = tools_mod.call_result
 
-    def spy(name, arguments=None, on_confirm=None):  # noqa: ANN001
+    def spy(name, arguments=None, on_confirm=None, cancel_check=None):  # noqa: ANN001
         spy_calls.append(name)
         outcome = original_call(name, arguments, on_confirm)
         spy_results.append(outcome)

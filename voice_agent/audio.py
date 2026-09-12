@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,8 @@ def _fade(samples: np.ndarray, sample_rate: int, fade_ms: float = 8.0) -> np.nda
 
 # 设备原生采样率只查一次，之后复用
 _NATIVE_RATE: dict[Any, int] = {}
+#: 每个缓存项是什么时候查的（"默认设备"那一档要定期重查，见 _native_rate）
+_NATIVE_RATE_STAMP: dict[Any, float] = {}
 
 
 def warm_resampler() -> None:
@@ -241,13 +244,27 @@ def _native_rate(device: int | None, sample_rate: int) -> int:
     的语音时，这层会用自己的重采样顶上 —— 质量一般，高频容易发毛、带毛刺。
     所以先问设备要原生率，自己用多相滤波器转好再送进去，绕开它。
     """
-    if device not in _NATIVE_RATE:
+    # device=None 意思是"系统的默认输出设备" —— 而默认设备是**会变**的
+    # （插耳机、切蓝牙）。按 None 缓存下来就会一直用旧设备的原生率：
+    # 新设备按那个率打不开，每次播放都要先失败一次再回退（用户听到的是卡一下）。
+    # 所以对"默认设备"这一档只缓存一小会儿。
+    cache_key = device
+    fresh = False
+    if cache_key in _NATIVE_RATE:
+        if cache_key is not None:
+            fresh = True
+        else:
+            stamp = _NATIVE_RATE_STAMP.get(cache_key, 0.0)
+            fresh = (time.monotonic() - stamp) < 30.0
+    if not fresh:
         try:
             info = _sd().query_devices(device, kind="output")
-            _NATIVE_RATE[device] = int(info.get("default_samplerate") or 0)
+            _NATIVE_RATE[cache_key] = int(info.get("default_samplerate") or 0)
+            _NATIVE_RATE_STAMP[cache_key] = time.monotonic()
         except Exception:
-            _NATIVE_RATE[device] = 0
-    native = _NATIVE_RATE[device]
+            _NATIVE_RATE[cache_key] = 0
+            _NATIVE_RATE_STAMP[cache_key] = time.monotonic()
+    native = _NATIVE_RATE[cache_key]
     if native <= 0 or native == int(sample_rate):
         return int(sample_rate)
     if not (8000 <= native <= 192000):

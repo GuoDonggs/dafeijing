@@ -489,7 +489,11 @@ class Brain:
                     return self._wrap_up(client, messages, user_text,
                                          "我卡在重复执行同一步上了", interrupt=interrupt)
                 started = time.perf_counter()
-                outcome = tools.call_result(name, arguments, on_confirm=confirm)
+                # cancel_check：长工具（run_command、整盘搜索）在自己的循环里
+                # 查"这一轮还算不算数"，用户打断之后立刻收手
+                outcome = tools.call_result(
+                    name, arguments, on_confirm=confirm,
+                    cancel_check=(interrupt.is_set if interrupt is not None else None))
                 elapsed = (time.perf_counter() - started) * 1000.0
                 self.log("[tool] " + name + " → " + ("成功" if outcome.ok else "失败")
                          + "（" + str(outcome.code) + "）%.0fms｜参数 %s｜结果 %s"

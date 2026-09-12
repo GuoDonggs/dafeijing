@@ -191,10 +191,14 @@ def stale_task_cancel() -> None:
         worker.brain._clients["chat"] = client
         signal = worker._turn_token(worker._epoch) if use_token else worker._interrupt
         seen: list = []
+        passed: list = []
         original = tools_mod.call_result
 
-        def slow(name, arguments=None, on_confirm=None):  # noqa: ANN001
+        # 签名要和真的 call_result 一致：多出来的 cancel_check 是给长工具
+        # （执行命令、整盘搜索）在半路收手用的
+        def slow(name, arguments=None, on_confirm=None, cancel_check=None):  # noqa: ANN001
             seen.append(name)
+            passed.append(cancel_check)
             if len(seen) == 2:
                 worker._epoch += 1          # 新任务接替（_spawn / _barge_in 做的事）
                 worker._interrupt.clear()   # 新任务把共享信号清掉
@@ -205,6 +209,8 @@ def stale_task_cancel() -> None:
             worker.brain.respond("做很多步", interrupt=signal)
         finally:
             tools_mod.call_result = original
+        check("每一步都把「这轮还算不算数」的查询交给工具",
+              bool(passed) and all(callable(item) for item in passed), str(passed))
         return len(seen)
 
     token_steps = run(True)
@@ -414,8 +420,38 @@ def main() -> int:
     for text in ("不太行", "不是", "不是这个意思", "不用了", "算了", "先不要",
                  "我觉得不行", "好什么好", "别"):
         check("「" + text + "」不算同意", agent._confirm_verdict(text) is not True, repr(text))
+    # **先肯定后否定**：以前只看肯定词前面三个字有没有否定字，后面那个「不是」
+    # 根本没人看 —— 实测「对，不是这个意思」返回 True（放行）。全句扫描之后
+    # 这几句都不再算同意（真实场景：用户先"对"了一声，接着纠正它）。
+    for text in ("对，不是这个意思", "好的，不是这个", "行，不是这个文件",
+                 "是，不对", "好，不是", "可以，但先不要"):
+        check("先肯定后否定不算同意：「" + text + "」",
+              agent._confirm_verdict(text) is not True, repr(text))
+    # 但「没问题」是地道的同意，不能被一个「没」字连坐
+    check("「没问题」仍然是同意", agent._confirm_verdict("没问题") is True)
+    # 大写/混写的英文也算（离线规则模式下词表里只有小写 ok，以前答「OK」
+    # 落到"我没听准，为安全起见先不执行"）
+    for text in ("OK", "Ok", "ok", "YES", "Yes"):
+        check("英文大小写都认：「" + text + "」", agent._confirm_verdict(text) is True, repr(text))
     check("长句不靠词表硬判（交给语义判断）",
           agent._confirm_verdict("可以是可以，不过我现在真的没空") is None)
+
+    # VAD 自己的"最长一段"是个兜底，不能抢在"静音判定 / 硬上限"前面动手：
+    # 以前它取的是 max_utterance_ms（默认 15 秒），用户一口气说十几秒不停顿，
+    # VAD 到点就把前半截当成一整句吐出来、后半句根本没录 —— 实测喂 22 秒连续
+    # 语音，16.06 秒处就被切出一段。
+    print("\n场景 4c：连着说十几秒不能被 VAD 自己切断")
+    vad = getattr(agent, "vad", None)
+    if vad is None:
+        check("VAD 起不来时跳过（其它场景会先报出来）", True)
+    else:
+        cap = float(vad._cfg.silero_vad.max_speech_duration)
+        hard = int(agent.cfg.agent.listen_hard_limit_ms) / 1000.0
+        check("VAD 的上限不低于 listen_hard_limit_ms（%.0fs ≥ %.0fs）" % (cap, hard),
+              cap >= hard, str(cap))
+        check("静音判定仍然是正常收尾那条路（%.2fs）"
+              % float(vad._cfg.silero_vad.min_silence_duration),
+              float(vad._cfg.silero_vad.min_silence_duration) > 0)
 
     print("\n场景 5：唤醒后一直没人说话 → 超时回到待命")
     # 这条曾经是坏掉的：超时检查原本挂在「mic.read 返回 None」的分支里，

@@ -179,6 +179,32 @@ def main() -> int:
     check("重名会被拒绝", not ok and "已经有" in why, why)
     check("空名字会被拒绝", not store.rename("下载区", "   ")[0])
 
+    # 名字判重要按**去掉空白**的口径：「范围 1」和「范围1」在 get() 眼里
+    # 是同一个标记（正则允许中间有空格），所以不能让它们同时存在 ——
+    # 否则用户说"改范围1"时改的是哪一个全看运气。
+    store.clear()
+    spaced = store.add_region(0, 0, 10, 10, name="范围 1")
+    check("带空格的名字，不带空格也查得到（口头上听不出空格）",
+          store.get("范围1") is spaced, str(store.get("范围1")))
+    second = store.add_region(0, 0, 20, 20, name="范围1")
+    check("再建一个「范围1」不会造出两个几乎同名的标记",
+          len(store.all()) == 2 and store.get("范围 1") is spaced,
+          str([item.name for item in store.all()]))
+    check("新建的那个被自动改名了（不覆盖已有标记）",
+          second.name != spaced.name and second.name.startswith("范围"), second.name)
+    other = store.add_region(0, 0, 40, 40, name="下载区")
+    ok, why = store.rename("下载区", "范围1")
+    check("改名撞上「看着一样」的**别的**标记会被拦（不制造分不清的两个）",
+          not ok and "已经有" in why, str((ok, why)))
+    ok, why = store.rename(spaced.name, "范围1")
+    check("把自己改成不带空格的写法是允许的（这不是重名）",
+          ok and store.get("范围1") is spaced, str((ok, why)))
+    store.clear()
+    store.add_region(0, 0, 30, 30, name="范围1")
+    ok, why = store.rename("范围1", "下载 区")
+    check("改成一个全新的、带空格的名字是允许的",
+          ok and store.get("下载 区") is not None, why)
+
     print("\n截图真的只截那一块")
     store.add_region(0, 0, 400, 300, name="左上角")
     out = tools.call("screenshot", {"region": "左上角", "name": "crop"})

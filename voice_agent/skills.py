@@ -427,7 +427,11 @@ def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tupl
                         for key, value in raw_args.items()}
             else:
                 args = {}
-            results.append(tools_mod.call(tool_name, args))
+            # **把"已经确认过"这件事传下去**：组合技能正因为串了敏感工具才会被标成
+            # "需要确认"，用户点头之后，它的步骤不该再被 fail-closed 拒绝 ——
+            # 以前每一环都拿到"用户取消了这次操作"（tools.call 没带确认通道），
+            # 于是文档里写的"组合技能先问一句"实际上永远跑不通。
+            results.append(tools_mod.call(tool_name, args, on_confirm=lambda _q: True))
         return "；".join(part for part in results if part) or "执行完了"
 
     # 组合技能里只要有一环是敏感工具（关机、执行命令……），整个技能就先问一句，
@@ -442,11 +446,28 @@ def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tupl
     for step in steps:
         if not isinstance(step, dict):
             continue
-        entry = _REGISTRY.get(str(step.get("tool") or ""))
-        if entry is None or entry.confirm:
+        if _step_is_sensitive(_REGISTRY.get(str(step.get("tool") or "")), step):
             sensitive = True
             break
     return handler, bool(spec.get("confirm", sensitive))
+
+
+def _step_is_sensitive(entry: Any, step: dict) -> bool:
+    """组合技能里的这一环要不要先问用户。
+
+    用 entry.wants_confirm(参数) 而不是 entry.confirm：permission_mode 这类
+    "查不用问、**改**才问" 的工具 confirm 是 False，可拿它去改权限是整个权限
+    模型里最敏感的动作 —— 只看 confirm 的话，组合技能就成了绕过确认的旁路
+    （技能本身不问，内环还能拿到"已经确认过"的通行证）。
+    查不到的工具（拼错名字、还没加载）一律按敏感处理。
+    """
+    if entry is None:
+        return True
+    args = step.get("args")
+    checker = getattr(entry, "wants_confirm", None)
+    if callable(checker):
+        return bool(checker(args if isinstance(args, dict) else {}))
+    return bool(getattr(entry, "confirm", False))
 
 
 class SkillLoader:
@@ -485,8 +506,7 @@ class SkillLoader:
             for step in steps:
                 if not isinstance(step, dict):
                     continue
-                entry = REGISTRY.get(str(step.get("tool") or ""))
-                if entry is None or entry.confirm:
+                if _step_is_sensitive(REGISTRY.get(str(step.get("tool") or "")), step):
                     sensitive = True
                     break
             confirm = bool(sensitive if explicit is None else explicit)
@@ -561,7 +581,12 @@ class SkillLoader:
                     )
             handler, needs_confirm = _make_action(action, title, parameters)
             if str(action.get("type") or "").strip().lower() == "sequence":
-                self._pending.append((name, list(action.get("steps") or []), action.get("confirm")))
+                # 顶层 confirm: true 是用户明确要求的"这个技能要问一句"。
+                # 以前只记 action 级的 confirm（None），第二遍 _resolve_pending
+                # 用 sensitive=False 把注册时的 confirm=True **覆盖掉** ——
+                # 用户的确认要求被静默取消（而技能里可能串着 shell / 写文件）。
+                wanted = data.get("confirm", action.get("confirm"))
+                self._pending.append((name, list(action.get("steps") or []), wanted))
             confirm = bool(data.get("confirm", needs_confirm))
             register(Tool(
                 name=name,

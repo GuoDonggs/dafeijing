@@ -761,6 +761,76 @@ def tool_tags() -> None:
           skills_mod.normalize_tags(None) == () and skills_mod.normalize_tags("") == ())
 
 
+def interrupt_long_tools() -> None:
+    """打断要能**真的停下来**，不是只把状态改成"已作废"。
+
+    用户报的原话是"打断之后后台还在跑"。短工具无所谓，但 run_command 最长
+    120 秒、整盘搜索 6 秒 —— 这两条以前是干等到底：界面和日志都已经说
+    "已打断"，机器还在转，随后日志里还会冒出这次调用的结果。
+    """
+    print("\n打断正在跑的长工具")
+    import threading as _threading
+    import time as _time
+
+    from voice_agent import security as security_mod
+    from voice_agent.tools import files as files_mod
+
+    from voice_agent.tools import cancelled, set_cancel_check
+
+    # 线程私有：装了查询函数才算"这一轮可能作废"
+    set_cancel_check(None)
+    check("不装查询函数时永远不算作废（旧行为）", cancelled() is False)
+    state = {"stop": False}
+    set_cancel_check(lambda: state["stop"])
+    check("装了之后如实反映", cancelled() is False)
+    state["stop"] = True
+    check("一旦作废立刻为真", cancelled() is True)
+    set_cancel_check(None)
+
+    # run_command：跑一条 25 秒的命令，1 秒后喊停
+    security_mod.configure(_simple_config("danger-full-access"))
+    security_mod.reset_limits()
+    state = {"stop": False}
+    _threading.Timer(1.0, lambda: state.__setitem__("stop", True)).start()
+    started = _time.monotonic()
+    outcome = tools.call_result(
+        "run_command",
+        {"command": "powershell -NoProfile -Command \"Start-Sleep -Seconds 25\"",
+         "timeout": 30},
+        on_confirm=lambda *_: True,
+        cancel_check=lambda: state["stop"])
+    elapsed = _time.monotonic() - started
+    check("命令被打断后 5 秒内就返回（实测 %.1fs）" % elapsed, elapsed < 5.0, str(elapsed))
+    check("而且如实说「被打断了」", "打断" in outcome.text, outcome.text[:40])
+
+    # 搜索：整盘扫 40 秒的预算，0.3 秒后喊停
+    state = {"stop": False}
+    _threading.Timer(0.3, lambda: state.__setitem__("stop", True)).start()
+    set_cancel_check(lambda: state["stop"])
+    started = _time.monotonic()
+    try:
+        hits, stopped = files_mod._walk_files(
+            Path(os.environ.get("SystemDrive", "C:") + "/"),
+            lambda name: name.endswith(".zzz-not-here"), 5, seconds=40.0)
+    finally:
+        set_cancel_check(None)
+    elapsed = _time.monotonic() - started
+    check("整盘搜索被打断后立刻收手（实测 %.1fs）" % elapsed, elapsed < 5.0, str(elapsed))
+    check("而且不假装「扫完了」", stopped is True and hits == [], str((len(hits), stopped)))
+
+
+def _simple_config(mode: str = "workspace-write"):
+    """给权限测试用的一份最小配置（和 test_security 里的同一套字段）。"""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        security=SimpleNamespace(mode=mode, allow_insecure=False,
+                                 max_prompts_per_minute=6, max_same_action=3,
+                                 audit=False),
+        llm=SimpleNamespace(base_url="https://api.deepseek.com/v1"),
+    )
+
+
 def next_step_messages() -> None:
     """找图成功之后，回答里必须给出**可以直接照抄的下一步**。
 
@@ -877,6 +947,7 @@ def main() -> int:
     vision_path()
     image_tools()
     sift_matching()
+    interrupt_long_tools()
     next_step_messages()
     read_documents()
     tool_tags()

@@ -1043,6 +1043,11 @@ class SettingsPage(Page):
             shown_options = [table.get(o, o) for o in (options or [])]
             current = "" if value is None else str(value)
             shown = table.get(current, current)
+            # **真值可能不在预设选项里**（追问窗口默认 6000ms、quality 档语速 1.06…）。
+            # 不在的话控件会落到第 0 项 —— 界面显示的是假值，用户点一下还会把真配置
+            # 改成那个假值（"追问窗口 0（回待命）"就是这么来的）。补进去即可。
+            if shown and shown not in shown_options:
+                shown_options = shown_options + [shown]
             control = ui.SegmentedControl(shown_options, shown, width=260)
             control.changed.connect(
                 lambda shown_label, k=key, opts=options, tb=table:
@@ -1096,13 +1101,13 @@ class SettingsPage(Page):
                 continue
             kind, control = entry
             value = values.get(key)
-            if kind == "choice":
-                for index in range(control.count()):
-                    if str(control.itemData(index)) == str(value):
-                        control.blockSignals(True)
-                        control.setCurrentIndex(index)
-                        control.blockSignals(False)
-                        break
+            if kind == "choice" and hasattr(control, "show_value"):
+                # 分段控件（SegmentedControl）：**只挪显示、不发信号**，
+                # 而且先把真值补成选项 —— 以前这里按 QComboBox 的 API 写
+                # （count/itemData/setCurrentIndex），每次都 AttributeError 被吞掉，
+                # 于是"合成引擎"那一行永远停在旧值，和弹出的 ChatTTS 警告卡自相矛盾。
+                control.ensure_option(str(value))
+                control.show_value(str(value))
             elif kind == "bool":
                 control.setChecked(bool(value))
 
@@ -1162,6 +1167,12 @@ class SettingsPage(Page):
         open_button = ui.plain_button("打开目录")
         open_button.clicked.connect(self._open_data_dir)
         row.addWidget(open_button)
+        # 出问题时要翻的就是这个文件；界面上的日志窗口一关就没了，
+        # 所以这里给一个直接打开它的入口（省得用户自己去 logs/ 里找）。
+        log_button = ui.plain_button("看运行日志", "activity")
+        log_button.setToolTip("打开日志文件（里面有完整的操作过程和崩溃栈）")
+        log_button.clicked.connect(self._open_log_file)
+        row.addWidget(log_button)
         box.addLayout(row)
 
         self.data_note = QLabel()
@@ -1178,6 +1189,20 @@ class SettingsPage(Page):
         if rows:
             here += "（已有 " + "、".join(str(row["name"]) for row in rows[:6]) + "）"
         return here
+
+    def _open_log_file(self) -> None:
+        """打开今天的日志文件（用系统默认程序）。"""
+        from .. import journal  # noqa: PLC0415
+        from ..tools.windows import _launch  # noqa: PLC0415
+
+        path = journal.file_path()
+        if not path.is_file():
+            self.console.log("[ui] 今天还没有日志：" + str(path))
+            return
+        if not _launch(str(path)):
+            self.console.log("[ui] 打不开日志文件，路径是 " + str(path))
+            return
+        self.console.log("[ui] 已打开日志：" + str(path))
 
     def _open_data_dir(self) -> None:
         from .. import paths  # noqa: PLC0415
@@ -1715,16 +1740,41 @@ class DevicesPage(Page):
         self.inputs = data.get("input", [])
         self.outputs = data.get("output", [])
         current = data.get("current", {})
-        for combo, items, selected in (
-            (self.combo_in, self.inputs, current.get("input")),
-            (self.combo_out, self.outputs, current.get("output")),
+        for combo, items, selected, kind in (
+            (self.combo_in, self.inputs, current.get("input"), "input"),
+            (self.combo_out, self.outputs, current.get("output"), "output"),
         ):
             combo.clear()
             combo.addItem("系统默认", None)
             for device in items:
                 combo.addItem("[" + str(device["index"]) + "] " + device["name"], device["index"])
-            index = combo.findData(selected)
-            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.setCurrentIndex(self._pick(combo, selected, kind))
+
+    @staticmethod
+    def _pick(combo, selected, kind: str) -> int:
+        """按配置里写的设备选中下拉框里的那一项。
+
+        配置里的值有三种写法：序号、**名字子串**、null（resolve_device 都认）。
+        以前只按序号 findData：配置里写的是名字时找不到，下拉框悄悄退回
+        「系统默认」，用户再点一下「应用」就把名字冲成了 null —— 麦克风被
+        改成系统默认，而界面上从头到尾没提过一句。
+        """
+        index = combo.findData(selected)
+        if index < 0 and isinstance(selected, str) and selected.strip():
+            try:
+                from ..audio import resolve_device
+
+                number = resolve_device(selected, kind)
+            except Exception:  # noqa: BLE001 - 解析不出来就当"列表里没有"
+                number = None
+            if number is not None:
+                index = combo.findData(number)
+        if index < 0 and selected not in (None, ""):
+            # 列表里确实没有（设备拔了 / 名字写错了）：也**保留**它，
+            # 别让"应用"把配置抹掉 —— 插回去还能用。
+            combo.addItem("（配置里写的：" + str(selected) + "）", selected)
+            index = combo.count() - 1
+        return index if index >= 0 else 0
 
     def apply(self) -> None:
         result = self.console.update_config({
@@ -1800,6 +1850,8 @@ class AboutPage(Page):
         layout.addWidget(head)
 
         self.env_card = ui.Card()
+        #: 环境卡每行的值标签（标题 → 标签）。行只建一次，on_tick 只改文字。
+        self._env_labels: dict[str, QLabel] = {}
         layout.addWidget(self.env_card)
 
         layout.addWidget(ui.section_title("快捷键"))
@@ -1821,16 +1873,16 @@ class AboutPage(Page):
         self._paint_logo()
 
     def on_tick(self, snapshot: dict, state: str) -> None:
+        """刷新环境卡。
+
+        这里**只改文字**，控件只在第一次建起来：以前每次 tick（300ms）都把整张卡
+        拆掉重建 —— 一秒钟三次析构 + 构造十来个 QLabel，还顺手把滚动位置和
+        选中状态一起丢掉，鼠标停在"复制路径"那种交互上就更明显。
+        """
         from .. import __version__
 
         self.subtitle.setText("版本 " + __version__ + "　·　本地语音 · 可选 LLM 大脑")
         status = snapshot.get("status", {})
-        while self.env_card.body.count():
-            item = self.env_card.body.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        from PyQt6.QtWidgets import QLabel as _QLabel
-
         rows = [
             ("配置", str(snapshot.get("config_path", ""))),
             ("模型", str(snapshot.get("models_dir", ""))),
@@ -1841,7 +1893,18 @@ class AboutPage(Page):
             ("工具", str(snapshot.get("tools", 0)) + " 个　技能 "
              + str((snapshot.get("skills") or {}).get("ok", 0)) + " 个"),
         ]
+        if not self._env_labels:
+            self._build_env_rows([title for title, _ in rows])
         for title, value in rows:
+            label = self._env_labels[title]
+            if label.text() != value:
+                label.setText(value)
+
+    def _build_env_rows(self, titles: list[str]) -> None:
+        """环境卡的行只建一次，之后 on_tick 只改文字。"""
+        from PyQt6.QtWidgets import QLabel as _QLabel
+
+        for title in titles:
             line = QWidget()
             box = QHBoxLayout(line)
             box.setContentsMargins(0, 3, 0, 3)
@@ -1849,8 +1912,9 @@ class AboutPage(Page):
             label.setObjectName("RowTitle")
             label.setFixedWidth(56)
             box.addWidget(label)
-            value_label = _QLabel(value)
+            value_label = _QLabel("")
             value_label.setObjectName("Mono")
             value_label.setWordWrap(True)
             box.addWidget(value_label, 1)
+            self._env_labels[title] = value_label
             self.env_card.body.addWidget(line)

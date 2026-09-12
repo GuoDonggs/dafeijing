@@ -229,6 +229,7 @@ _register(Tool(
         "read-only = 只能查；workspace-write = 敏感操作先确认；"
         "danger-full-access = 敏感操作直接做（关机和执行命令仍然要确认）。"
         "**放宽只能由用户本人要求**，不能因为任务做不下去就自己提权。"
+        "只是查一下（mode 留空）不需要确认。"
     ),
     parameters=_params(
         mode={"type": "string",
@@ -236,7 +237,9 @@ _register(Tool(
         reason={"type": "string", "description": "为什么要改（会被念给用户听）"},
     ),
     handler=permission_mode_tool,
-    confirm=True,
+    # 只有**真的要改**才问：以前 confirm=True 是"查一下现在几档"也要用户点一次头，
+    # 用户明明只是问了句"现在什么权限"，却先被要求确认 —— 那一步毫无意义。
+    confirm_if=lambda args: bool(str(args.get("mode", "") or "").strip()),
 ))
 
 _register(Tool(

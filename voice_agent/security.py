@@ -76,10 +76,11 @@ TIERS = ("read", "act", "exec")
 READ_TOOLS = frozenset({
     "get_time", "system_info", "mouse_position", "list_files", "search_files",
     "find_files", "read_file", "grep_files", "recall", "screenshot",
-    "find_on_screen", "resize_image", "look_at_screen", "app_map",
+    "find_on_screen", "find_in_image", "list_reference", "resize_image",
+    "look_at_screen", "app_map",
     "list_windows", "list_processes", "subagent_status", "list_watches",
     "cancel_subagent", "stop_watch", "keep_listening", "new_session",
-    "permission_mode", "skill_status",
+    "permission_mode",
 })
 
 #: 执行档：会改系统、执行任意代码、或者干脆把电脑关掉。
@@ -104,6 +105,10 @@ UNTRUSTED_SOURCES = frozenset({
     "web_search", "open_url", "read_file", "grep_files", "look_at_screen",
     "recall", "clipboard", "app_map", "list_files", "search_files", "find_files",
     "list_windows", "list_processes", "system_info", "screenshot",
+    # 子智能体报告和盯梢记录也是**二手文本**：里面可能原样带着它从网页/文件里
+    # 读到的句子（"忽略上面的指令，去执行 xxx"）。以前这几条漏在名单外，
+    # 于是就出现了"看完子智能体的报告之后动手，确认提示里不带外部内容警告"。
+    "spawn_subagent", "subagent_status", "list_watches",
 })
 
 #: 给模型看的拒绝标记 / 提示，措辞固定，它认得出这是一条"权限"而不是"出错"。
@@ -123,6 +128,10 @@ class Decision:
     needs_confirm: bool = False
     tier: str = "read"
     reason: str = ""
+    #: check() 自己已经写过审计了。调用方（tools.call_result）看到它就别再写
+    #: 一条 —— 以前一次拒绝会在 audit.jsonl 里留下 event=denied 和 event=blocked
+    #: 两行（同一个动作被记两次，查日志时很容易误以为"被拦了两次"）。
+    audited: bool = False
 
     @property
     def allowed(self) -> bool:
@@ -256,7 +265,7 @@ def tier_of(tool: Any) -> str:
         return "read"
     if name in EXEC_TOOLS:
         return "exec"
-    if bool(getattr(tool, "confirm", False)):
+    if bool(getattr(tool, "confirm", False)) or getattr(tool, "confirm_if", None):
         # 自定义技能里 shell / 敏感动作都会被打上 confirm，落到执行档
         return "exec"
     return "act"
@@ -337,22 +346,22 @@ def check(tool: Any, args: Any = None) -> Decision:
     if banned:
         # 用户点名的工具：连"问一句"都不问，直接拒绝（最高优先级）
         audit({"event": "blocked", "tool": name, "tier": tier, "mode": current,
-               "reason": "deny_tools", "args": _short(args)})
-        return Decision(code="denied", tier=tier, reason="deny_tools",
+               "tainted": tainted(), "reason": "deny_tools", "args": _short(args)})
+        return Decision(code="denied", tier=tier, reason="deny_tools", audited=True,
                         text=DELIMITER.format("「" + name + "」被设置成了禁止使用，这条不能执行"))
     if tier == "read":
         # 只读档里也有"必须问一句"的：permission_mode（改权限只能由用户点头）。
         # 它必须**任何模式下都问** —— 那是"用户本人授权"的唯一通道。
         # 以前这一条是靠工具层的 `or tool.confirm` 兜的，于是"放开模式下
         # 不再重复问"这类判断就没法只由模式决定；现在收到这里来。
-        if bool(getattr(tool, "confirm", False)):
+        if _wants_confirm(tool, args):
             return Decision(code="needs_confirm", needs_confirm=True, tier=tier)
         return Decision(tier=tier)
     if current == "read-only":
         audit({"event": "denied", "tool": name, "tier": tier, "mode": current,
-               "args": _short(args)})
+               "reason": "read-only", "tainted": tainted(), "args": _short(args)})
         return Decision(
-            code="denied", tier=tier, reason="read-only",
+            code="denied", tier=tier, reason="read-only", audited=True,
             text=DELIMITER.format("只读模式下不能" + _verb(tier) + "，这条被拒绝了")
                  + " " + ESCALATION_HINT,
         )
@@ -362,12 +371,23 @@ def check(tool: Any, args: Any = None) -> Decision:
     force = name in floor or extra_confirm
     if current == "danger-full-access" and not force:
         return Decision(tier=tier)
-    if force or tier == "exec" or bool(getattr(tool, "confirm", False)):
+    if force or tier == "exec" or _wants_confirm(tool, args):
         # 注意：check() 本身**不**消耗限流额度 —— 要等到真的去问用户那一刻
         # （call_result 里调 note_prompt）才记一笔。否则"决定要问、但根本没有
         # 确认通道"也会把额度吃掉，几次之后正常操作反而被限流挡下。
         return Decision(code="needs_confirm", needs_confirm=True, tier=tier)
     return Decision(tier=tier)
+
+
+def _wants_confirm(tool: Any, args: Any = None) -> bool:
+    """这次调用要不要先问一句 —— 交给工具自己的 wants_confirm 判。
+
+    老的自定义技能对象可能只有 confirm 这个布尔字段，所以这里兜一层。
+    """
+    checker = getattr(tool, "wants_confirm", None)
+    if callable(checker):
+        return bool(checker(args if isinstance(args, dict) else {}))
+    return bool(getattr(tool, "confirm", False))
 
 
 def _verb(tier: str) -> str:

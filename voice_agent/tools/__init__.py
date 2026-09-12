@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass
 from dataclasses import replace as _replace
 from pathlib import Path
@@ -103,6 +104,9 @@ class Tool:
     parameters: dict
     handler: Callable[..., str]
     confirm: bool = False
+    #: 只有"真的动手"才敏感的补充判断（参数 → 要不要问）。
+    #: permission_mode 就是这一类：**查**权限模式不该弹确认，**改**才该。
+    confirm_if: Callable[[dict], bool] | None = None
     title: str = ""
     source: str = "builtin"
     # 离线规则模式用的触发词：((说法, {预设参数}), ...)
@@ -138,6 +142,23 @@ class Tool:
             return self.title
         head = re.split(r"[。，,.;；]", self.description.strip())[0]
         return head[:16] or self.name
+
+    def wants_confirm(self, args: dict | None = None) -> bool:
+        """这一次调用要不要先问一句。
+
+        confirm 是"凡是调用都要问"；有些工具只有真正动手的那一步才敏感
+        （查权限模式 vs 改权限模式），用 confirm_if 按参数再判一次。
+        判不出来（回调抛异常）算敏感 —— 宁可多问一句。
+        """
+        if self.confirm:
+            return True
+        hook = self.confirm_if
+        if hook is None:
+            return False
+        try:
+            return bool(hook(dict(args or {})))
+        except Exception:  # noqa: BLE001
+            return True
 
     def confirm_question(self, args: dict) -> str:
         """敏感操作前要念给用户听的那句话。
@@ -364,7 +385,8 @@ def describe() -> str:
     width = max((len(t.name) for t in snapshot), default=12)
     lines = []
     for tool in snapshot:
-        flag = "  [需确认]" if tool.confirm else ""
+        flag = "  [需确认]" if tool.confirm else (
+            "  [动手前确认]" if tool.confirm_if else "")
         origin = "" if tool.source == "builtin" else "  ← " + Path(tool.source).name
         lines.append(
             "  " + tool.name.ljust(width) + "  " + tool.display + "："
@@ -472,16 +494,56 @@ def _ask_human(on_confirm: Callable, question: str, fingerprint: str,
         parameters = inspect.signature(on_confirm).parameters
     except (TypeError, ValueError):
         parameters = {}
-    if len(parameters) >= 3:
-        return bool(on_confirm(question, fingerprint, group))
-    if len(parameters) >= 2:
-        return bool(on_confirm(question, fingerprint))
-    return bool(on_confirm(question))
+    # 只数**位置参数**：把 KEYWORD_ONLY 也算进去的话，写成
+    # def f(question, *, fingerprint="") 的通道会被按位置调用，抛 TypeError ——
+    # 而这里在 call_result 的 try 之外，异常会变成整轮"处理出错了"。
+    positional = [p for p in parameters.values()
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    try:
+        if len(positional) >= 3:
+            return bool(on_confirm(question, fingerprint, group))
+        if len(positional) >= 2:
+            return bool(on_confirm(question, fingerprint))
+        return bool(on_confirm(question))
+    except TypeError:
+        # 签名看不准（C 函数、functools.partial…）：退回最保守的一次一参调用。
+        # **拿不到确认就是拒绝**，不能因为签名怪就放行。
+        try:
+            return bool(on_confirm(question))
+        except Exception:  # noqa: BLE001
+            return False
 
 
 def _needs_input(text: str) -> bool:
     value = str(text or "").strip()
     return len(value) <= 60 and bool(_NEED_INPUT.match(value))
+
+
+#: 当前工具调用的「本轮已作废？」查询（**线程私有**：工具都跑在自己的工作
+#: 线程里，用全局变量会串台）。
+_cancel_ctx = threading.local()
+
+
+def set_cancel_check(check: Callable[[], bool] | None) -> None:
+    """给当前线程设一个"这一轮是不是已经作废了"的查询函数。"""
+    _cancel_ctx.check = check
+
+
+def cancelled() -> bool:
+    """当前这次工具调用是不是已经作废（用户打断 / 来了新指令）。
+
+    长工具（执行命令、整盘搜索）在自己的循环里查它，及时收手 —— 以前打断
+    只能拦住"还没开始执行的下一步"，已经跑起来的那条命令会一直跑完
+    （最长 120 秒）：用户听到的是"已打断"，机器却还在转，日志里随后还冒出
+    这次调用的结果。
+    """
+    check = getattr(_cancel_ctx, "check", None)
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:  # noqa: BLE001 - 判不出来就当没打断
+        return False
 
 
 def _audit_args(args: Any, limit: int = 160) -> str:
@@ -499,7 +561,8 @@ def call(name: str, arguments: Any = None, on_confirm: Callable[[str], bool] | N
 
 
 def call_result(name: str, arguments: Any = None,
-                on_confirm: Callable[[str], bool] | None = None) -> ToolResult:
+                on_confirm: Callable[[str], bool] | None = None,
+                cancel_check: Callable[[], bool] | None = None) -> ToolResult:
     """执行一个工具，返回（文本, 是否成功, 错误码）。
 
     两条重要约定：
@@ -509,6 +572,9 @@ def call_result(name: str, arguments: Any = None,
        确认通道就是拒绝 —— 漏传是拒绝，不是放行。
     2. 失败也返回一句中文，但带上 ok=False，让大脑知道「这一步没成」，
        从而在开口前加一句提醒，而不是把错误当成结果自信地念出来。
+
+    cancel_check 是"这一轮还算不算数"的查询（打断 / 新指令），长工具靠它
+    在半路收手；不传就是"不许打断"（旧行为）。
     """
     autoload_skills()
     tool = REGISTRY.get(name)
@@ -541,9 +607,12 @@ def call_result(name: str, arguments: Any = None,
     # allowed-once / rejected / unavailable。
     decision = security.check(tool, args)
     if not decision.allowed and not decision.needs_confirm:
-        security.audit({"event": "blocked", "tool": tool.name, "code": decision.code,
-                        "tier": decision.tier, "mode": security.mode(),
-                        "tainted": security.tainted(), "args": _audit_args(args)})
+        # check() 里已经记过的（deny_tools / 只读拒绝）不再记一遍 ——
+        # 同一次拒绝在 audit.jsonl 里出现两行，事后查日志会看糊涂。
+        if not decision.audited:
+            security.audit({"event": "blocked", "tool": tool.name, "code": decision.code,
+                            "tier": decision.tier, "mode": security.mode(),
+                            "tainted": security.tainted(), "args": _audit_args(args)})
         return ToolResult(decision.text, False, "denied")
 
     # 要不要问，**完全听 check() 的**（它知道当前模式、底线名单、额外名单）。
@@ -580,12 +649,17 @@ def call_result(name: str, arguments: Any = None,
                         "mode": security.mode(), "tainted": security.tainted(),
                         "args": _audit_args(args)})
 
+    # 让工具在自己的长循环里能问"这一轮还算不算数"（打断/新指令 → 立刻收手）
+    set_cancel_check(cancel_check)
     try:
-        outcome = ToolResult(str(tool.handler(**args)))
-    except TypeError as exc:
-        outcome = ToolResult("工具参数不对：" + str(exc)[:80], False, "bad_arguments")
-    except Exception as exc:  # noqa: BLE001 - 工具层永不抛出，交给模型兜底
-        outcome = ToolResult(ERROR_PREFIX + str(exc)[:100], False, "error")
+        try:
+            outcome = ToolResult(str(tool.handler(**args)))
+        except TypeError as exc:
+            outcome = ToolResult("工具参数不对：" + str(exc)[:80], False, "bad_arguments")
+        except Exception as exc:  # noqa: BLE001 - 工具层永不抛出，交给模型兜底
+            outcome = ToolResult(ERROR_PREFIX + str(exc)[:100], False, "error")
+    finally:
+        set_cancel_check(None)
 
     # 连续对话：这三类结果之后用户通常还要接一句，先把窗口留着 ——
     # 否则他得再喊一次唤醒词才能说"点它"，那就不像人说话了。

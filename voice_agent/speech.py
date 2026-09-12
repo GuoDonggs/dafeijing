@@ -142,12 +142,23 @@ class VadSegmenter:
         self._cfg.silero_vad.threshold = float(cfg.agent.vad_threshold)
         self._cfg.silero_vad.min_silence_duration = cfg.agent.min_silence_ms / 1000.0
         self._cfg.silero_vad.min_speech_duration = cfg.agent.min_speech_ms / 1000.0
-        self._cfg.silero_vad.max_speech_duration = cfg.agent.max_utterance_ms / 1000.0
+        # silero 自己的"最长一段"只是**兜底**，真正决定"说完了"的是静音判定
+        # （min_silence_duration）和 agent 那边的 listen_hard_limit_ms。
+        # 以前这里直接用 max_utterance_ms（默认 15 秒）：用户一口气说十几秒不停顿，
+        # VAD 到点就把前半截当成一整句吐出来，agent 立刻拿去执行，**后半句根本没录**
+        # —— 这就是"说长指令被掐断"（agent 那条 45 秒硬上限永远走不到）。
+        # 取两者的较大值，让上限真正由 agent 说了算。
+        self._cfg.silero_vad.max_speech_duration = max(
+            int(cfg.agent.max_utterance_ms), int(cfg.agent.listen_hard_limit_ms)
+        ) / 1000.0
         self._cfg.sample_rate = self.sample_rate
         self._cfg.num_threads = 1
         self._cfg.provider = "cpu"
         self._vad = sherpa_onnx.VoiceActivityDetector(
-            self._cfg, buffer_size_in_seconds=max(30, int(cfg.agent.max_utterance_ms / 1000) + 10)
+            self._cfg,
+            # 缓冲比"最长一段"再多 10 秒：装得下整段，中途不会丢样本
+            buffer_size_in_seconds=max(
+                30, int(self._cfg.silero_vad.max_speech_duration) + 10),
         )
 
     def feed(self, block: np.ndarray) -> np.ndarray | None:

@@ -190,7 +190,8 @@ def main() -> int:
     # 大脑走的是 call_result（带 ok 标记的那个），所以要拦它而不是 call
     original_call = tools_mod.call_result
 
-    def spy(name, arguments=None, on_confirm=None):  # noqa: ANN001
+    # 签名要和真的 call_result 一致（多出来的 cancel_check 是长工具"半路收手"用的）
+    def spy(name, arguments=None, on_confirm=None, cancel_check=None):  # noqa: ANN001
         tools_calls.append(name)
         return tools_mod.ToolResult("工具已执行")
 

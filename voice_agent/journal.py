@@ -132,7 +132,20 @@ def tail(limit: int = 40, level: str = "info") -> list[str]:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
-    picked = lines if str(level) == "detail" else [ln for ln in lines if " [·] " not in ln]
+    if str(level) == "detail":
+        return lines[-max(1, int(limit)):]
+    # 多行日志（traceback、参数全文）的**续行**没有自己的标记，得跟着头一起跳过，
+    # 否则 --logs 里会漏出一堆缩进的碎片，读起来莫名其妙。
+    picked: list[str] = []
+    skipping = False
+    for line in lines:
+        if " [·] " in line:
+            skipping = True
+            continue
+        if line.startswith("    ") and skipping:
+            continue
+        skipping = False
+        picked.append(line)
     return picked[-max(1, int(limit)):]
 
 
@@ -169,7 +182,9 @@ def install_crash_handler() -> None:
               tag="crash")
 
     try:
-        threading.excepthook = thread_hook
+        previous_thread_hook = threading.excepthook
+        threading.excepthook = lambda args: (thread_hook(args),
+                                             previous_thread_hook(args))[0]
     except Exception:  # noqa: BLE001 - 老 Python 没有就算了
         pass
 
@@ -193,9 +208,15 @@ def adapt(log) -> Callable[..., None]:  # noqa: ANN001
         params = list(inspect.signature(log).parameters.values())
     except (TypeError, ValueError):
         params = []
-    if any(p.kind is p.VAR_KEYWORD for p in params) or \
-            len([p for p in params if p.kind in (p.POSITIONAL_ONLY,
-                                                 p.POSITIONAL_OR_KEYWORD)]) >= 2:
+    # **只看有没有一个叫 level 的参数**（Console.log(message, level=...) 就有）。
+    # 不能只数参数个数：print(*args, sep=..., end=...) 也能凑够两个，
+    # 那样命令行里每行都会多打印一个 "detail"。
+    # level 得是**位置参数**（Console.log(message, level=...) 就是）；
+    # 纯关键字参数的话 log(msg, "detail") 会 TypeError。
+    positional = [p for p in params
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    has_level = any(p.name == "level" for p in positional)
+    if has_level or any(p.kind is p.VAR_KEYWORD for p in params):
         return log
 
     def one_arg(message: str, level: str = "info") -> None:

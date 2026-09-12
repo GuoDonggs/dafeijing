@@ -162,26 +162,44 @@ def end_to_end() -> None:
         return user32.GetForegroundWindow() == hwnd and user32.GetFocus() == edit
 
     try:
-        # 鼠标：绝对定位（相对位移会被系统的"提高指针精确度"加速，落点会飘）
-        screen.mouse_move(cx, cy)
-        time.sleep(0.15)
-        moved = screen.mouse_position()
-        # 留 2 像素余量：真人在用电脑时鼠标会被碰到一两个像素，
-        # 这里要验的是"它落到了我们说的位置"，不是亚像素精度
-        check("鼠标能移到指定坐标", abs(moved[0] - cx) <= 2 and abs(moved[1] - cy) <= 2,
-              str(moved) + " 目标 " + str((cx, cy)))
-        screen.mouse_click(cx, cy)
-        pump(5)
-        try:
-            after = screen.mouse_position()
-        except RuntimeError as exc:
-            print("  [跳过] 鼠标位置突然读不到了（" + str(exc)[:40] + "），后面的不测")
-            return
+        # 鼠标：绝对定位（相对位移会被系统的"提高指针精确度"加速，落点会飘）。
+        #
+        # 落点只能在**没人动鼠标**的那一瞬间判：先两次读数确认环境安静，
+        # 再动手、立刻读回来。这台电脑可能正被人用着（实测过两次读之间鼠标
+        # 被拖走一千多像素），那时读到的是**他**的坐标 —— 那种情况下说清楚
+        # "这会儿测不了"，而不是报一个假失败；环境安静时该断的照断。
+        def quiet() -> bool:
+            first = screen.mouse_position()
+            time.sleep(0.3)
+            return screen.mouse_position() == first
+
+        def measure(action) -> tuple[str, tuple[int, int]]:  # noqa: ANN001
+            got = (0, 0)
+            for _ in range(6):
+                if not quiet():
+                    continue            # 有人在用电脑，等下一次
+                action()
+                got = screen.mouse_position()
+                if abs(got[0] - cx) <= 2 and abs(got[1] - cy) <= 2:
+                    return "ok", got
+                if not quiet():
+                    continue            # 落点不对是因为别人刚拖走 —— 不算数
+                return "miss", got
+            return "busy", got
+
+        state, moved = measure(lambda: screen.mouse_move(cx, cy))
+        if state == "busy":
+            print("  [跳过] 鼠标一直被移动（这台电脑有人在用），落点测不了；"
+                  "位置接口本身可用：" + str(moved))
+        else:
+            check("鼠标能移到指定坐标", state == "ok", str(moved) + " 目标 " + str((cx, cy)))
+        state2, after = measure(lambda: screen.mouse_click(cx, cy))
         if after == (0, 0) and moved != (0, 0):
             print("  [跳过] 鼠标位置突然变成 0,0（桌面被切走？），后面的不测")
             return
-        check("点击不会把鼠标带偏",
-              abs(after[0] - cx) <= 2 and abs(after[1] - cy) <= 2, str(after))
+        if state2 != "busy":
+            check("点击不会把鼠标带偏", state2 == "ok", str(after))
+        pump(5)
 
         if not focused():
             print("  [跳过] 拿不到前台焦点，键盘部分不测"

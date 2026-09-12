@@ -47,11 +47,12 @@ def mark_region_tool(x1: int = 0, y1: int = 0, x2: int = 0, y2: int = 0,
         mark, updated = marks_mod.store.add_or_update(
             "region", int(x1), int(y1), int(x2 or x1), int(y2 or y1),
             name=name, note=note)
+        note = _shown_note(hidden) + _saved_note()
         if updated:
             return ("好，「" + mark.name + "」改成 " + mark.summary().split(" 是 ", 1)[-1]
-                    + "。" + _shown_note(hidden))
+                    + "。" + note)
         return ("好，这块记成「" + mark.name + "」了（" + mark.summary().split(" 是 ", 1)[-1]
-                + "）。之后说「看看" + mark.name + "」就行。" + _shown_note(hidden))
+                + "）。之后说「看看" + mark.name + "」就行。" + note)
     picked = _interactive("region")
     if not picked:
         return ("要框哪一块？你可以直接说坐标（比如「框住 100,200 到 600,500」），"
@@ -61,7 +62,21 @@ def mark_region_tool(x1: int = 0, y1: int = 0, x2: int = 0, y2: int = 0,
                                       name=name, note=note or "用户框选")
     return ("好，框好了，这块叫「" + mark.name + "」（"
             + str(mark.width) + "×" + str(mark.height) + "）。"
-            + _shown_note(hidden))
+            + _shown_note(hidden) + _saved_note())
+
+
+def _saved_note() -> str:
+    """落盘失败时补一句实话。
+
+    以前 _save 把异常吞掉，工具照样回"记成范围1 了" —— 而磁盘上一个字都没写，
+    重启之后标记就没了，用户完全不知道发生过什么。
+    """
+    from .. import marks as marks_mod
+
+    problem = marks_mod.store.save_error
+    if not problem:
+        return ""
+    return ("【注意：这个标记没能存到磁盘（" + problem + "），重启程序后它会丢】")
 
 
 def _shown_note(was_hidden: bool) -> str:
@@ -82,11 +97,11 @@ def mark_point_tool(x: int = 0, y: int = 0, name: str = "", note: str = "") -> s
         hidden = not marks_mod.store.visible
         mark, updated = marks_mod.store.add_or_update("point", int(x), int(y),
                                                       name=name, note=note)
+        note = _shown_note(hidden) + _saved_note()
         if updated:
             return ("好，「" + mark.name + "」挪到 " + str(mark.x1) + "," + str(mark.y1)
-                    + " 了。" + _shown_note(hidden))
-        return ("好，" + mark.summary() + "，我记成「" + mark.name + "」了。"
-                + _shown_note(hidden))
+                    + " 了。" + note)
+        return ("好，" + mark.summary() + "，我记成「" + mark.name + "」了。" + note)
     picked = _interactive("point")
     if not picked:
         return ("要标哪个点？说坐标也行（比如「标在 800,450」），"
@@ -94,7 +109,8 @@ def mark_point_tool(x: int = 0, y: int = 0, name: str = "", note: str = "") -> s
     hidden = not marks_mod.store.visible
     mark = marks_mod.store.add_point(picked["x"], picked["y"], name=name,
                                      note=note or "用户标点")
-    return "好，" + mark.summary() + "，我记成「" + mark.name + "」了。" + _shown_note(hidden)
+    return ("好，" + mark.summary() + "，我记成「" + mark.name + "」了。"
+            + _shown_note(hidden) + _saved_note())
 
 
 def list_marks_tool() -> str:

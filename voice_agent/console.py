@@ -330,10 +330,17 @@ class Console:
         return ""
 
     def _backup(self) -> str:
-        if self.config_path.is_file():
-            backup = self.config_path.with_suffix(self.config_path.suffix + ".bak")
-            backup.write_text(self.config_path.read_text(encoding="utf-8"), encoding="utf-8")
-            return backup.name
+        """备份现有配置；备份不成也不该拦住保存（更不能把异常抛给 Qt）。"""
+        try:
+            if self.config_path.is_file():
+                backup = self.config_path.with_suffix(self.config_path.suffix + ".bak")
+                backup.write_text(self.config_path.read_text(encoding="utf-8"),
+                                  encoding="utf-8")
+                return backup.name
+        except OSError as exc:
+            # 配置被编辑器/同步盘占着、磁盘满、目录只读……都算。说一句就好：
+            # 这里要是抛出去，Qt 槽里的异常会让整个进程 abort（窗口直接消失）。
+            self.log("[ui] 没能备份配置：" + str(exc)[:80])
         return ""
 
     def _validate_config_text(self, text: str) -> str:
@@ -402,6 +409,10 @@ class Console:
             "llm.api_key": "",
             "llm.api_key_set": bool(cfg.llm.resolved_key()),
             "agent.barge_in_wake": cfg.agent.barge_in_wake,
+            # **别漏键**：网页版的「保存设置」是整张表单提交的，
+            # 少了哪个键，前端拿到 undefined 就按"未勾选"提交回去 ——
+            # 用户点一次保存，提示音就被静默关掉了（真实的 bug）。
+            "agent.cues": cfg.agent.cues,
             "agent.confirm.enabled": cfg.agent.confirm.enabled,
             "agent.listen_timeout_ms": cfg.agent.listen_timeout_ms,
             # 子代理：改完立刻生效（管理器每次都从 cfg 现读，不用重启）
@@ -472,27 +483,26 @@ class Console:
         except (TypeError, ValueError):
             return {"ok": False, "error": "音量得是数字"}
         previous = float(self.cfg.audio.output_gain)
-        self.cfg.audio.output_gain = level
         result: dict = {"ok": True, "percent": int(round(level * 100))}
         if persist:
+            # **别在落盘之前改 self.cfg**：_after_config_change 是靠"新旧两份配置的
+            # 差集"决定要不要提示重启的，提前把内存改成新值，它就以为"什么都没变"
+            # 而把之前攒的「这 1 项要重启才生效」一起清掉 —— 用户以为没事了，
+            # 引擎却还在跑旧设置。成功落盘后 update_from 会把新值搬进来。
             saved = self.update_config({"audio.output_gain": round(level, 3)})
             if not saved.get("ok"):
-                # 落盘失败就要把内存里的值退回去：不然界面显示的音量和
-                # config.yaml 里的不一致，下次启动又变回去，谁也说不清。
+                # 落盘失败就把实时增益也退回去：不然界面显示的音量和 config.yaml
+                # 里的不一致，下次启动又变回去，谁也说不清。
                 audio_io.set_output_gain(previous)
-                self.cfg.audio.output_gain = previous
                 return {"ok": False, "error": saved.get("error")}
         return result
 
     def set_accent(self, value: Any) -> dict:
         """换主题主色。只写配置 —— 界面自己负责刷新生效，不用重启。"""
         raw = "" if value is None else str(value).strip()
-        probe = self.cfg.ui.accent
-        self.cfg.ui.accent = raw
-        result = self.update_config({"ui.accent": raw})
-        if not result.get("ok"):
-            self.cfg.ui.accent = probe
-        return result
+        # 同样不预写 self.cfg（理由见 set_volume）：界面上换色是它自己刷新的，
+        # 配置落盘后 update_from 会把新值搬进内存。
+        return self.update_config({"ui.accent": raw})
 
     # ───────────────── 音色 ─────────────────
 
@@ -587,7 +597,19 @@ class Console:
                 "loading": needs_load}
 
     def update_config(self, updates: dict) -> dict:
-        """按 a.b.c 的形式改若干项，其余内容原样保留（注释会丢，所以先备份）。"""
+        """按 a.b.c 的形式改若干项，其余内容原样保留（注释会丢，所以先备份）。
+
+        **权限模式是个例外**：它必须先过 security.set_mode 的合法性检查
+        （只能逐级放宽、名字要对）并写审计，所以这里把它转给 set_permission_mode ——
+        以前两个前端都是直写配置，等于绕开了那套校验，审计里也看不到谁改了权限。
+        """
+        updates = dict(updates or {})
+        wanted_mode = updates.pop("security.mode", None)
+        result: dict = {"ok": True}
+        if wanted_mode is not None:
+            result = self.set_permission_mode(str(wanted_mode))
+            if not result.get("ok") or not updates:
+                return result
         raw: dict = {}
         if self.config_path.is_file():
             try:
@@ -602,7 +624,7 @@ class Console:
             raw = dict(self.cfg.raw or {})
         if not isinstance(raw, dict):
             raw = {}
-        for dotted, value in (updates or {}).items():
+        for dotted, value in updates.items():
             if dotted in self.LIST_KEYS and isinstance(value, str):
                 value = [part.strip() for part in re.split(r"[,，、]", value) if part.strip()]
             node = raw
@@ -620,7 +642,7 @@ class Console:
                 normalize_keys(raw), allow_unicode=True, sort_keys=False, default_flow_style=False
             ),
             message="设置已更新",
-            keys=list(updates or {}),
+            keys=list(updates),
         )
 
     def _apply_voice_live(self) -> None:
@@ -768,8 +790,11 @@ class Console:
             return {"ok": False, "error": "YAML 语法错误：" + str(exc)[:200]}
         if not isinstance(data, dict) or not data.get("name"):
             return {"ok": False, "error": "至少要有一个 name 字段"}
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            return {"ok": False, "error": "写入失败：" + str(exc)[:120]}
         self.reload_skills()
         match = [s for s in self.skills if str(s.source) == str(target)]
         if match and not match[0].ok:
@@ -826,7 +851,10 @@ class Console:
         if not any(target.is_relative_to(root) for root in allowed):
             return {"ok": False, "error": "只能删除技能目录里的文件"}
         if target.is_file():
-            target.unlink()
+            try:
+                target.unlink()
+            except OSError as exc:
+                return {"ok": False, "error": "删不掉：" + str(exc)[:120]}
             self.reload_skills()
             self.log("[skills] 已删除 " + str(target))
             return {"ok": True}
@@ -898,6 +926,14 @@ class Console:
                 "title": tool.display,
                 "description": tool.description,
                 "confirm": tool.confirm,
+                # "只有动手时才问"的工具（查权限模式 vs 改权限模式）：
+                # 界面上要能区分，否则用户会以为"查一下也要我点头"
+                "confirm_if": bool(tool.confirm_if),
+                # 同一类操作（鼠标/键盘）在一条指令里只问一次 —— 界面上写清楚，
+                # 用户才知道"为什么这次没问"
+                "group": tool.group,
+                # 结果进模型上下文的字符预算（0 = 用默认值）
+                "result_budget": int(tool.result_budget or 0),
                 "source": tool.source,
                 # builtin / skill / tool（tools/ 目录里的自定义工具）
                 "builtin": tool.source == "builtin",
@@ -929,13 +965,13 @@ class Console:
             from . import audio as audio_io  # noqa: PLC0415
 
             agent = self.ensure_agent()
-            if agent.vad is None:
-                try:
+            try:
+                if agent.vad is None:
                     agent.load()
-                except Exception as exc:  # noqa: BLE001 - 模型不齐时 load 会抛
-                    # 这个函数可能从 Qt 槽里被调用，异常逃出去会让进程直接 abort
-                    self.log("[ui] 录音测试起不来：" + str(exc)[:120])
-                    return {"ok": False, "error": "语音模型没加载起来：" + str(exc)[:120]}
+            except Exception as exc:  # noqa: BLE001 - 模型不齐时 load 会抛
+                # 这个函数可能从 Qt 槽里被调用，异常逃出去会让进程直接 abort
+                self.log("[ui] 录音测试起不来：" + str(exc)[:120])
+                return {"ok": False, "error": "语音模型没加载起来：" + str(exc)[:120]}
             device = audio_io.resolve_device(self.cfg.audio.input_device, "input")
             mic = audio_io.Mic(device=device, sample_rate=self.cfg.audio.sample_rate,
                                block_size=self.cfg.audio.block_size)

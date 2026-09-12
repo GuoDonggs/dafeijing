@@ -50,7 +50,7 @@ def _switch(name):
 
 CONSOLE_ONLY = _switch("VOICE_AGENT_CONSOLE_ONLY")
 SLIM = _switch("VOICE_AGENT_SLIM")
-# exe 的版本资源（属性 → 详细信息里那份 1.1）。由 build_exe.py 生成；
+# exe 的版本资源（属性 → 详细信息里那份版本号）。由 build_exe.py 生成；
 # 直接敲 pyinstaller 时用仓库里现成的那份，没有就不带版本号。
 VERSION_FILE = os.environ.get("VOICE_AGENT_VERSION_FILE") or str(PACKAGING_DIR / "version_info.txt")
 if not Path(VERSION_FILE).is_file():
@@ -189,7 +189,7 @@ _COMMON = dict(
     strip=False,
     debug=False,
     bootloader_ignore_signals=False,
-    version=VERSION_FILE,        # exe 属性里的版本号（1.1）
+    version=VERSION_FILE,        # exe 属性里的版本号（取自 voice_agent.__version__）
 )
 
 targets = []

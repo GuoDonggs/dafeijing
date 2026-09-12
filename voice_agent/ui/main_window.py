@@ -394,10 +394,24 @@ class MainWindow(QWidget):
     def _begin_selection(self, kind: str) -> None:
         overlay = self._ensure_overlay()
         overlay.show_overlay()
+        want = "point" if kind == "point" else "region"
+        current = getattr(overlay, "_selecting", "")
+        if current:
+            # 已经在框选模式里了。以前这里照样调 start_selection —— 它看见
+            # _selecting 非空就直接 return False（什么都不做），于是工具在那边
+            # 白等到 45 秒超时。
+            #   · 类型一样：用户的操作还在进行，接着选完就会交给工具；
+            #   · 类型不一样（多半是菜单先开的那种）：直接换成工具要的那种。
+            if current != want:
+                overlay.restart_selection(want)
+            self.console.log("[ui] 现在是" + ("标点" if want == "point" else "框选")
+                             + "模式，直接在屏幕上操作就行（按 Esc 取消）")
+            return
         self.console.log("[ui] 请在屏幕上"
-                         + ("点一下" if kind == "point" else "拖一个框")
+                         + ("点一下" if want == "point" else "拖一个框")
                          + "（按 Esc 取消）")
-        overlay.start_selection(kind)
+        if not overlay.start_selection(want):
+            self.console.log("[ui] 框选没能打开，你再试一次")
 
     def _on_selection_done(self, result) -> None:
         """用户选完了：要么交给等着的工具，要么直接存成标记（菜单进来的）。"""
@@ -436,7 +450,10 @@ class MainWindow(QWidget):
         QTimer.singleShot(700, self._quit_now)
 
     def _quit_now(self) -> None:
-        self._save_position()
+        # 位置存在 QSettings 里（closeEvent 也做一次）。以前这里调了一个
+        # **根本不存在**的 self._save_position() —— 语音说「退下」走的就是这条路，
+        # AttributeError 直接把进程 abort 掉（窗口"啪"地消失）。
+        self._remember_position()
         self.console.stop_engine()
         app = QApplication.instance()
         if app is not None:
@@ -722,8 +739,15 @@ class MainWindow(QWidget):
         area = screen.availableGeometry()
         self.move(area.right() - self.width() - 40, area.top() + 60)
 
+    def _remember_position(self) -> None:
+        """把窗口位置记下来（下次打开还在原地）。"""
+        try:
+            self.settings.setValue("position", self.pos())
+        except Exception:  # noqa: BLE001 - 记不住位置不该拦住退出
+            pass
+
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802
-        self.settings.setValue("position", self.pos())
+        self._remember_position()
         try:
             self.console.stop_engine()
         except Exception:  # noqa: BLE001

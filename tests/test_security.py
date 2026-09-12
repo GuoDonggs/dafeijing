@@ -121,8 +121,12 @@ def main() -> int:
     check("放宽走的是同一张阶梯表", ok and security.mode() == "danger-full-access", message)
     ok, message = security.set_mode("root")
     check("不存在的模式会被拒绝", not ok, message)
-    check("权限工具本身必须确认（模型不能自己提权）",
-          bool(tools.REGISTRY["permission_mode"].confirm))
+    # 改权限必须确认（模型不能自己提权）；**只是查一下**现在几档不用问 ——
+    # 用户问"现在什么权限"却被要求先确认一次，那一步毫无意义。
+    permission_tool = tools.REGISTRY["permission_mode"]
+    check("改权限必须确认（模型不能自己提权）",
+          permission_tool.wants_confirm({"mode": "danger-full-access"}))
+    check("只查询权限模式不弹确认", not permission_tool.wants_confirm({}))
 
     print("\n限流：防止反复弹确认把人问烦")
     target = str(Path(_BUILD.name) / "probe.txt")
@@ -197,6 +201,31 @@ def main() -> int:
     check("记录了限流", "rate_limited" in text)
     check("记录了明文链路降级", "transport_downgrade" in text)
 
+    # 一次拒绝只该留下一行。check() 里已经记过（deny_tools / 只读拒绝），
+    # call_result 以前又记一条 —— 同一个动作在日志里出现两行，事后查
+    # "它到底被拦了几次"就会看糊涂。
+    security.configure(make_config("read-only"))
+    denied_args = {"path": str(Path(_BUILD.name) / "nope.txt"), "content": "x"}
+    tools.call_result("write_file", denied_args)
+    rows = [line for line in audit_lines() if "nope.txt" in line]
+    check("只读拒绝只写一行审计（不是两行）", len(rows) == 1, str(len(rows)))
+    check("这一行里带着参数和拒绝原因",
+          '"reason": "read-only"' in rows[0] and "nope.txt" in rows[0], rows[0][:80])
+
+    security.configure(make_config())
+    security.configure(type("C", (), {"security": type("S", (), {
+        "mode": "workspace-write", "deny_tools": ["write_file"], "always_confirm": [],
+        "floor_tools": None, "allow_insecure": False, "max_prompts_per_minute": 6,
+        "max_same_action": 3, "audit": True})(),
+        "llm": type("L", (), {"base_url": "https://api.deepseek.com/v1"})()})())
+    tools.call_result("write_file", {"path": str(Path(_BUILD.name) / "denied.txt"),
+                                     "content": "x"})
+    rows = [line for line in audit_lines() if "denied.txt" in line]
+    check("禁止名单拒绝也只写一行", len(rows) == 1, str(len(rows)))
+    check("记的是 blocked + deny_tools",
+          '"event": "blocked"' in rows[0] and '"reason": "deny_tools"' in rows[0], rows[0][:80])
+    security.configure(make_config())
+
     print("\n放开模式：声明了 confirm 的工具也不再问")
     # 用户的抱怨："我都设成完全开放了，拖个鼠标还要确认"。根因是工具层那句
     # `decision.needs_confirm or tool.confirm` —— 后半句让"模式说了算"永远不生效。
@@ -224,7 +253,10 @@ def main() -> int:
         # 这一条是安全回归：permission_mode 是"用户本人授权"的唯一通道，
         # 它必须任何模式下都问 —— 不能因为"放开模式不问"就被顺手放过。
         check("权限工具在放开模式下仍然要确认（不能靠模式悄悄提权）",
-              security.check(tools.REGISTRY["permission_mode"]).needs_confirm)
+              security.check(tools.REGISTRY["permission_mode"],
+                             {"mode": "danger-full-access"}).needs_confirm)
+        check("而查一下权限模式在放开模式下直接放行",
+              security.check(tools.REGISTRY["permission_mode"], {}).allowed)
         security.configure(make_config("workspace-write"))
         security.reset_limits()
         check("标准模式下拖拽仍然要先确认", security.check(drag).needs_confirm)

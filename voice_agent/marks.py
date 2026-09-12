@@ -30,6 +30,16 @@ POINT_PREFIX = "点"
 _NAME_RE = re.compile(r"^(范围|区域|region|点|point)\s*(\d+)?$", re.IGNORECASE)
 
 
+def _name_key(name: str) -> str:
+    """比较名字时用的规范形式：去掉**所有空白**再小写。
+
+    「范围 1」和「范围1」在 get() 眼里是同一个标记（正则允许中间有空格），
+    判重也必须按同一个口径来 —— 否则能存出两个"看起来一模一样"的标记：
+    一个叫「范围 1」，一个叫「范围1」，用户根本分不清说的是哪个。
+    """
+    return "".join(str(name or "").split()).lower()
+
+
 @dataclass
 class Mark:
     """一个标记：矩形区域或一个点。"""
@@ -107,6 +117,9 @@ class MarkStore:
         #: 标记要跟着写到新目录去（import 期算死的路径改不动）
         self._fixed_path = Path(path) if path else None
         self._version = 0        # 界面靠它判断"要不要重画"
+        #: 最近一次落盘失败的原因（空串 = 成功）。工具层拿它如实告诉用户
+        #: "这个标记没存到磁盘上" —— 以前存不下是静默的，重启之后标记就没了。
+        self._save_error = ""
         self._load()
 
     @property
@@ -169,6 +182,11 @@ class MarkStore:
         print("[marks] " + str(target) + " 读不出来（" + str(exc)[:60] + "）"
               + where + "；这次按「还没有标记」处理", file=sys.stderr, flush=True)
 
+    @property
+    def save_error(self) -> str:
+        """最近一次落盘失败的原因（空串表示一切正常）。"""
+        return self._save_error
+
     def _save(self) -> None:
         """落盘。**先在锁里拍快照**，再原子替换。
 
@@ -179,9 +197,11 @@ class MarkStore:
         （先截断再写），两个线程同时写会把文件写坏。
         """
         try:
+            # **整段都在锁里**：以前只把"拍快照"放进锁，写文件在外面，
+            # 两个线程同时落盘时会互相覆盖 —— 内存里有「点1」、磁盘上是旧快照，
+            # 重启之后标记就没了（探针复现过），而且不抛异常、_save_error 还是空。
             with self._lock:
                 marks = []
-                visible = bool(self._visible)
                 for key in list(self._order):
                     mark = self._items.get(key)
                     if mark is None:
@@ -189,15 +209,18 @@ class MarkStore:
                     marks.append({"name": mark.name, "kind": mark.kind,
                                   "x1": mark.x1, "y1": mark.y1,
                                   "x2": mark.x2, "y2": mark.y2, "note": mark.note})
-            target = self.path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"version": 1, "visible": visible, "marks": marks}
-            temp = target.with_suffix(target.suffix + ".tmp")
-            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                            encoding="utf-8")
-            os.replace(temp, target)      # 原子替换：中途崩了也不会留下半截文件
-        except Exception:  # noqa: BLE001 - 存不下不该影响"框一下"这件事本身
-            pass
+                target = self.path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                payload = {"version": 1, "visible": bool(self._visible), "marks": marks}
+                temp = target.with_suffix(target.suffix + ".tmp")
+                temp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                                encoding="utf-8")
+                os.replace(temp, target)  # 原子替换：中途崩了也不会留下半截文件
+            self._save_error = ""
+        except Exception as exc:  # noqa: BLE001 - 存不下不该影响"框一下"这件事本身
+            # 不抛异常（"框一下"本身要继续可用），但也**不能静默**：
+            # 记下原因，工具层会告诉用户"这个标记只在内存里，重启就没了"。
+            self._save_error = str(exc)[:80]
 
     # ── 读写 ──
     @property
@@ -246,7 +269,17 @@ class MarkStore:
         """
         with self._lock:
             self._visible = True     # 同上：改一个已有标记也要看得见改动
-            existing = self._items.get(str(name or "").strip())
+            exact = str(name or "").strip()
+            existing = self._items.get(exact)
+            if existing is None and exact:
+                # 全等找不到，就按"去掉空白"再找一遍（「范围 1」↔「范围1」）。
+                # 否则会新建出第二个几乎同名的标记，用户说「改范围1」时
+                # 改的是哪一个全看运气。
+                key = _name_key(exact)
+                for candidate in self._items:
+                    if _name_key(candidate) == key:
+                        existing = self._items[candidate]
+                        break
             if existing is not None and existing.kind == kind:
                 # 检查和改写必须在**同一个**临界区里：分两次加锁的话，
                 # 中间被 remove() 摘掉时会去改一个已经不在表里的旧对象，
@@ -273,7 +306,8 @@ class MarkStore:
             # 之前藏着的状态在这里让位给"刚加的东西得让人看见"。
             self._visible = True
             final = str(name or "").strip() or self._next_name(kind)
-            if final in self._items:
+            if final in self._items or any(_name_key(key) == _name_key(final)
+                                           for key in self._items):
                 final = self._next_name(kind)
             mark = Mark(name=final, kind=kind, x1=int(x1), y1=int(y1),
                         x2=int(x2), y2=int(y2), note=str(note or "")[:60])
@@ -302,6 +336,13 @@ class MarkStore:
             return None
         if key in items:
             return items[key]
+        # 全等找不到，就按"去掉空白"再找一遍（「范围 1」↔「范围1」）：
+        # 名字可能是模型写的、或者老数据文件里带空格，而用户嘴上说的是听不出
+        # 空格的 —— 只认全等就会出现"明明有个「范围 1」，它却说没有"。
+        loose = _name_key(key)
+        for existing, mark in items.items():
+            if _name_key(existing) == loose:
+                return mark
         match = _NAME_RE.match(key)
         if not match:
             return None
@@ -339,6 +380,14 @@ class MarkStore:
                 return True, ""
             if target in self._items:
                 return False, "已经有叫「" + target + "」的标记了"
+            # 再按"去掉空白"查一遍：改名叫「范围1」时，表里可能已经躺着一个
+            # 「范围 1」—— 直接改名会得到两个分不清的标记（跳过自己）。
+            key = _name_key(target)
+            for existing in self._items:
+                if existing == source:
+                    continue
+                if _name_key(existing) == key:
+                    return False, "已经有叫「" + existing + "」的标记了"
             self._items.pop(source)
             mark.name = target
             self._items[target] = mark

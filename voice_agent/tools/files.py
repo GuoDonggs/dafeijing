@@ -31,7 +31,11 @@ _SKIP_DIRS = frozenset({
 #: 找文件的预算。用户说「D盘下」时那是一次**整盘扫描**：不设上限的话，
 #: 一个不存在的文件名能让助手沉默好几分钟（用户只会以为它死了）。
 SEARCH_SECONDS = 6.0
-SEARCH_MAX_ENTRIES = 80000
+#: 条数上限**只是兜底**，真正的边界是 SEARCH_SECONDS。实测（D 盘、元数据
+#: 已缓存）扫描 8 万条只要 0.27 秒 —— 旧值 80000 会在时间预算用掉不到 5% 时
+#: 就停下，于是"整盘找"经常报"没扫完"、明明还在预算里却不找了。给足 60 万，
+#: 让 6 秒的时间预算说了算（单个目录塞了几十万项时仍有上限兜着）。
+SEARCH_MAX_ENTRIES = 600000
 
 #: 口语路径里的分隔说法（「D盘**下的**桌面**下的**对焦文件夹」）
 _CHAIN_SEP = re.compile(r"(?:下面的|下面|下的|里的|里面的|之中的|中的|上面|里面|之中|中|里)")
@@ -93,19 +97,32 @@ def _spoken_head(segment: str, base: Path | None = None) -> Path | None:
     return None
 
 
+#: 候选路径最多枚举这么多条。每一段"带不带尾巴"都是两选一，段数一多就是 2 的幂：
+#: 实测 12 段要 1.4 秒、16 段要 9.4 秒（而且每多一段翻四倍）—— 长句子不该把工具卡住。
+_CHAIN_LIMIT = 256
+
+
 def _chain_candidates(tail: list[str]) -> list[list[str]]:
     """每一段都可能带着「文件夹」这种尾巴，也可能不带 —— 两种都试一遍。"""
-    variants = [list(tail)]
+    variants: list[list[str]] = [list(tail)]
+    seen = {tuple(tail)}
     for index, part in enumerate(tail):
+        if len(variants) >= _CHAIN_LIMIT:
+            break
         stripped = _CHAIN_TAIL.sub("", part).strip()
         if not stripped or stripped == part:
             continue
         # 必须迭代**快照**：直接 for item in variants 的同时又 append 进去，
         # 生成器会跟着变长的列表一直读下去 —— 那不是组合枚举，是无限膨胀
-        # （实测直接卡死，一个候选都试不出来）。
+        # （实测直接卡死，一个候选都试不出来）。用 set 去重是因为列表里
+        # 有多少条就要线性扫多少条，本身也是平方级的。
         for item in list(variants):
+            if len(variants) >= _CHAIN_LIMIT:
+                break
             candidate = item[:index] + [stripped] + item[index + 1:]
-            if candidate not in variants:
+            key = tuple(candidate)
+            if key not in seen:
+                seen.add(key)
                 variants.append(candidate)
     return variants
 
@@ -173,6 +190,8 @@ def _walk_files(base: Path, match, limit: int,
     import time as _time  # noqa: PLC0415
     from collections import deque  # noqa: PLC0415
 
+    from . import cancelled as _cancelled  # noqa: PLC0415 - 顶层导入会成环
+
     if base is None:
         # 起点是 None 时 os.scandir 会去扫**当前工作目录**（打包版的 exe 旁边、
         # 或者 System32）—— 那是静默地找错地方，不如干脆什么都不扫。
@@ -186,7 +205,8 @@ def _walk_files(base: Path, match, limit: int,
     deadline = _time.monotonic() + max(0.5, float(seconds))
     queue: deque[Path] = deque([base])
     while queue:
-        if _time.monotonic() > deadline or scanned > SEARCH_MAX_ENTRIES:
+        if (_cancelled() or _time.monotonic() > deadline
+                or scanned > SEARCH_MAX_ENTRIES):
             stopped = True
             break
         current = queue.popleft()
@@ -194,6 +214,16 @@ def _walk_files(base: Path, match, limit: int,
             with os.scandir(current) as entries:
                 for entry in entries:
                     scanned += 1
+                    # 每 1024 项查一次预算：单个目录里塞了几十万项时，
+                    # 只在"取下一个目录"前查等于没有上限（6 秒会变成十几秒）。
+                    if not scanned % 1024 and _time.monotonic() > deadline:
+                        stopped = True
+                        break
+                    # 用户打断（或说了新指令）→ 立刻停：整盘扫描能跑好几秒，
+                    # 那几秒里他已经听到"已打断"了，机器不该还在转
+                    if not scanned % 1024 and _cancelled():
+                        stopped = True
+                        break
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             if entry.name.lower() in _SKIP_DIRS:
@@ -269,6 +299,10 @@ BINARY_SUFFIXES = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".
                    ".7z", ".exe", ".dll", ".msi", ".mp3", ".mp4", ".wav", ".avi", ".mkv")
 #: 图片：read_file 读出来是乱码，要看内容得用看图 / 找图那两个工具
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tif", ".tiff")
+#: 超过这个大小就不整篇读进内存（几百 MB 的日志会直接把内存打满），
+#: 只读开头 READ_FILE_HEAD_LINES 行，并告诉调用方怎么接着读。
+READ_FILE_MAX_BYTES = 8 * 1024 * 1024
+READ_FILE_HEAD_LINES = 200
 
 
 def document_hint(name: str) -> str:
@@ -313,6 +347,16 @@ def read_file(path: str = "", max_chars: int = 800, start: int = 1,
         return ("这个不是纯文本（" + suffix + "），按文本读只会是乱码。"
                 "Word / PDF / Excel 请先导出成 txt 或 md 再让我读。")
     try:
+        size = target.stat().st_size
+    except OSError:
+        size = 0
+    if size > READ_FILE_MAX_BYTES:
+        # 几百 MB 的日志/JSON 直接 read_text 会把内存打满、还要等很久。
+        # 只读开头那一段，并说清楚后面还有多少 —— 需要更多就按 start 继续读。
+        return ("这个文件太大了（" + str(round(size / 1024 / 1024, 1)) + " MB），"
+                "我先只读开头一段。要接着读就说：read_file(path=\""
+                + str(target) + "\", start=" + str(READ_FILE_HEAD_LINES + 1) + ")")
+    try:
         text = target.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
         return "读不了这个文件：" + str(exc)[:60]
@@ -325,6 +369,8 @@ def read_file(path: str = "", max_chars: int = 800, start: int = 1,
         return "这个文件一共 " + str(total) + " 行，从第 " + str(first) + " 行读已经没有内容了"
     budget = max(120, int(max_chars or 800))
     want_lines = max(0, int(lines or 0))
+    if size > READ_FILE_MAX_BYTES and not want_lines:
+        want_lines = READ_FILE_HEAD_LINES      # 大文件：先看开头这么多行
     picked: list[str] = []
     used = 0
     for index in range(first - 1, total):

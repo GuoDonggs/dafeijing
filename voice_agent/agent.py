@@ -4,8 +4,8 @@
 线程模型（刻意保持简单，只有两条线程）：
 
     采集线程（主循环）      喂唤醒词、喂 VAD、收句子，外加一次识别
-       │                    识别实测 RTF 0.03（1 秒音频约 35ms，且被
-       │                    max_utterance_ms 封顶），这点停顿换来状态机极简；
+       │                    识别实测 RTF 0.03（1 秒音频约 35ms），这点停顿
+       │                    换来状态机极简；
        │                    真正耗时的 LLM 与工具调用都在工作线程里
        ▼
     工作线程（按需创建）    大脑 → 工具 → TTS 播放
@@ -48,6 +48,13 @@ _IDLE, _LISTEN, _THINK, _WAIT = "idle", "listen", "think", "wait"
 # 原因：没有回声消除，扬声器的起音最容易被自己的 KWS 当成唤醒词，
 # 一打断整句回复就没了 —— 用户听到的正是"它回复了却没出声"。
 BARGE_IN_GRACE_S = 0.8
+
+#: 整句否决的说法：只要答案里出现这些，后面/前面有多少个「好」「行」都不算同意。
+#: 「对，不是这个意思」「好的，不是这个」这类"先肯定后否定"以前会被判成同意 ——
+#: 因为只看肯定词**前面三个字**里有没有否定字，而后面的否定根本没人看。
+#: 注意只列**成词**的否定：单看一个「没」字会把「没问题」这种地道的同意也毙掉。
+_DENY_PHRASES = ("不是", "不对", "不能", "不可以", "不行", "不要", "不用", "别",
+                 "取消", "算了", "打住", "停下", "先别", "拒绝")
 
 #: 否定字：出现在肯定词前面时，「行」就不再是「行」。
 #: 语音确认是整个权限模型里**唯一**的人工闸门，把「不太行」听成「行」
@@ -232,6 +239,11 @@ class VoiceAgent:
                                            if self._wake_on else "已关闭"))
             self._speak("语音助手已就绪，随时听候吩咐。", kind="notice")
 
+        # **推进 epoch 再清 _stopping**：stop() 只 join 2 秒，卡在长工具调用里的
+        # 旧 worker 可能还活着。它手里的 TurnToken 会被 stop() 置成"停"、
+        # 又被这里的 clear() 变回"没停" —— 于是它接着调模型、动鼠标键盘，
+        # "作废不可逆"就不成立了。引擎重启同样算一次作废。
+        self._epoch += 1
         self._stopping.clear()
         self._running = True
         self.mic = audio_io.Mic(
@@ -1015,7 +1027,9 @@ class VoiceAgent:
         if not answer.strip():
             self.log("[agent] 确认两次都没听到回答，按拒绝处理")
             self._speak("还是没听到，我先不做了。", kind="notice")
-            self._confirm_memory[key] = False
+            # **不写确认记忆**：这次是"没听到"，不是用户拒绝。写进去的话，
+            # 模型重发同一个调用时会走缓存直接回"用户取消了这次操作" ——
+            # 用户根本没被问过，说"确认"也没人听。
             return False
 
         value = answer.strip()
@@ -1025,9 +1039,9 @@ class VoiceAgent:
         if verdict is None:
             verdict = self.brain.judge(prompt, value)
         if verdict is None:
-            # 语义判断不可用：既没听到明确的「确认」也没听到「取消」，保守拒绝
+            # 语义判断不可用：既没听到明确的「确认」也没听到「取消」，保守拒绝。
+            # 同样**不记进记忆**：他可能只是答得含糊，再问一次还有机会。
             self._speak("我没听准，为安全起见先不执行。", kind="notice")
-            self._confirm_memory[key] = False
             return False
         self._confirm_memory[key] = bool(verdict)
         if verdict and group_key:
@@ -1053,22 +1067,29 @@ class VoiceAgent:
         text = re.sub(r"[\s，,。.、！!~～]+$", "", text)
         if not text:
             return None
+        # 词表里写的是小写：离线规则模式下答「OK」「Ok」以前会落到"没听准"，
+        # 用户明明同意了却什么都不做。中文不受影响，英文统一按小写比。
+        low = text.lower()
         confirm = self.cfg.agent.confirm
         for word in (confirm.no or []):
-            if word and word in text:
+            if word and str(word).lower() in low:
+                return False
+        for phrase in _DENY_PHRASES:
+            if phrase in low:
                 return False
         if len(text) > _WORDLIST_MAX or any(mark in text for mark in _DOUBT_WORDS):
             return None
         for word in (confirm.yes or []):
             if not word:
                 continue
+            word = str(word).lower()
             start = 0
             while True:
-                index = text.find(word, start)
+                index = low.find(word, start)
                 if index < 0:
                     break
-                before = text[max(0, index - 3):index]
-                after = text[index + len(word):index + len(word) + 2]
+                before = low[max(0, index - 3):index]
+                after = low[index + len(word):index + len(word) + 2]
                 # 前面是反问尾巴也算（「好什么好」的第二个「好」前面就是「好什么」）
                 if (not any(ch in _NEGATIVE_CHARS for ch in before)
                         and not before.endswith(_DOUBT_TAILS)

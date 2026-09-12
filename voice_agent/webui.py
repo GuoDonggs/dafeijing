@@ -87,9 +87,19 @@ def _make_handler(console: Console):
             return site in ("", "same-origin", "none")
 
         def _authorized(self, token: str = "") -> bool:
-            """敏感操作必须同时带上正确的 token，且不是跨站发起的。"""
+            """敏感操作必须同时带上正确的 token，且不是跨站发起的。
+
+            比较前先编码成 bytes：secrets.compare_digest 只吃 ASCII 字符串，
+            带中文的 token 会抛 TypeError —— 而那一下在 try 之外，连接会被直接
+            断开（没有 403、也没有响应体）。
+            """
             supplied = token or self.headers.get("X-Voice-Token") or ""
-            return secrets.compare_digest(supplied, console.token) and self._same_origin()
+            try:
+                ok = secrets.compare_digest(supplied.encode("utf-8", "ignore"),
+                                            console.token.encode("utf-8", "ignore"))
+            except (TypeError, ValueError):
+                ok = False
+            return ok and self._same_origin()
 
         def _host_ok(self) -> bool:
             """防 DNS rebinding：域名被解析到 127.0.0.1 时，浏览器发来的 Host 是攻击者的域名。"""
@@ -128,7 +138,9 @@ def _make_handler(console: Console):
                 return self._json({"ok": True, "items": [
                     {
                         "name": t.name, "title": t.display, "description": t.description,
-                        "confirm": t.confirm, "source": t.source,
+                        "confirm": t.confirm, "confirm_if": bool(t.confirm_if),
+                        "group": t.group, "result_budget": int(t.result_budget or 0),
+                        "source": t.source,
                         "tags": list(t.tags),
                         "parameters": list((t.parameters.get("properties") or {}).keys()),
                     }
@@ -236,6 +248,12 @@ def _make_handler(console: Console):
 
                 if path == "/api/skills/delete":
                     return self._json(console.delete_skill(str(payload.get("path") or "")))
+
+                if path == "/api/skills/install":
+                    # 桌面版有这个按钮（缺 Python 包时点一下就装），网页版以前
+                    # 只有一句"装一下：python -m pip install xxx"要用户自己去敲
+                    return self._json(console.install_skill_deps(
+                        str(payload.get("path") or "")))
             except Exception as exc:  # noqa: BLE001 - 接口层兜底，别让页面拿到 500 空响应
                 console.log("[ui] 接口出错：" + str(exc))
                 return self._json({"ok": False, "error": str(exc)[:200]}, 500)

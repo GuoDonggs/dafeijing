@@ -112,6 +112,12 @@ def main() -> int:
     info = paths.describe()
     check("describe 里有目录和清单", bool(info.get("dir")) and bool(info.get("items")),
           str(info.get("dir")))
+    # 清单要跟 _LAYOUT 对得上：以前漏了 logs / keywords / selftest.wav，
+    # 界面上和 doctor 里就少了几项（用户找不到"日志到底写哪了"）
+    listed = {row["name"] for row in info["items"]}
+    check("清单里有日志目录", "logs" in listed, str(sorted(listed)))
+    check("清单里有唤醒词音素表和自检音频",
+          {"keywords", "selftest_audio"} <= listed, str(sorted(listed)))
 
     print("\n运行日志：落盘、分级、崩溃也留痕")
     from voice_agent import journal

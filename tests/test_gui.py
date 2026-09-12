@@ -116,6 +116,33 @@ def pure_logic() -> None:
     check("SVG 图标能渲染成图标对象", not icon("home").isNull())
     check("图标按颜色上色", b"#FF0000" in svg_bytes("mic", "#FF0000"))
 
+    # 设备下拉框：配置里存的值可以是序号、也可以是**名字子串**
+    from PyQt6.QtWidgets import QComboBox, QApplication as _App
+
+    from voice_agent.ui.pages import DevicesPage
+
+    _App.instance() or _App([sys.argv[0]])
+    pick = DevicesPage._pick
+    combo = QComboBox()
+    combo.addItem("系统默认", None)
+    combo.addItem("[1] Speakers (USB)", 1)
+    combo.addItem("[2] Speakers (HDMI)", 2)
+    combo.setCurrentIndex(pick(combo, 2, "output"))
+    check("按序号选中", combo.currentData() == 2, str(combo.currentData()))
+    combo2 = QComboBox()
+    combo2.addItem("系统默认", None)
+    combo2.addItem("[1] Speakers (USB)", 1)
+    combo2.setCurrentIndex(pick(combo2, "Bluetooth Headset", "output"))
+    # 列表里没有这个名字（设备拔了/写错了）：**保留原值**，别让「应用」把配置抹掉
+    check("列表里没有的设备名会被保留，而不是退回系统默认",
+          combo2.currentData() == "Bluetooth Headset", str(combo2.currentData()))
+    check("而且在下拉框里说清楚它是什么",
+          "配置里写的" in combo2.currentText(), combo2.currentText())
+    combo3 = QComboBox()
+    combo3.addItem("系统默认", None)
+    combo3.setCurrentIndex(pick(combo3, None, "input"))
+    check("配置是空就选系统默认", combo3.currentIndex() == 0 and combo3.currentData() is None)
+
 
 def window_smoke() -> None:
     print("\n主面板")
@@ -385,6 +412,22 @@ def window_smoke() -> None:
             marks_page.flash(marks_mod.store.get("范围1"))
             check("「闪一下」不会炸", overlay._flash_name == "范围1", overlay._flash_name)
             overlay._end_flash()
+
+            # 已经在框选模式里时，工具又发来一次框选请求：
+            # 以前 _begin_selection 照样调 start_selection，而它看见 _selecting
+            # 非空就直接 return False —— 用户的操作还停在屏幕上，工具那边却
+            # 白等到 45 秒超时。现在分两种情况接住：
+            marks_page.add("point")
+            check("菜单先开的是标点", overlay._selecting == "point")
+            window._begin_selection("region")
+            check("工具要框选时直接换成框选（不是干等超时）",
+                  overlay._selecting == "region", str(overlay._selecting))
+            window._begin_selection("region")
+            check("同一种就接着用，不打断用户已经在拖的那个",
+                  overlay._selecting == "region" and overlay._pressed is False)
+            check("换模式不会提前叫醒等待的工具（不发 selection_done）",
+                  window._marks_wait is None)
+            overlay.cancel_selection()
 
             # 显示开关：按钮点一下只是不画了，标记一个都不能少
             marks_mod.store.set_visible(True)

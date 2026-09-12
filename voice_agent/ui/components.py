@@ -169,6 +169,23 @@ class SegmentedControl(QWidget):
             self.set_pill(float(target))
         self.changed.emit(value)
 
+    def show_value(self, value: str) -> None:
+        """只把显示挪到这一项，**不发信号**（给"按最新配置刷新界面"用）。"""
+        if value in self._labels:
+            self._index = self._labels.index(value)
+            self.set_pill(float(self._index))
+
+    def ensure_option(self, value: str) -> None:
+        """把真值补成一个选项。
+
+        配置里的值不一定在预设选项里（例如追问窗口 6000ms、quality 档的语速 1.06）——
+        不在的话控件会落到第 0 项，界面显示的就不是真值（"追问窗口 0（回待命）"），
+        用户点一下反而把真配置改成了那个假值。
+        """
+        text = str(value or "")
+        if text and text not in self._labels:
+            self._labels.append(text)
+
     def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802
         width = self.width() / max(1, len(self._labels))
         index = int(event.position().x() // width)

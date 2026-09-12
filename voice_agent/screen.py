@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
@@ -281,6 +282,23 @@ def monitor_rect(index: int) -> tuple[int, int, int, int] | None:
     return item["left"], item["top"], item["right"], item["bottom"]
 
 
+def clamp_region(region: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """把区域裁到虚拟桌面范围内，返回**实际会被截到**的矩形。
+
+    调用方必须拿它算坐标原点：grab_screen 内部会裁，而裁剪之后左上角会变，
+    还用原来那个（越界的）左上角当原点，返回的坐标就整体偏了 —— 找图明明找到了，
+    点下去却点到别处。
+    """
+    desktop = _virtual_screen()
+    left, top, right, bottom = (int(v) for v in region)
+    left, top = max(left, desktop[0]), max(top, desktop[1])
+    right = min(right, desktop[0] + desktop[2])
+    bottom = min(bottom, desktop[1] + desktop[3])
+    if right - left < 2 or bottom - top < 2:
+        raise ValueError("这块区域不在屏幕上（" + str(tuple(int(v) for v in region)) + "）")
+    return left, top, right, bottom
+
+
 def grab_screen(region: tuple[int, int, int, int] | None = None,
                 monitor: int = 0) -> np.ndarray:
     """截屏成 BGR 数组（OpenCV 习惯的顺序）。
@@ -298,14 +316,7 @@ def grab_screen(region: tuple[int, int, int, int] | None = None,
         # 必须裁到虚拟桌面范围内：Pillow 的 grab(bbox) 越界**不报错**，
         # 而是把外面那块补成黑色。以前"截一个越界的范围"会得到一张黑图，
         # 再交给视觉模型，它会认真地说"屏幕上什么都没有" —— 用户以为真看过了。
-        left, top, right, bottom = (int(v) for v in region)
-        desktop = _virtual_screen()
-        left, top = max(left, desktop[0]), max(top, desktop[1])
-        right = min(right, desktop[0] + desktop[2])
-        bottom = min(bottom, desktop[1] + desktop[3])
-        if right - left < 2 or bottom - top < 2:
-            raise ValueError("这块区域不在屏幕上（" + str(tuple(int(v) for v in region)) + "）")
-        region = (left, top, right, bottom)
+        region = clamp_region(region)
     image = ImageGrab.grab(bbox=region, all_screens=True)
     return np.array(image.convert("RGB"))[:, :, ::-1].copy()
 
@@ -562,7 +573,9 @@ def _sift_pass(scene_gray, template, confidence: float,
         "x": int(center_x * back + offset_x),
         "y": int(center_y * back + offset_y),
         "score": float(score),
-        "scale": float(round(width / max(1, w), 3)),
+        # scale 要跟 w/h 同一个尺度（原图）：width 是在缩放后的场景里量的，
+        # 乘回 1/factor 才是"屏幕上这张图比模板大了多少倍"。
+        "scale": float(round(width * back / max(1, w), 3)),
         "w": max(1, int(width * back)), "h": max(1, int(height * back)),
         "method": "sift",
     }]
@@ -639,7 +652,9 @@ def find_template(image: str | Path, confidence: float = 0.8,
     # 这里要是按 0 算，返回的坐标会整体偏掉整整一屏 —— 找图明明找到了，
     # 点下去却点到另一块屏幕上。
     if region:
-        offset_x, offset_y = int(region[0]), int(region[1])
+        # 用**夹取后**的矩形：越界时 grab_screen 会裁，左上角跟着变，
+        # 拿原值当原点会让返回的屏幕坐标整体偏移。
+        offset_x, offset_y = clamp_region(region)[:2]
     else:
         offset_x, offset_y = _virtual_screen()[:2]
     return match_template(shot, template, confidence=confidence, scales=scales,
@@ -692,6 +707,25 @@ def resize_image(image: str | Path, width: int = 0, height: int = 0,
     }
 
 
+#: 视觉缓存最多留几张。这些图是"看一眼就完"的临时文件，没人会去手动清理，
+#: 不设上限的话数据目录会一直长（每问一次屏幕就多一张）。
+VISION_KEEP = 30
+
+
+def _prune_vision_cache(folder: Path, keep: int = VISION_KEEP) -> None:
+    """只留最近 keep 张，其余删掉。"""
+    try:
+        files = sorted((item for item in folder.glob("vision-*.jpg") if item.is_file()),
+                       key=lambda item: item.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for old in files[max(1, int(keep)):]:
+        try:
+            old.unlink()
+        except OSError:
+            continue
+
+
 def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
                     quality: int = 75,
                     region: tuple[int, int, int, int] | None = None,
@@ -709,6 +743,8 @@ def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
       origin    截图左上角对应的屏幕坐标（多显示器时可能是负的）
       screen    虚拟桌面宽高
     """
+    from PIL import Image  # noqa: PLC0415
+
     VISION_CACHE = vision_cache()
     VISION_CACHE.mkdir(parents=True, exist_ok=True)
     origin = (0, 0)
@@ -718,32 +754,35 @@ def save_for_vision(image: str | Path | None = None, max_side: int = 1280,
         if region is None and monitor:
             region = monitor_rect(int(monitor))
         shot = grab_screen(region)
-        from PIL import Image  # noqa: PLC0415
-
-        source = VISION_CACHE / "screen.png"
-        Image.fromarray(shot[:, :, ::-1]).save(source)
-        origin = (int(region[0]), int(region[1])) if region else _virtual_screen()[:2]
+        origin = clamp_region(region)[:2] if region else _virtual_screen()[:2]
+        # 直接在内存里转成 PIL 图：以前先落一张**全分辨率**的 screen.png（4K 几 MB、
+        # 几百毫秒），再读回来缩 —— 白写一次盘，而且那个固定文件名还会被下一次调用覆盖。
+        source_image = Image.fromarray(shot[:, :, ::-1])
     else:
-        source = Path(image)
-    stamp = time.strftime("%H%M%S")
-    target = VISION_CACHE / ("vision-" + stamp + ".jpg")
-    # max_side 是"最长边"的上限：竖屏截图按宽度缩会越缩越大
-    from PIL import Image  # noqa: PLC0415
+        source_image = Image.open(Path(image))
+        source_image.load()          # 立刻读进内存，别把文件句柄留到 resize 之后
 
-    with Image.open(source) as probe:
-        width, height = probe.size
+    original = (int(source_image.width), int(source_image.height))
     limit = max(64, int(max_side or 1280))
-    if width >= height:
-        result = resize_image(source, width=min(width, limit), out=target, quality=quality)
+    # max_side 是"最长边"的上限：竖屏截图按宽度缩会越缩越大
+    longest = max(original)
+    if longest > limit:
+        ratio = limit / float(longest)
+        size = (max(1, round(original[0] * ratio)), max(1, round(original[1] * ratio)))
     else:
-        result = resize_image(source, height=min(height, limit), out=target, quality=quality)
-    original = result["original"]
-    scale = round(original[0] / max(1, result["size"][0]), 4)
+        size = original
+    resized = source_image.convert("RGB").resize(size, Image.LANCZOS)
+    # 文件名带上毫秒和一小段随机：同一秒里连拍两张（"盯着屏幕"的轮询和主对话同时截图）
+    # 以前会互相覆盖 —— 而先送出去的那张对应的 origin/scale 还在用，模型看的就是另一张图。
+    stamp = time.strftime("%H%M%S") + "-" + str(int(time.time() * 1000) % 1000)
+    target = VISION_CACHE / ("vision-" + stamp + "-" + uuid.uuid4().hex[:6] + ".jpg")
+    resized.save(target, "JPEG", quality=max(30, min(int(quality or 75), 95)), optimize=True)
+    _prune_vision_cache(VISION_CACHE)
     return {
-        "path": str(result["path"]),
-        "size": result["size"],
+        "path": str(target),
+        "size": size,
         "original": original,
-        "scale": scale,
+        "scale": round(original[0] / max(1, size[0]), 4),
         "origin": origin,
         "screen": _virtual_screen()[2:],
     }

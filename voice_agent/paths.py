@@ -10,10 +10,12 @@
     ├─ voiceprint.json      声纹（生物特征）
     ├─ marks.json           屏幕标记
     ├─ translit.json        英文音译学习缓存
-    ├─ audit.jsonl          权限审计
+    ├─ audit.jsonl          权限审计（超过 2MB 轮转成 audit.1.jsonl）
     ├─ keywords.generated.txt  唤醒词音素表
     ├─ selftest.wav         自检音频
     ├─ apps.yaml            应用/目录映射表
+    ├─ logs/                运行日志（voice-agent-YYYYMMDD.log，按天分、
+    │                       单文件超过 16MB 轮转，默认留 14 天）
     ├─ screenshots/         截图（含 reference/ 参考图片）
     └─ vision/              送给视觉模型的压缩图缓存
 
@@ -128,7 +130,8 @@ def describe() -> dict:
     root = data_dir()
     rows = []
     for name in ("memory", "conversation", "voiceprint", "marks", "translit",
-                 "audit", "apps", "screenshots", "vision"):
+                 "audit", "keywords", "selftest_audio", "apps", "logs",
+                 "screenshots", "vision"):
         path = sub(name)
         rows.append({"name": name, "path": str(path),
                      "exists": path.exists(),

@@ -82,6 +82,17 @@ class MarksOverlay(QWidget):
             return 1.0
 
     @staticmethod
+    def _logical_dpr_at(x: int, y: int) -> float:
+        """按**逻辑坐标**找这块屏的缩放比（Qt 的 screen 几何是逻辑坐标）。"""
+        try:
+            for screen in QGuiApplication.screens():
+                if screen.geometry().contains(int(x), int(y)):
+                    return float(screen.devicePixelRatio() or 1.0)
+        except Exception:  # noqa: BLE001
+            pass
+        return MarksOverlay._dpr()
+
+    @staticmethod
     def _dpr_at(x: int, y: int) -> float:
         """**这一点所在那块屏幕**的缩放比（找不到就退回主屏的）。
 
@@ -235,6 +246,18 @@ class MarksOverlay(QWidget):
         self.update()
         return True
 
+    def restart_selection(self, kind: str) -> None:
+        """把正在进行的框选**换成另一种**，但不发 selection_done。
+
+        为什么不能先 cancel 再 start：cancel_selection 会立刻发一个 None，
+        把还在等工作线程的工具提前叫醒（它会以为用户取消了）。
+        """
+        self._selecting = "point" if kind == "point" else "region"
+        self._current = QRect()
+        self._pressed = False
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.update()
+
     def _finish_selection(self, rect) -> None:  # noqa: ANN001
         """选择结束（正常结束或取消）。"""
         self._selecting = ""
@@ -283,9 +306,14 @@ class MarksOverlay(QWidget):
         point = event.position().toPoint()
 
         def to_screen(px: int, py: int) -> tuple[int, int]:
-            """窗口坐标 → 屏幕物理坐标（按这一点所在那块屏的缩放比）。"""
+            """窗口坐标 → 屏幕物理坐标（按这一点所在那块屏的缩放比）。
+
+            注意顺序：先按**逻辑**坐标找到那块屏（Qt 的 screenAt 吃逻辑坐标），
+            再拿它的缩放比换算成物理像素。混用（把逻辑坐标喂给按物理坐标写的
+            _dpr_at）在混合 DPI 的多屏上会选错屏、坐标整体偏一截。
+            """
             fx, fy = px + self.x(), py + self.y()
-            ratio = self._dpr_at(fx, fy)
+            ratio = MarksOverlay._logical_dpr_at(fx, fy)
             return int(fx * ratio), int(fy * ratio)
 
         result: dict

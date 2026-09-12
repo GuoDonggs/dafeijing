@@ -120,6 +120,29 @@ def _unicode_input(char: str, up: bool = False) -> "_INPUT":
     return item
 
 
+def _code_units(char: str) -> list[int]:
+    """一个字符对应的 UTF-16 码单元（emoji 是两个）。
+
+    KEYEVENTF_UNICODE 送的是 **UTF-16 码单元**，而结构体里那一位是 c_ushort：
+    超出 BMP 的码位会被静默截断（U+1F600 截成 0xF600，打出来是另一个字）。
+    所以这类字符要按**代理对**分两次送。
+    """
+    value = ord(char)
+    if value > 0xFFFF:
+        value -= 0x10000
+        return [0xD800 + (value >> 10), 0xDC00 + (value & 0x3FF)]
+    return [value]
+
+
+def _unicode_inputs(char: str) -> list["_INPUT"]:
+    """一个字符要送的按键事件（每个码单元各一次按下 + 抬起）。"""
+    events: list[_INPUT] = []
+    for unit in _code_units(char):
+        events.append(_unicode_input(chr(unit)))
+        events.append(_unicode_input(chr(unit), up=True))
+    return events
+
+
 def _tap_media(action: str, times: int = 1) -> bool:
     vk = _VK_MEDIA.get(action)
     if vk is None or _user32 is None:
@@ -294,7 +317,8 @@ def type_text(text: str = "") -> str:
     if len(value) > limit:
         value = value[:limit]
     for char in value:
-        _send_input(_unicode_input(char), _unicode_input(char, up=True))
+        # emoji 这类超出 BMP 的字符会展开成两三个事件（代理对），一起送
+        _send_input(*_unicode_inputs(char))
         time.sleep(0.005)
     return "已经输入了 " + str(len(value)) + " 个字" + ("（超出部分已省略）" if len(text.strip()) > limit else "")
 
@@ -371,8 +395,11 @@ def focus_window(title: str = "") -> str:
         "$sig = '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h);"
         "[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h, int c);'; "
         "$t = Add-Type -MemberDefinition $sig -Name W -Namespace N -PassThru; "
+        # **要看返回值**：SetForegroundWindow 会被系统拒绝（不是前台进程时），
+        # 以前这里 Out-Null 掉、照样回"已经切到前面了" —— 用户看到的是"它说切了但没切"。
         "$t::ShowWindow($w.MainWindowHandle, 9) | Out-Null; "
-        "$t::SetForegroundWindow($w.MainWindowHandle) | Out-Null; $w.MainWindowTitle }"
+        "if ($t::SetForegroundWindow($w.MainWindowHandle)) { 'OK ' + $w.MainWindowTitle } "
+        "else { 'FAIL ' + $w.MainWindowTitle } }"
     )
     try:
         out = _ps(script, timeout=15.0)
@@ -380,6 +407,13 @@ def focus_window(title: str = "") -> str:
         return "切换窗口失败了：" + str(exc)[:60]
     found = str(out or "").strip().splitlines()
     found = found[-1].strip() if found else ""
+    if found.startswith("OK"):
+        return "已经把「" + found[3:].strip() + "」切到前面了"
+    if found.startswith("FAIL"):
+        # Windows 只允许"当前就是前台"的进程抢焦点。如实说，并给出可行办法。
+        return ("找到了「" + found[5:].strip() + "」，但系统不让它抢到最前面"
+                "（Windows 的限制：只有前台进程才能切窗口）。"
+                "可以先点一下那个窗口、或者用 alt+tab 切过去。")
     if found:
         return "已经把「" + found + "」切到前面了"
     return "没找到标题里有「" + key + "」的窗口"
@@ -524,6 +558,24 @@ def power(action: str = "", delay: int = 0) -> str:
     return "不支持的电源操作"
 
 
+def _kill_tree(proc) -> None:  # noqa: ANN001
+    """把一条命令连同它派生的整棵进程树收掉，并尽量回收管道。"""
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True, timeout=10,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        proc.communicate(timeout=3)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_command(command: str = "", timeout: int = 30) -> str:
     """执行一条系统命令并返回输出（敏感操作，需要确认）。"""
     line = (command or "").strip()
@@ -540,24 +592,31 @@ def run_command(command: str = "", timeout: int = 30) -> str:
         )
     except Exception as exc:  # noqa: BLE001
         return "命令执行失败：" + str(exc)[:80]
-    try:
-        raw_out, raw_err = proc.communicate(timeout=min(max(int(timeout), 3), 120))
-    except subprocess.TimeoutExpired:
+    # 一小段一小段地等：既要按自己的 timeout 收尾，也要能**被打断**。
+    # 以前是一次 communicate(timeout=最长 120 秒) 干等到底 —— 用户喊"打断"
+    # 或说出新指令之后，这条命令还会自己跑完（界面和日志都已经说"已作废"）。
+    from . import cancelled as _cancelled  # noqa: PLC0415 - 顶层导入会成环
+
+    deadline = time.monotonic() + min(max(int(timeout), 3), 120)
+    interrupted = False
+    while True:
+        try:
+            raw_out, raw_err = proc.communicate(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            if _cancelled():
+                interrupted = True
+                break
+            if time.monotonic() >= deadline:
+                break
+    if interrupted or proc.poll() is None:
         # 光 kill 掉 cmd.exe 是不够的：它派生的孙进程还活着（继续吃 CPU、
         # 继续攥着 stdout 管道），而随后的 communicate() 会一直等管道关闭 ——
         # 这条工具就再也不返回了，"命令执行超时了"根本说不出口。
         # taskkill /T 连整棵进程树一起收，communicate 再带一次超时兜底。
-        try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=10,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except Exception:  # noqa: BLE001
-            pass
-        proc.kill()
-        try:
-            proc.communicate(timeout=3)
-        except subprocess.TimeoutExpired:
-            pass
+        _kill_tree(proc)
+        if interrupted:
+            return "这条命令被打断了，已经强制结束"
         return "命令执行超时了（超过 " + str(timeout) + " 秒，已经强制结束）"
     # 用同一个"先 UTF-8 再 ANSI"的解码：命令的错误输出经常是系统代码页，
     # 一律按 UTF-8 解会变成乱码，模型看不懂就会开始瞎试别的办法。
