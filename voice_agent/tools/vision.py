@@ -140,6 +140,13 @@ def find_on_screen_tool(image: str = "", confidence: float = 0.8,
         if names:
             return "没说要找哪张图片。参考图片目录里现有的：" + "、".join(names)
         return "没说要找哪张图片"
+    from .files import document_hint  # noqa: PLC0415
+
+    hint = document_hint(image)
+    if hint:
+        # 用户说"根据某个文档去做"时，模型很容易顺手把文档丢给找图工具。
+        # 直接说清楚该用哪个，比让它去试一次（然后"读不出这张图片"）强。
+        return hint
     rect = None
     if str(region or "").strip():
         from .. import marks as marks_mod  # noqa: PLC0415

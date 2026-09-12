@@ -128,9 +128,10 @@ _register(Tool(
 _register(Tool(
     name="find_in_image",
     description=(
-        "在一张图片里找另一张图（本地比对，不碰屏幕、不要钱）。"
+        "在一张**图片**里找另一张图（本地比对，不碰屏幕、不要钱）。"
         "要找的图可以直接给路径，也可以只给**名字** —— 会在参考图片目录里按文件名找，"
         "所以说「看看这张截图里有没有下载按钮」就行。"
+        "文档（.md / .txt / .json…）不是图片：要里面的内容请用 read_file。"
     ),
     parameters=_params(
         image={"type": "string", "description": "大图（通常是截图）的路径", "_required": True},
@@ -594,9 +595,11 @@ _register(Tool(
 _register(Tool(
     name="find_on_screen",
     description=(
-        "在屏幕上找一张图并返回坐标（配合 mouse_click 就能点它）。"
+        "在屏幕上找一张**图片**并返回坐标（配合 mouse_click 就能点它）。"
         "图可以给路径，也可以只给名字 —— 会去参考图片目录里按文件名找，"
         "所以说「桌面上的下载按钮在哪」就行；region 限定只在框过的范围里找。"
+        "**注意它是找图的**：用户说「根据 xxx.md / 文档里的说明去做」时，"
+        "要先用 read_file 把那个文档读出来，不是拿文档去屏幕上找。"
     ),
     parameters=_params(image=_S_REQ,
                        confidence={"type": "number", "description": "相似度阈值 0~1，默认 0.8"},
@@ -670,8 +673,20 @@ _register(Tool(
 
 _register(Tool(
     name="read_file",
-    description="读取一个文本文件的内容并朗读其中的摘要（最多返回约 800 字，超出会截断并说明）。",
-    parameters=_params(path=_S_REQ, max_chars=_I),
+    title="读文件",
+    description=(
+        "读一个文本文件（txt / md / json / 代码…）的内容。"
+        "**用户说「根据某个文档 / 说明 / 清单去做」时，第一步就是用它把那个文件读了** —— "
+        "本地读、又快又准，别去屏幕上找图、也别用 run_command 去 Get-Content。"
+        "文件长的时候回答里会给出「第 X-Y 行，共 N 行」和续读的方式："
+        "再调一次、带上 start（从第几行开始）就能接着读。"
+    ),
+    parameters=_params(
+        path=_S_REQ,
+        max_chars={"type": "integer", "description": "这一段的字符预算，默认 800"},
+        start={"type": "integer", "description": "从第几行开始读（默认第 1 行）"},
+        lines={"type": "integer", "description": "最多读几行（默认按 max_chars 决定）"},
+    ),
     handler=read_file,
 ))
 

@@ -109,6 +109,10 @@ class Tool:
     # LLM 模式不依赖它（模型自己看 description 判断），但没有 API Key 时
     # 它是自定义技能唯一能被「说出来」的入口。
     triggers: tuple = ()
+    #: 工具结果进入模型上下文时的字符预算（0 = 用大脑的默认值 800）。
+    #: 读文件这类"整篇内容就是结果"的工具要放宽，否则模型永远只看到开头 ——
+    #: 实测里它于是反复加大 max_chars，最后绕去看屏幕。
+    result_budget: int = 0
     #: 操作类别（例如「鼠标」）：**同一条指令里，同一类操作只问一次**。
     #: 语音场景下"拖一下、再点一下、再拖一下"是一条指令的连续动作，
     #: 每次都弹确认等于没法用；但跨指令必须重新问（一轮结束就清空）。
@@ -273,6 +277,10 @@ def register(tool: Tool, replace: bool = False) -> None:
         group = _BUILTIN_GROUPS.get(tool.name, "")
         if group:
             changes["group"] = group
+    if not tool.result_budget:
+        budget = _BUILTIN_BUDGETS.get(tool.name, 0)
+        if budget:
+            changes["result_budget"] = budget
     if changes:
         tool = _replace(tool, **changes)
     REGISTRY[tool.name] = tool
@@ -804,6 +812,15 @@ _BUILTIN_TAGS: dict[str, tuple] = {
     "permission_mode": ("权限", "查或切"),
     "restart_self": ("程序自己", "重启", "要确认"),
     "quit_self": ("程序自己", "退出", "要确认"),
+}
+
+#: 结果预算放宽的工具：读文件是"整篇内容就是答案"，800 字连一段说明都装不下。
+#: 4000 字大约 1.5k token，够读完一份操作说明；更长的靠 read_file 的 start 续读。
+_BUILTIN_BUDGETS: dict[str, int] = {
+    "read_file": 4000,
+    "grep_files": 1600,
+    "find_files": 1600,
+    "search_files": 1600,
 }
 
 #: 操作类别：**同一条指令里，同一类操作只问一次**。

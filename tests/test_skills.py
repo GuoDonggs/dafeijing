@@ -8,11 +8,18 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# 运行时文件挪到临时目录：测试**绝不能**碰用户真实的对话记录 / 记忆 / 标记 ——
+# 否则「上次聊过什么」会渗进断言（真出现过：webui 那句回复变成「跟刚才一样」）。
+_BUILD = tempfile.TemporaryDirectory()
+os.environ["VOICE_AGENT_DATA_DIR"] = _BUILD.name
+
 
 from voice_agent import rules, tools  # noqa: E402
 from voice_agent.skills import SkillLoader, normalize_triggers  # noqa: E402

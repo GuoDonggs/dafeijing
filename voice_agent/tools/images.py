@@ -23,6 +23,10 @@ def _screen():
     return screen_mod
 
 
+#: 文档提示（"这不是图片，要内容请用 read_file"）在 files 里，和 read_file 共用一份判断
+from . import files as files_mod  # noqa: E402
+
+
 def _how(hit: dict) -> str:
     """这一处是模板匹配找到的，还是 SIFT 兜底找到的？
 
@@ -43,6 +47,10 @@ def find_in_image_tool(image: str = "", template: str = "",
         if names:
             return "没说要找哪张图。参考图片目录里现有的：" + "、".join(names)
         return "没说要找哪张图"
+    for candidate in (image, template):
+        hint = files_mod.document_hint(candidate)
+        if hint:
+            return hint
     try:
         factors = tuple(float(part) for part in str(scales).replace("，", ",").split(",")
                         if part.strip()) if str(scales).strip() else (1.0, 0.9, 1.1)

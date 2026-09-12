@@ -17,6 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 _BUILD = tempfile.TemporaryDirectory()
+os.environ["VOICE_AGENT_DATA_DIR"] = _BUILD.name
+# 旧名字也指到同一个沙箱：两个都设，谁优先都落在同一个临时目录
 os.environ["VOICE_AGENT_BUILD_DIR"] = _BUILD.name
 
 from voice_agent import marks as marks_mod  # noqa: E402

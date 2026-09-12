@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +48,11 @@ def run_one(name: str, desc: str) -> tuple[bool, int, list[str]]:
     env["PYTHONIOENCODING"] = "utf-8"
     # 测试要能在无显示器环境跑，界面测试统一走 offscreen
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    # 运行期文件一律丢进临时目录：测试**绝不能**碰用户真实的 build/ ——
+    # 他的对话记录、长期记忆、屏幕标记都在那儿，而"上次聊过什么"渗进断言
+    # 会让测试时红时绿（真出现过：webui 那句回复变成"跟刚才一样"）。
+    # 各个测试文件自己也设了一遍，这里是给以后新写的测试兜底。
+    env["VOICE_AGENT_DATA_DIR"] = tempfile.mkdtemp(prefix="voice-agent-test-")
     try:
         proc = subprocess.run(
             [sys.executable, str(TESTS_DIR / (name + ".py"))],

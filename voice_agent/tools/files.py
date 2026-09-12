@@ -258,24 +258,92 @@ def search_files(name: str = "", root: str = "", limit: int = 10) -> str:
     return text
 
 
-def read_file(path: str = "", max_chars: int = 800) -> str:
-    """读一个文本文件的内容。"""
+#: 这些后缀是"文档 / 代码 / 数据"，不是图片。拿它们去 find_on_screen 是白跑一趟，
+#: 用户要的是里面的**文字**（见 read_file）。
+DOC_SUFFIXES = (".md", ".markdown", ".txt", ".log", ".json", ".csv", ".tsv", ".yaml", ".yml",
+                ".ini", ".cfg", ".toml", ".xml", ".html", ".htm", ".rst",
+                ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".cs", ".go", ".rs",
+                ".sh", ".ps1", ".bat", ".cmd", ".sql")
+#: 这些是二进制 / 压缩格式，按文本读只会得到乱码
+BINARY_SUFFIXES = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar",
+                   ".7z", ".exe", ".dll", ".msi", ".mp3", ".mp4", ".wav", ".avi", ".mkv")
+#: 图片：read_file 读出来是乱码，要看内容得用看图 / 找图那两个工具
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tif", ".tiff")
+
+
+def document_hint(name: str) -> str:
+    """这个路径看着是文档而不是图片时，给一句"该用哪个工具"。
+
+    实测过的问题：用户说「根据 xxx.md 里的说明去做」，模型却拿着 .md 去
+    find_on_screen 找图 —— 找图的工具被描述得太顺手，它就把文档也当成图了。
+    """
+    suffix = Path(str(name or "").strip().strip('"')).suffix.lower()
+    if suffix in DOC_SUFFIXES:
+        return ("「" + str(name) + "」是一个文档（" + suffix + "），不是图片。"
+                "要用里面的内容请用 read_file（文件长的话可以分几次读，"
+                "回答里会告诉你怎么接着读）；要找图请给图片文件（.png / .jpg）。")
+    return ""
+
+
+def read_file(path: str = "", max_chars: int = 800, start: int = 1,
+              lines: int = 0) -> str:
+    """读一个文本文件的内容（**保留行结构、可以分段读**）。
+
+    以前这里把整篇用 re.sub 把所有空白压成一行再截断：文档的标题、列表、
+    代码块全糊成一坨，模型根本没法照着做；而且截断了也说不出"后面还有多少"、
+    更没有"接着读"的办法 —— 实测里模型于是反复加大 max_chars、换 grep、
+    最后绕到 run_command 去 Get-Content（每次十几秒），再不行就干脆去看屏幕。
+
+    现在：保留换行；回答里给"第 X-Y 行，共 N 行"；想接着读就再调一次，
+    带上 start（从第几行开始）。
+    """
     raw = (path or "").strip()
     if not raw:
         # 空路径以前会被解析成"桌面"，于是用户听到的是"找不到这个文件" ——
         # 听起来像文件真的没了。缺参数就直说缺参数。
         return "没说要读哪个文件，可以说「读一下桌面的报告.txt」"
+    suffix = Path(raw).suffix.lower()
     target = _resolve_path(raw)
     if not target.is_file():
         return "找不到这个文件：" + raw
+    if suffix in IMAGE_SUFFIXES:
+        return ("这是一张图片（" + suffix + "），不是文本 —— 按文本读只会是乱码。"
+                "要看图里的内容用 look_at_screen（整屏）或在图片里找图用 find_in_image。")
+    if suffix in BINARY_SUFFIXES:
+        return ("这个不是纯文本（" + suffix + "），按文本读只会是乱码。"
+                "Word / PDF / Excel 请先导出成 txt 或 md 再让我读。")
     try:
-        content = target.read_text(encoding="utf-8", errors="replace")
+        text = target.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
         return "读不了这个文件：" + str(exc)[:60]
-    content = re.sub(r"\s+", " ", content).strip()
-    if len(content) > int(max_chars):
-        content = content[: int(max_chars)] + "……后面还有"
-    return target.name + "（" + str(target.parent) + "）的内容是：" + content
+    all_lines = text.splitlines()
+    total = len(all_lines)
+    if total == 0:
+        return target.name + "（" + str(target.parent) + "）是空的"
+    first = max(1, int(start or 1))
+    if first > total:
+        return "这个文件一共 " + str(total) + " 行，从第 " + str(first) + " 行读已经没有内容了"
+    budget = max(120, int(max_chars or 800))
+    want_lines = max(0, int(lines or 0))
+    picked: list[str] = []
+    used = 0
+    for index in range(first - 1, total):
+        line = all_lines[index].rstrip()
+        if want_lines and len(picked) >= want_lines:
+            break
+        if picked and used + len(line) > budget:
+            break
+        picked.append(line)
+        used += len(line) + 1
+    last = first + len(picked) - 1
+    scope = ("第 " + str(first) + "-" + str(last) + " 行，共 " + str(total) + " 行"
+             if (first > 1 or last < total) else "共 " + str(total) + " 行")
+    body = "\n".join(picked)
+    tail = ""
+    if last < total:
+        tail = ("\n……（后面还有 " + str(total - last) + " 行）要接着读就说："
+                "read_file(path=\"" + str(target) + "\", start=" + str(last + 1) + ")")
+    return target.name + "（" + str(target.parent) + "），" + scope + "：\n" + body + tail
 
 
 def write_file(path: str = "", content: str = "", mode: str = "overwrite") -> str:

@@ -32,6 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # 运行时产生的文件挪到临时目录：测试不该往用户真实的对话记录 / 长期记忆里写
 _BUILD = tempfile.TemporaryDirectory()
+os.environ["VOICE_AGENT_DATA_DIR"] = _BUILD.name
+# 旧名字也指到同一个沙箱：两个都设，谁优先都落在同一个临时目录
 os.environ["VOICE_AGENT_BUILD_DIR"] = _BUILD.name
 
 from voice_agent import security, tools  # noqa: E402
@@ -793,6 +795,80 @@ def next_step_messages() -> None:
           "别去看图" in in_image or "mark_point" in in_image, in_image[-80:])
 
 
+def read_documents() -> None:
+    """读文档：保留行结构、给出行号、能续读、进模型上下文不被腰斩。
+
+    用户实测的问题：他让助手"根据 xxx.md 里的说明去做"，助手却拿着这份文档去
+    find_on_screen 找图。查下来是读文件这条路根本走不通 ——
+    内容被压成一行、截断到 800 字、还进不了上下文（大脑统一按 800 字截），
+    于是模型反复加大 max_chars、绕去 run_command Get-Content，最后跑去看屏幕。
+    """
+    print("读文档：结构、行号、续读、预算")
+    import tempfile as _tempfile
+
+    from voice_agent import journal as _journal  # noqa: F401  保证包已导入
+    from voice_agent.brain import RESULT_BUDGET, Brain
+    from voice_agent.config import Config
+    from voice_agent.tools import files as files_mod
+
+    body = ["# 操作说明", "", "第一步：点 AF 按钮", "第二步：长按拍照", ""]
+    body += ["第 " + str(index) + " 行：这里是一段说明文字，用来把文件撑长一点。" for index in range(1, 60)]
+    with _tempfile.TemporaryDirectory() as tmp:
+        doc = Path(tmp) / "介绍.md"
+        doc.write_text("\n".join(body), encoding="utf-8")
+        full = files_mod.read_file(str(doc))
+        check("保留换行（不再压成一行）", full.count("\n") >= 5, full[:60])
+        check("说明了读的是第几行、总共多少行",
+              "第 1-" in full and "共 " + str(len(body)) + " 行" in full, full[:60])
+        check("内容按行原样给出", "第一步：点 AF 按钮" in full and "第二步：长按拍照" in full)
+        check("截断时给出续读方式", "start=" in full, full[-80:])
+
+        start = int(full.rsplit("start=", 1)[1].split(")")[0])
+        rest = files_mod.read_file(str(doc), start=start)
+        check("按 start 能接着读", ("第 " + str(start) + "-") in rest, rest[:40])
+        check("续读不会又把开头念一遍", "# 操作说明" not in rest, rest[:40])
+        check("从头一次读全（预算够大）",
+              "后面还有" not in files_mod.read_file(str(doc), max_chars=9000))
+        check("按 lines 限制行数",
+              len([ln for ln in files_mod.read_file(str(doc), start=1, lines=3).splitlines()
+                   if ln.startswith("第 ") or ln.startswith("第一步")]) <= 3)
+        check("越界的 start 说人话", "没有内容" in files_mod.read_file(str(doc), start=9999))
+
+        # 文档 → 该用 read_file；图片 → 该用看图；PDF → 先转文本
+        check("给 .md 一句「这是文档，用 read_file」",
+              "read_file" in files_mod.document_hint("说明.md"),
+              files_mod.document_hint("说明.md"))
+        check("给图片不提示文档", files_mod.document_hint("按钮.png") == "")
+        check("拿 .md 去 find_on_screen 会被直接点醒",
+              "read_file" in str(tools.call("find_on_screen", {"image": str(doc)})),
+              str(tools.call("find_on_screen", {"image": str(doc)}))[:80])
+        check("拿 .md 去 find_in_image 也一样",
+              "read_file" in str(tools.call("find_in_image",
+                                           {"image": str(doc), "template": str(doc)})))
+        check("拿图片去 read_file 会被指去看图",
+              "图片" in files_mod.read_file(str(Path(tmp) / "x.png"))
+              or "找不到这个文件" in files_mod.read_file(str(Path(tmp) / "x.png")))
+        pdf = Path(tmp) / "报告.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        check("PDF 这种二进制直说读不了", "不是纯文本" in files_mod.read_file(str(pdf)),
+              files_mod.read_file(str(pdf)))
+        png = Path(tmp) / "x.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n fake")
+        check("图片拿去 read_file 会被指去看图", "图片" in files_mod.read_file(str(png)),
+              files_mod.read_file(str(png)))
+
+        # 结果预算：读文件是"整篇就是答案"，不能按 800 字腰斩
+        brain = Brain(Config.load(), log=lambda *a: None)
+        raw = files_mod.read_file(str(doc), max_chars=9000)
+        labeled = brain._label_result("read_file", raw, "ok")
+        check("读到的文档整篇进得了模型上下文", "略过" not in labeled,
+              str(len(labeled)) + " 字")
+        check("文件越长，预算确实放宽了（读文件 > 默认 " + str(RESULT_BUDGET) + "）",
+              len(labeled) > RESULT_BUDGET, str(len(labeled)))
+        check("别的工具仍然按默认预算收着",
+              len(brain._label_result("system_info", "x" * 3000, "ok")) <= RESULT_BUDGET + 60)
+
+
 def main() -> int:
     print("=== 工具层体检 ===")
     static_audit()
@@ -802,6 +878,7 @@ def main() -> int:
     image_tools()
     sift_matching()
     next_step_messages()
+    read_documents()
     tool_tags()
     confirm_prompts()
     continuous_talk()
