@@ -43,6 +43,10 @@ build/_*.py
 build/_*.wav
 build/_*.mp3
 
+# media/ 里放的是 README 用到的图片（要入库）；
+# 但顺手截下来的图（*-image.png）不入库，免得仓库被截图撑大
+media/*-image.png
+
 # 本地应用映射表：每台机器的路径都不一样，不入库（工具会自动按需创建）
 apps.yaml
 
