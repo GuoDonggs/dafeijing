@@ -65,6 +65,20 @@ def rgba(color: str, alpha: float) -> str:
     return "rgba({}, {}, {}, {:.3f})".format(c.red(), c.green(), c.blue(), max(0.0, min(alpha, 1.0)))
 
 
+def qcolor(color: str, alpha: float = 1.0) -> QColor:
+    """把色板里的颜色（可带透明度）变成 QColor。
+
+    **不要写成 QColor(rgba(...))**：rgba(...) 是 QSS 的语法，QColor 不认，
+    构造出来是个无效颜色，拿去当画刷会画成不透明的纯色 ——
+    框选时那块"实心色"就是这么来的。
+    """
+    base = QColor(color)
+    if not base.isValid():
+        base = QColor(BLUE)
+    base.setAlphaF(max(0.0, min(1.0, float(alpha))))
+    return base
+
+
 def mix(color_a: str, color_b: str, ratio: float) -> str:
     """按比例混合两个颜色，返回 #RRGGBB。"""
     return blend(color_a, color_b, ratio).name()

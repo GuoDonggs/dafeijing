@@ -454,16 +454,25 @@ class MainWindow(QWidget):
     # ───────────────── 菜单 ─────────────────
 
     def open_menu(self) -> None:
+        self._build_menu().exec(
+            self.btn_menu.mapToGlobal(QPoint(0, self.btn_menu.height() + 6)))
+
+    def _build_menu(self) -> QMenu:
+        """拼出 ☰ 菜单（单独一个方法，方便测试里检查结构）。"""
         menu = QMenu(self)
         menu.setStyleSheet(theme.qss())
         entries = [
             # 「对话记录」和「文字指令」本来就是同一个页面，合并成一条
             ("chat", "对话与指令", "Ctrl+K", self.show_chat),
             ("plus", "开始新会话", "", self.new_session),
-            ("search", "屏幕标记…", "", self.show_marks),
-            ("plus", "框选范围", "", lambda: self.start_marks("region")),
-            ("chat", "标记点", "", lambda: self.start_marks("point")),
-            ("close", "擦掉所有标记", "", self.clear_marks),
+            # 标记相关的四件事合成一个副菜单：它们是一件事的不同动作，
+            # 平铺在菜单里会把"工具/技能/设置"这些主项挤散
+            ("search", "屏幕标记", "", [
+                ("管理标记…", self.show_marks),
+                ("框选范围", lambda: self.start_marks("region")),
+                ("标记点", lambda: self.start_marks("point")),
+                ("擦掉所有标记", self.clear_marks),
+            ]),
             (None, None, None, None),
             ("tools", "工具", "Ctrl+T", self.show_tools),
             ("skills", "技能", "", self.show_skills),
@@ -480,11 +489,19 @@ class MainWindow(QWidget):
             if label is None:
                 menu.addSeparator()
                 continue
-            action = menu.addAction(theme.icon(icon_name, theme.TEXT, 16), label)
+            icon = theme.icon(icon_name, theme.TEXT, 16)
+            if isinstance(slot, list):
+                # 副菜单（slot 是一串子项）
+                submenu = menu.addMenu(icon, label)
+                submenu.setStyleSheet(theme.qss())
+                for sub_label, sub_slot in slot:
+                    submenu.addAction(sub_label, sub_slot)
+                continue
+            action = menu.addAction(icon, label)
             if shortcut:
                 action.setShortcut(QKeySequence(shortcut))
             action.triggered.connect(slot)
-        menu.exec(self.btn_menu.mapToGlobal(QPoint(0, self.btn_menu.height() + 6)))
+        return menu
 
     # ───────────────── 各页面 ─────────────────
 

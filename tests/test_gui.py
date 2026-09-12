@@ -321,7 +321,22 @@ def window_smoke() -> None:
                       str(combo.currentData() or "").isalpha() or "_" in str(combo.currentData()),
                       str(combo.currentData()))
 
-            # 屏幕标记页：列得出来、改得动、删得掉（菜单里的「屏幕标记…」开的就是它）
+            # 菜单结构：标记相关的四件事收进一个副菜单，不再平铺
+            menu = window._build_menu()
+            top = [action.text() for action in menu.actions() if action.text()]
+            check("菜单里有「屏幕标记」这一项", "屏幕标记" in top, str(top))
+            check("标记动作不再平铺在主菜单",
+                  "框选范围" not in top and "擦掉所有标记" not in top, str(top))
+            submenu = next((action.menu() for action in menu.actions()
+                            if action.text() == "屏幕标记"), None)
+            check("「屏幕标记」是个副菜单", submenu is not None)
+            if submenu is not None:
+                items = [action.text() for action in submenu.actions()]
+                check("副菜单里是四个动作",
+                      items == ["管理标记…", "框选范围", "标记点", "擦掉所有标记"], str(items))
+            menu.deleteLater()
+
+            # 屏幕标记页：列得出来、改得动、删得掉（菜单里的「管理标记…」开的就是它）
             from voice_agent import marks as marks_mod
 
             marks_mod.store.clear()

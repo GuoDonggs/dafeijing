@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Callable
 
 from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QGuiApplication
+from PyQt6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen, QRegion
 from PyQt6.QtWidgets import QWidget
 
 from .. import marks as marks_mod
@@ -90,6 +90,12 @@ class MarksOverlay(QWidget):
         dpr = self._dpr()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._selecting:
+            # 选择模式下把整块铺一层几乎看不见的底色。两个作用：
+            # ① Windows 的分层窗口在**全透明**的像素上不接收鼠标 ——
+            #    不铺这一层就会出现"只有鼠标停在已有标记上时才点得动"；
+            # ② 顺便让用户看出来"现在是在框选"。
+            painter.fillRect(self.rect(), theme.qcolor(theme.ACCENT, 0.05))
         font = QFont()
         font.setPointSize(9)
         painter.setFont(font)
@@ -98,7 +104,8 @@ class MarksOverlay(QWidget):
         if self._selecting and not self._current.isNull():
             pen = QPen(QColor(theme.ACCENT), 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
-            painter.setBrush(QColor(theme.rgba(theme.ACCENT, 0.12)))
+            # 半透明填充：QColor 得用数值构造，rgba(...) 是给 QSS 用的字符串
+            painter.setBrush(theme.qcolor(theme.ACCENT, 0.12))
             painter.drawRect(self._current)
         painter.end()
 
@@ -127,7 +134,7 @@ class MarksOverlay(QWidget):
         height = metrics.height() + 2
         box = QRect(x, y - height, width, height)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(theme.rgba(theme.ACCENT, 0.82)))
+        painter.setBrush(theme.qcolor(theme.ACCENT, 0.82))
         painter.drawRoundedRect(box, 5, 5)
         painter.setPen(QColor("#FFFFFF"))
         painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
@@ -142,6 +149,10 @@ class MarksOverlay(QWidget):
         self.show_overlay()
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, False)
         self.show()                     # 改了 flag 要重新 show 才生效
+        # 再把整块显式标成"窗口区域"：分层窗口在完全透明的像素上会把鼠标放过去，
+        # 光靠"关掉 WindowTransparentForInput"不够 —— 这是"只有停在已有标记上
+        # 才点得动"的另一半原因。
+        self.setMask(QRegion(self.rect()))
         self.raise_()
         self.activateWindow()
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -156,6 +167,7 @@ class MarksOverlay(QWidget):
         self._current = QRect()
         self.unsetCursor()
         self.releaseKeyboard()
+        self.clearMask()            # 松开之后恢复"点得穿"，别挡住桌面
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
         self.show()
         self.update()

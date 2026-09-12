@@ -174,7 +174,7 @@ def main() -> int:
     print("\n界面层（offscreen 下也要能画、能选）")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     try:
-        from PyQt6.QtCore import QPointF, Qt
+        from PyQt6.QtCore import QPointF, QRect, Qt
         from PyQt6.QtGui import QMouseEvent
         from PyQt6.QtWidgets import QApplication
 
@@ -212,6 +212,32 @@ def main() -> int:
         app.processEvents()
         check("拖完会交出一个矩形", bool(got) and got[0]["kind"] == "region", str(got))
         check("拖完之后不再拦鼠标", overlay._selecting == "", overlay._selecting)
+        overlay.cancel_selection()
+
+        # 选择模式必须**整屏都能接收鼠标**：Windows 的分层窗口在完全透明的
+        # 像素上会把鼠标放过去，所以这一层必须铺满（否则"只有停在已有标记上
+        # 才点得动"—— 用户报的正是这个）。
+        overlay.start_selection("region")
+        band = overlay.grab().toImage()
+        corners = [(2, 2), (overlay.width() - 3, 2), (2, overlay.height() - 3),
+                   (overlay.width() - 3, overlay.height() - 3)]
+        alphas = [band.pixelColor(x, y).alpha() for x, y in corners]
+        check("框选模式下整屏都有底色（不然点不动）", all(a > 0 for a in alphas),
+              str(alphas))
+
+        # 拖拽中的那块填充必须是**半透明**的：以前用 QColor(rgba(...)) 构造，
+        # QColor 不认那个字符串 → 无效颜色 → 画成不透明的纯色
+        overlay._start = QPointF(10, 10).toPoint()
+        overlay._current = QRect(10, 10, 200, 120)
+        shot = overlay.grab().toImage()
+        inside = shot.pixelColor(100, 60)
+        check("框选填充是半透明的（不是一块实心色）",
+              0 < inside.alpha() < 90, "alpha=" + str(inside.alpha()))
+        check("填充用的是主题色而不是黑色", inside.red() + inside.green() + inside.blue() > 60,
+              str((inside.red(), inside.green(), inside.blue())))
+        check("框线还在（虚线边框）",
+              any(shot.pixelColor(x, 10).alpha() > 120 for x in range(12, 200, 8)),
+              "上边框")
         overlay.cancel_selection()
         overlay.deleteLater()
     except ImportError as exc:
