@@ -321,22 +321,18 @@ def window_smoke() -> None:
                       str(combo.currentData() or "").isalpha() or "_" in str(combo.currentData()),
                       str(combo.currentData()))
 
-            # 菜单结构：标记相关的四件事收进一个副菜单，不再平铺
+            # 菜单结构：只有一条「屏幕标记…」，框选/标点/删除都在它打开的窗口里
             menu = window._build_menu()
             top = [action.text() for action in menu.actions() if action.text()]
-            check("菜单里有「屏幕标记」这一项", "屏幕标记" in top, str(top))
-            check("标记动作不再平铺在主菜单",
-                  "框选范围" not in top and "擦掉所有标记" not in top, str(top))
-            submenu = next((action.menu() for action in menu.actions()
-                            if action.text() == "屏幕标记"), None)
-            check("「屏幕标记」是个副菜单", submenu is not None)
-            if submenu is not None:
-                items = [action.text() for action in submenu.actions()]
-                check("副菜单里是四个动作",
-                      items == ["管理标记…", "框选范围", "标记点", "擦掉所有标记"], str(items))
+            check("菜单里有「屏幕标记…」", "屏幕标记…" in top, str(top))
+            check("标记动作不在主菜单里平铺",
+                  "框选范围" not in top and "标记点" not in top and "擦掉所有标记" not in top,
+                  str(top))
+            check("菜单里没有多余的副菜单",
+                  all(action.menu() is None for action in menu.actions()), str(top))
             menu.deleteLater()
 
-            # 屏幕标记页：列得出来、改得动、删得掉（菜单里的「管理标记…」开的就是它）
+            # 屏幕标记页：列得出来、改得动、删得掉，**而且按钮真的能开框选模式**
             from voice_agent import marks as marks_mod
 
             marks_mod.store.clear()
@@ -366,6 +362,24 @@ def window_smoke() -> None:
                   str([m.name for m in marks_mod.store.all()]))
             marks_page.remove(marks_mod.store.get("登录按钮"))
             check("页面上删得掉", marks_mod.store.get("登录按钮") is None)
+
+            # 页面里的按钮要真的能开框选 / 标点。
+            # 以前 add() 拿的是 self.window()（装页面的那个对话框），
+            # 它没有 start_marks，于是点了只会写一行"这个窗口打不开框选模式"。
+            marks_page.add("region")
+            overlay = window._ensure_overlay()
+            check("页面上的「框选范围」真的进入了框选模式",
+                  overlay._selecting == "region", str(overlay._selecting))
+            check("框选模式下整屏都可点（含底色）",
+                  overlay.grab().toImage().pixelColor(3, 3).alpha() > 0)
+            overlay.cancel_selection()
+            marks_page.add("point")
+            check("「标记点」也开得起来", overlay._selecting == "point", str(overlay._selecting))
+            overlay.cancel_selection()
+            marks_page.flash(marks_mod.store.get("范围1"))
+            check("「闪一下」不会炸", overlay._flash_name == "范围1", overlay._flash_name)
+            overlay._end_flash()
+
             marks_page.clear()
             check("全部擦掉", not marks_mod.store.all())
 

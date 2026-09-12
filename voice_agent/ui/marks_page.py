@@ -178,13 +178,36 @@ class MarksPage(Page):
             self._rows.append(row)
 
     # ── 操作 ──
+    def main_window(self):
+        """往上找主窗口。
+
+        页面是装在独立窗口（PageDialog）里的，所以 self.window() 拿到的是那个
+        对话框 —— 它没有 start_marks。得顺着 parent 链一路往上找主面板。
+        （以前就是直接拿 self.window()，于是点「框选范围」只会写一行
+        「这个窗口打不开框选模式」。）
+        """
+        node = self.parent()
+        while node is not None:
+            if hasattr(node, "start_marks"):
+                return node
+            node = node.parent()
+        return None
+
     def add(self, kind: str) -> None:
-        window = self.window()
-        starter = getattr(window, "start_marks", None)
-        if starter is None:
-            self.console.log("[ui] 这个窗口打不开框选模式")
+        window = self.main_window()
+        if window is None:
+            self.console.log("[ui] 找不到主窗口，开不了框选模式")
             return
-        starter(kind)
+        # 框选的时候把这个窗口藏起来：挡着屏幕就框不准
+        host = self.window()
+        was_visible = host.isVisible()
+        if was_visible:
+            host.hide()
+        try:
+            window.start_marks(kind)
+        finally:
+            if was_visible:
+                host.show()
 
     def remove(self, mark) -> None:  # noqa: ANN001
         store.remove(mark.name)
@@ -198,9 +221,14 @@ class MarksPage(Page):
 
     def flash(self, mark) -> None:  # noqa: ANN001
         """在屏幕上闪一下某个标记（告诉用户"就是这个"）。"""
-        overlay = getattr(self.window(), "_ensure_overlay", None)
-        if overlay is None:
+        window = self.main_window()
+        ensure = getattr(window, "_ensure_overlay", None) if window else None
+        if ensure is None:
+            self.console.log("[ui] " + mark.summary())
             return
+        overlay = ensure()
+        overlay.show_overlay()
+        overlay.flash(mark.name)
         self.console.log("[ui] " + mark.summary())
 
     def capture(self, mark) -> None:  # noqa: ANN001

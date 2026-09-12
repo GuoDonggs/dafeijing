@@ -465,14 +465,9 @@ class MainWindow(QWidget):
             # 「对话记录」和「文字指令」本来就是同一个页面，合并成一条
             ("chat", "对话与指令", "Ctrl+K", self.show_chat),
             ("plus", "开始新会话", "", self.new_session),
-            # 标记相关的四件事合成一个副菜单：它们是一件事的不同动作，
-            # 平铺在菜单里会把"工具/技能/设置"这些主项挤散
-            ("search", "屏幕标记", "", [
-                ("管理标记…", self.show_marks),
-                ("框选范围", lambda: self.start_marks("region")),
-                ("标记点", lambda: self.start_marks("point")),
-                ("擦掉所有标记", self.clear_marks),
-            ]),
+            # 标记只有这一个入口：框选/标点/删除都在它打开的窗口里
+            # （几个动作是同一件事的不同步骤，拆在菜单上反而找不到）
+            ("search", "屏幕标记…", "", self.show_marks),
             (None, None, None, None),
             ("tools", "工具", "Ctrl+T", self.show_tools),
             ("skills", "技能", "", self.show_skills),
@@ -490,13 +485,6 @@ class MainWindow(QWidget):
                 menu.addSeparator()
                 continue
             icon = theme.icon(icon_name, theme.TEXT, 16)
-            if isinstance(slot, list):
-                # 副菜单（slot 是一串子项）
-                submenu = menu.addMenu(icon, label)
-                submenu.setStyleSheet(theme.qss())
-                for sub_label, sub_slot in slot:
-                    submenu.addAction(sub_label, sub_slot)
-                continue
             action = menu.addAction(icon, label)
             if shortcut:
                 action.setShortcut(QKeySequence(shortcut))

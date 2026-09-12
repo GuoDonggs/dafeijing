@@ -48,10 +48,16 @@ class MarksOverlay(QWidget):
         self._selecting = ""
         self._start = QPoint()
         self._current = QRect()
+        #: 正在"闪一下"的标记名 + 什么时候结束（"闪一下"按钮用）
+        self._flash_name = ""
+        self._flash_until = 0.0
         self.selection_done.connect(self._finish_selection)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._sync)
         self._timer.start(250)
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self._end_flash)
 
     # ── 几何 ──
     @staticmethod
@@ -109,11 +115,29 @@ class MarksOverlay(QWidget):
             painter.drawRect(self._current)
         painter.end()
 
+    def flash(self, name: str, milliseconds: int = 1400) -> None:
+        """把某个标记闪一下（粗边框 + 亮一点），用来回答"是哪一个"。"""
+        self._flash_name = str(name or "")
+        self.update()
+        self._flash_timer.start(max(200, int(milliseconds)))
+
+    def _end_flash(self) -> None:
+        self._flash_name = ""
+        self.update()
+
     def _paint_mark(self, painter: QPainter, mark, dpr: float) -> None:  # noqa: ANN001
         left, top, right, bottom = mark.rect
         x1, y1 = int(left / dpr) - self.x(), int(top / dpr) - self.y()
         x2, y2 = int(right / dpr) - self.x(), int(bottom / dpr) - self.y()
         accent = QColor(theme.ACCENT)
+        flashing = bool(self._flash_name) and mark.name == self._flash_name
+        if flashing:
+            # 闪的时候加粗并提亮，扫一眼就能看到是哪一块
+            painter.setPen(QPen(theme.qcolor(theme.ACCENT, 1.0), 4))
+            painter.setBrush(theme.qcolor(theme.ACCENT, 0.20))
+            painter.drawRect(QRect(QPoint(x1, y1), QPoint(x2, y2)))
+            self._paint_label(painter, mark.name, x1 + 4, y1 - 6)
+            return
         if mark.kind == "point":
             painter.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 200), 2))
             painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 90))
