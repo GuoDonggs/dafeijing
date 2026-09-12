@@ -427,6 +427,27 @@ def window_smoke() -> None:
             marks_page.clear()
             check("全部擦掉", not marks_mod.store.all())
 
+            # 运行日志窗口：**第一次**就要能打开。
+            # 以前 _logs_dialog 只在 show_logs 内部赋值，而函数第一句就读它 ——
+            # 第一次点「运行日志」直接 AttributeError 闪退，第二次才"正常"，
+            # 所以很容易漏测。这里连开两次，并且要复用同一个窗口。
+            window.show_logs()
+            first = window._logs_dialog
+            check("第一次就能打开运行日志（不再闪退）", first is not None)
+            check("日志窗口里能看到已有的日志",
+                  bool(first.view.toPlainText()) or not console.logs,
+                  str(len(first.view.toPlainText())))
+            window.show_logs()
+            check("再点一次是同一个窗口（不会堆出一摞）",
+                  window._logs_dialog is first, str(window._logs_dialog))
+            first.close()
+            app.processEvents()
+            check("关掉之后引用被清空（下次重新建）", window._logs_dialog is None)
+            window.show_logs()
+            check("关掉之后还能再打开", window._logs_dialog is not None)
+            window._logs_dialog.close()
+            app.processEvents()
+
             # 开新会话：菜单和对话页各有一个入口，点了要真的清掉上下文
             live_agent = settings.page.console.ensure_agent()
             live_agent.brain.history.append({"role": "user", "content": "上一轮说过的话"})

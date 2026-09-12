@@ -311,6 +311,10 @@ class MainWindow(QWidget):
         self.pages = {"home": self.home}
         # 每个页面最多一个窗口；重复点菜单时把它提到前面就行
         self._dialogs: dict[str, PageDialog] = {}
+        # 运行日志窗口。**必须在这里先置空**：show_logs 第一句就要读它，
+        # 而以前它只在 show_logs 内部被赋值 —— 于是第一次打开日志直接
+        # AttributeError 闪退（第二次才"正常"，所以很容易漏测）。
+        self._logs_dialog: LogDialog | None = None
         self.home.start_requested.connect(self.start_engine)    # type: ignore[attr-defined]
         self.home.stop_requested.connect(self.stop_engine)      # type: ignore[attr-defined]
         self.home.cancel_requested.connect(self.cancel_task)    # type: ignore[attr-defined]
