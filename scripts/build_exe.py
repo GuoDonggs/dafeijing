@@ -64,8 +64,10 @@ def write_version_info(version: str) -> Path:
     """生成 PyInstaller 的版本资源文件（exe 属性里看到的那份）。"""
     nums = version_tuple(version)
     dotted = ".".join(str(n) for n in nums)
-    text = ('# -*- coding: utf-8 -*-\n'
-            '"""由 scripts/build_exe.py 生成，不要手改（改 voice_agent/__init__.py 的版本号）。"""\n'
+    # 只能有"一行注释 + 一个表达式"：PyInstaller 是拿 eval() 读这个文件的，
+    # 中间夹一句 docstring 会被当成语句 → SyntaxError: invalid syntax。
+    text = ('# -*- coding: utf-8 -*-  （由 scripts/build_exe.py 生成，不要手改；'
+            "改版本号请改 voice_agent/__init__.py）\n"
             "VSVersionInfo(\n"
             "  ffi=FixedFileInfo(\n"
             "    filevers=" + str(nums) + ",\n"
@@ -388,7 +390,11 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     elapsed = time.perf_counter() - started
     if code != 0:
+        # **先把用户数据放回去**：暂存区在下一次构建开头会被整个删掉，
+        # 而这次没走到收尾那一步。不放回去，用户的 config.yaml（含 API Key）、
+        # 声纹档、运行期 build/ 就会在下次打包时静默消失。
         print("\n  [构建失败] PyInstaller 退出码 " + str(code))
+        _restore_user_data(out_dir, stash, plan)
         print("  排查顺序：先看上面的报错；再看 " + str(work_sub / ("warn-" + SPEC_PATH.stem + ".txt"))
               + " 里的 missing module 清单。")
         print("  改了 spec 却像没生效时加 --clean 再试。")
@@ -400,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     missing = [name for name in expected if not (out_dir / name).is_file()]
     if missing:
         print("  [异常] 产物里少了 " + "、".join(missing) + "，请检查上面的构建日志。")
+        _restore_user_data(out_dir, stash, plan)
         return 1
 
     for name in expected:

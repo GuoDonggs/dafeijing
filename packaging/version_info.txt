@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-"""由 scripts/build_exe.py 生成，不要手改（改 voice_agent/__init__.py 的版本号）。"""
+# -*- coding: utf-8 -*-  （由 scripts/build_exe.py 生成，不要手改；改版本号请改 voice_agent/__init__.py）
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(1, 1, 0, 0),
