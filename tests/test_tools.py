@@ -521,6 +521,90 @@ def self_control() -> None:
     check("退出请求也交给了界面", quit_requests == ["quit"], str(quit_requests))
 
 
+def spoken_location_tools() -> None:
+    """用户点名了文件夹，就别整盘翻。
+
+    真事：用户说「我在 D 盘下的桌面下的对焦文件夹中写了一份介绍.md」，
+    模型调的是 find_files(pattern="介绍*.md", root="D:\\") —— 一次整盘扫描，
+    又慢又会翻出一堆同名的无关文件。这里验证三件事：
+    口语路径能拼回真实目录、盘符起点会先按用户说的文件夹找、
+    以及模型给了具体文件夹时不插手。
+    """
+    print("找文件：点名了文件夹就别整盘翻")
+    import tempfile as _tempfile
+
+    from voice_agent.tools import files as files_mod
+
+    with _tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        focus = root / "桌面" / "对焦"
+        focus.mkdir(parents=True)
+        (focus / "介绍.md").write_text("# 正主", encoding="utf-8")
+        (focus / "别的.txt").write_text("x", encoding="utf-8")
+        elsewhere = root / "别处"
+        elsewhere.mkdir()
+        (elsewhere / "介绍.md").write_text("# 无关的同名文件", encoding="utf-8")
+        noisy = root / "node_modules"
+        noisy.mkdir()
+        (noisy / "介绍.md").write_text("# 依赖里的", encoding="utf-8")
+
+        # ── 口语路径 ──
+        check("「X下的桌面下的对焦文件夹」拼得出真实目录",
+              files_mod._spoken_chain("X下的桌面下的对焦文件夹", base=root) == focus,
+              str(files_mod._spoken_chain("X下的桌面下的对焦文件夹", base=root)))
+        check("「我的桌面」认得出来（引子 + 目录名）",
+              files_mod._spoken_head("我的桌面") is not None
+              and files_mod._spoken_head("mymusic") is None,
+              str(files_mod._spoken_head("我的桌面")))
+        check("整句话里带垃圾尾巴也只取前面那段",
+              files_mod._spoken_chain("在X下的桌面下的对焦文件夹里写了一份介绍",
+                                     base=root) == focus,
+              str(files_mod._spoken_chain("在X下的桌面下的对焦文件夹里写了一份介绍",
+                                          base=root)))
+        check("盘符那段认得出（「我在D盘」→ D:\\）",
+              str(files_mod._spoken_head("我在d盘")).startswith("D"),
+              str(files_mod._spoken_head("我在d盘")))
+        check("认不出来就是 None，不会凭空造一个路径",
+              files_mod._spoken_chain("mymusic") is None
+              and files_mod._spoken_chain("把桌面上的文件整理一下") is None)
+        # 候选是"每段带不带「文件夹」"的组合：必须收敛。
+        # 曾经写成边扩展边迭代同一个列表 —— 那不是组合枚举，是无限膨胀（直接卡死）。
+        combo = files_mod._chain_candidates(["a", "b文件夹", "c目录"])
+        check("候选枚举会收敛（不会自我膨胀）", len(combo) == 4, str(combo))
+        check("起点不存在时什么都不扫（不能顺手去扫当前目录）",
+              files_mod._walk_files(None, lambda _n: True, 3)[0] == []
+              and files_mod._walk_files(root / "没有这个目录", lambda _n: True, 3)[0] == [])
+
+        # ── 盘符起点 + 用户点名的文件夹 → 先按他说的找 ──
+        saved = files_mod.spoken_location
+        files_mod.spoken_location = lambda: focus
+        try:
+            answer = files_mod.find_files("介绍*.md", root=Path(raw).drive + "\\")
+        finally:
+            files_mod.spoken_location = saved
+        check("给了盘符也先按用户说的那个文件夹找",
+              "对焦" in answer and "介绍.md" in answer, answer)
+        check("回答里说明了这是按用户说的位置找的", "按你话里说的" in answer, answer)
+        check("没把别处的同名文件混进来", "别处" not in answer, answer)
+
+        # ── 模型给了具体文件夹：照它找，不插手 ──
+        answer = files_mod.find_files("介绍*.md", root=str(root))
+        check("给了具体文件夹就照它找（两个同名文件都该出现）",
+              "对焦" in answer and "别处" in answer, answer)
+        check("依赖目录跳过（node_modules 里那三个不算）",
+              "node_modules" not in answer, answer)
+        check("结果里给的是**完整路径**（模型能直接拿去读）",
+              str(focus / "介绍.md") in answer, answer)
+        empty = files_mod.find_files("绝对没有这种文件*.zzz", root=str(root))
+        check("找不到时如实说，并带上找的范围", "没找到" in empty and str(root) in empty, empty)
+
+        # ── 用户那句话是**按线程**记的 ──
+        tools.set_utterance("我在D盘下的桌面下的对焦文件夹里写了介绍.md")
+        check("工具层拿得到用户这句话",
+              "对焦" in tools.last_utterance(), tools.last_utterance()[:20])
+        tools.set_utterance("")
+
+
 def main() -> int:
     print("=== 工具层体检 ===")
     static_audit()
@@ -531,6 +615,7 @@ def main() -> int:
     confirm_prompts()
     continuous_talk()
     folder_mapping()
+    spoken_location_tools()
     self_control()
     print()
     if failures:

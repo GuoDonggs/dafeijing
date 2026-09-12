@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .. import security
-from ._shared import TURN, keep_listening, reset_turn
+from ._shared import TURN, keep_listening, last_utterance, reset_turn, set_utterance
 from .apps import open_app, open_url, web_search
 from .files import list_files, read_file, recall, remember, search_files
 from .images import find_in_image_tool, list_reference_tool, reference_dir_tool
@@ -556,6 +556,8 @@ __all__ = [
     "Tool",
     "REGISTRY",
     "call",
+    "set_utterance",
+    "last_utterance",
     "openai_tools",
     "describe",
     "ToolResult",

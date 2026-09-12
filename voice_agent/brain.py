@@ -57,6 +57,9 @@ _TOOL_HINT = """你可以调用本机工具来完成任务，规则：
 - 屏幕上"这块 / 那儿" → 先用 mark_region / mark_point 把它变成 范围N / 点N，
   之后一律用那个名字（鼠标点击、找图、截图、看图都认这个名字）；
 - 找图不用记路径：用户说得出名字的图会放在参考图片目录里，直接按名字找；
+- **用户说了在哪个文件夹里找，就把那个文件夹传给 root**（「D盘下桌面里的对焦文件夹」
+  → root="D:\\桌面\\对焦"）。只给盘符（D:\\）等于整盘扫描：慢、还可能翻出
+  一堆无关的重名文件，是最常见的错法；
 - 你已经问了用户一个问题、或者还缺一个参数才能做 → **调 keep_listening**，
   这样用户不用再喊一次唤醒词就能接话。
 
@@ -219,6 +222,9 @@ class Brain:
         self.used_tools = False
         self.wants_followup = False
         tools.reset_turn()   # 每轮开头清空「要不要接着听」
+        # 把用户这句话原样交给工具层：找文件的工具靠它认出"用户点名的那个文件夹"，
+        # 免得模型只给一个 D:\ 就变成整盘扫描（见 tools/files.py 的 spoken_location）。
+        tools.set_utterance(user_text)
         if self.llm is not None and time.monotonic() >= self._llm_backoff_until:
             try:
                 return self._respond_llm(user_text, confirm, interrupt)

@@ -12,11 +12,202 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from ._shared import HOME, memory_file
+from ._shared import HOME, last_utterance, memory_file
 from .windows import _desktop
 
 __all__ = ["list_files", "search_files", "read_file", "write_file", "edit_file",
-           "find_files", "grep_files", "open_path", "remember", "recall", "_resolve_path"]
+           "find_files", "grep_files", "open_path", "remember", "recall", "_resolve_path",
+           "spoken_location"]
+
+#: 这几个目录里不会有用户要找的文档，但常常占了几十万个文件 ——
+#: 「在 D 盘里找一下」最耗时的就是它们（系统目录、回收站、依赖缓存）。
+_SKIP_DIRS = frozenset({
+    "$recycle.bin", "system volume information", "$winreagent", "recovery",
+    "windows", "windows.old", "program files", "program files (x86)", "programdata",
+    "appdata", "node_modules", ".git", "__pycache__", ".venv", "venv", ".tox",
+    "site-packages", ".cache", ".gradle", ".nuget",
+})
+
+#: 找文件的预算。用户说「D盘下」时那是一次**整盘扫描**：不设上限的话，
+#: 一个不存在的文件名能让助手沉默好几分钟（用户只会以为它死了）。
+SEARCH_SECONDS = 6.0
+SEARCH_MAX_ENTRIES = 80000
+
+#: 口语路径里的分隔说法（「D盘**下的**桌面**下的**对焦文件夹」）
+_CHAIN_SEP = re.compile(r"(?:下面的|下面|下的|里的|里面的|之中的|中的|上面|里面|之中|中|里)")
+#: 每一段末尾常带的类别词（「对焦文件夹」→「对焦」）
+_CHAIN_TAIL = re.compile(r"(文件夹|目录|文件|路径)$")
+#: 引子（「**我在**文档下的…」）：短、且不带英文数字，才把这段后缀当目录名认。
+#: 光看 endsWith 会把 "mymusic" 也认成"音乐"目录，所以带 ASCII 的一律不认。
+_LEAD_IN_MAX = 4
+
+#: 口语目录名 → 真实位置（和 _resolve_path 共用一份，别抄成两份）
+_NAMED_DIRS = {
+    "下载": "Downloads", "downloads": "Downloads",
+    "文档": "Documents", "documents": "Documents",
+    "图片": "Pictures", "pictures": "Pictures",
+    "音乐": "Music", "music": "Music",
+    "视频": "Videos", "videos": "Videos",
+    "桌面": "Desktop", "desktop": "Desktop",
+}
+
+
+def _is_drive_root(path: Path) -> bool:
+    """是不是"一个盘的根"（D:\\）—— 这种起点等于整盘扫描。"""
+    text = str(path)
+    return bool(re.fullmatch(r"[A-Za-z]:\\?", text))
+
+
+def _spoken_head(segment: str, base: Path | None = None) -> Path | None:
+    """口语路径的第一段解析成真实起点：盘符 / 桌面这类别名 / 应用映射。"""
+    if base is not None:
+        return base
+    text = str(segment or "").strip()
+    if not text:
+        return None
+    drive = re.search(r"([A-Za-z])\s*(?:盘|:)\s*$", text)
+    if drive:
+        return Path(drive.group(1).upper() + ":\\")
+    low = text.lower()
+    for name in _NAMED_DIRS:
+        if low == name:
+            return _resolve_path(name)
+        if not low.endswith(name):
+            continue
+        # 前缀是"我在 / 我的 / 这个"这类中文引子才认（「我在文档下的项目」）。
+        # 不能宽松地只看 endsWith：那样 "mymusic" 会被当成"音乐"目录 ——
+        # 所以带 ASCII 字母数字的前缀一律不认。
+        prefix = low[:-len(name)]
+        if not re.search(r"[a-z0-9]", prefix) and len(prefix) <= 4:
+            return _resolve_path(name)
+    try:
+        from .. import screen as screen_mod  # noqa: PLC0415
+
+        found = screen_mod.resolve_app(text)
+        if found.get("hit"):
+            mapped = Path(str(found.get("target") or ""))
+            if mapped.is_dir():
+                return mapped
+    except Exception:  # noqa: BLE001 - 映射表坏了就当作认不出来
+        pass
+    return None
+
+
+def _chain_candidates(tail: list[str]) -> list[list[str]]:
+    """每一段都可能带着「文件夹」这种尾巴，也可能不带 —— 两种都试一遍。"""
+    variants = [list(tail)]
+    for index, part in enumerate(tail):
+        stripped = _CHAIN_TAIL.sub("", part).strip()
+        if not stripped or stripped == part:
+            continue
+        # 必须迭代**快照**：直接 for item in variants 的同时又 append 进去，
+        # 生成器会跟着变长的列表一直读下去 —— 那不是组合枚举，是无限膨胀
+        # （实测直接卡死，一个候选都试不出来）。
+        for item in list(variants):
+            candidate = item[:index] + [stripped] + item[index + 1:]
+            if candidate not in variants:
+                variants.append(candidate)
+    return variants
+
+
+def _spoken_chain(text: str, base: Path | None = None) -> Path | None:
+    """把「D盘下的桌面下的对焦文件夹」这种口语说法拼成**真实存在**的路径。
+
+    为什么需要它：模型很容易把用户的口语原话当成路径传下来，而
+    Path("D盘下的桌面下的对焦文件夹") 只会解析成一个不存在的相对目录。
+    拼得出来就用，拼不出来返回 None（调用方按原来的规则处理）——
+    只认**真的存在**的目录，绝不凭空造一个路径出来。
+    base 只给测试用：把第一段当成相对 base 的目录。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    parts = [p.strip(" \u3000,，。.、:：;；!！?？") for p in _CHAIN_SEP.split(raw)]
+    parts = [p for p in parts if p]
+    if len(parts) < 2:
+        return None
+    head = _spoken_head(parts[0], base)
+    if head is None:
+        return None
+    tail = parts[1:]
+    # 从长到短试：用户那句话后面往往还跟着一整句别的（「…对焦文件夹里写了一份…」），
+    # 越长的候选越可能不存在，短的那个才是他要的目录。
+    for count in range(len(tail), 0, -1):
+        for candidate_tail in _chain_candidates(tail[:count]):
+            try:
+                candidate = head.joinpath(*candidate_tail)
+                if candidate.is_dir() or candidate.is_file():
+                    return candidate
+            except (OSError, ValueError):
+                continue
+    return None
+
+
+def spoken_location() -> Path | None:
+    """用户这句话里点明的那个文件夹（已经确认存在）。
+
+    给找文件的工具用：模型把位置吞掉、只给一个盘符时，靠它把位置找回来。
+    """
+    return _spoken_chain(last_utterance())
+
+
+def _join_paths(paths: list[Path], limit: int = 3) -> str:
+    """列出命中文件的**完整路径**。
+
+    以前只给文件名，模型拿到「介绍.md」之后没法接着读它 —— 还得再问一次在哪。
+    """
+    shown = [str(p) for p in paths[:limit]]
+    text = "、".join(shown)
+    if len(paths) > limit:
+        text += "…等 " + str(len(paths)) + " 个"
+    return text
+
+
+def _walk_files(base: Path, match, limit: int,
+                seconds: float = SEARCH_SECONDS) -> tuple[list[Path], bool]:
+    """在 base 下面找文件，返回（命中, 是不是没扫完就停了）。
+
+    广度优先 + 时限 + 条数上限：用户说「D盘下」的时候这是一次整盘遍历，
+    必须能停下来。找不到时那句"没扫完"要如实说出来，不能假装"没有"。
+    """
+    import time as _time  # noqa: PLC0415
+    from collections import deque  # noqa: PLC0415
+
+    if base is None:
+        # 起点是 None 时 os.scandir 会去扫**当前工作目录**（打包版的 exe 旁边、
+        # 或者 System32）—— 那是静默地找错地方，不如干脆什么都不扫。
+        return [], False
+    base = Path(base)
+    if not base.is_dir():
+        return [], False
+    matches: list[Path] = []
+    scanned = 0
+    stopped = False
+    deadline = _time.monotonic() + max(0.5, float(seconds))
+    queue: deque[Path] = deque([base])
+    while queue:
+        if _time.monotonic() > deadline or scanned > SEARCH_MAX_ENTRIES:
+            stopped = True
+            break
+        current = queue.popleft()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    scanned += 1
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name.lower() in _SKIP_DIRS:
+                                continue
+                            queue.append(Path(entry.path))
+                        elif match(entry.name):
+                            matches.append(Path(entry.path))
+                            if len(matches) >= limit:
+                                return matches, False
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return matches, stopped
 
 def list_files(path: str = "") -> str:
     """列出一个目录里的文件。"""
@@ -45,29 +236,26 @@ def search_files(name: str = "", root: str = "", limit: int = 10) -> str:
     keyword = (name or "").strip().lower()
     if not keyword:
         return "没说要找什么文件"
-    base = _resolve_path(root) if root else HOME
+    count = max(1, min(int(limit or 10), 50))
+    base = _resolve_path(root) if str(root or "").strip() else HOME
     if not base.is_dir():
-        return "找不到搜索的起点目录"
-    matches: list[Path] = []
-    scanned = 0
-    try:
-        for current, dirs, files in os.walk(base):
-            dirs[:] = [d for d in dirs if not d.startswith((".", "$"))][:40]
-            scanned += 1
-            if scanned > 4000:
-                break
-            for filename in files:
-                if keyword in filename.lower():
-                    matches.append(Path(current) / filename)
-                    if len(matches) >= int(limit):
-                        break
-            if len(matches) >= int(limit):
-                break
-    except Exception as exc:
-        return "搜索出错了：" + str(exc)[:60]
+        return "找不到搜索的起点目录：" + str(root)
+    match = lambda filename: keyword in filename.lower()  # noqa: E731
+    # 用户这句话里点明了文件夹、而模型给的是一整个盘（或者没给）→ 先按他说的找，
+    # 见 find_files 里的同一段注释
+    hint = spoken_location()
+    if hint is not None and hint != base and (_is_drive_root(base) or not str(root or "").strip()):
+        found, _stopped = _walk_files(hint, match, count)
+        if found:
+            return "在 " + str(hint) + " 里找到 " + str(len(found)) + " 个：" + _join_paths(found)
+    matches, stopped = _walk_files(base, match, count)
     if not matches:
-        return "没找到名字里有" + name + "的文件"
-    return "找到 " + str(len(matches)) + " 个：" + "、".join(p.name for p in matches[:5])
+        return ("在 " + str(base) + " 里没找到名字里有「" + str(name) + "」的文件"
+                + ("（范围太大，**没扫完**就停了；给一个更具体的文件夹会快得多）" if stopped else ""))
+    text = "在 " + str(base) + " 里找到 " + str(len(matches)) + " 个：" + _join_paths(matches, 4)
+    if stopped:
+        text += "（范围太大，扫了一部分就停下；想找全就给个更具体的文件夹）"
+    return text
 
 
 def read_file(path: str = "", max_chars: int = 800) -> str:
@@ -133,60 +321,81 @@ def edit_file(path: str = "", old: str = "", new: str = "") -> str:
 
 def find_files(pattern: str = "", root: str = "", limit: int = 20) -> str:
     """按通配符找文件，例如 *.pdf、report?.docx。比 search_files 精确。"""
+    import fnmatch  # noqa: PLC0415
+
     key = (pattern or "").strip()
     if not key:
         return "没说要找什么样的文件"
     if not any(ch in key for ch in "*?["):
         key = "*" + key + "*"
-    base = _resolve_path(root) if root else HOME
+    count = max(1, min(int(limit or 20), 50))
+    base = _resolve_path(root) if str(root or "").strip() else HOME
     if not base.is_dir():
-        return "找不到搜索的起点目录"
-    matches: list[Path] = []
-    try:
-        for found in base.rglob(key):
-            if found.is_file():
-                matches.append(found)
-                if len(matches) >= int(limit):
-                    break
-    except Exception as exc:  # noqa: BLE001
-        return "搜索出错了：" + str(exc)[:60]
+        return "找不到搜索的起点目录：" + str(root)
+    match = lambda filename: fnmatch.fnmatch(filename.lower(), key.lower())  # noqa: E731
+    # ① 用户在这句话里点明了文件夹，而模型给的是一整个盘（或者压根没给）：
+    #    **先按他说的那个文件夹找**。他要的是"那里面的东西"，不是"全盘同名文件"：
+    #    整盘扫描又慢，还会翻出一堆同名的无关文件把他带偏。
+    explicit_root = bool(str(root or "").strip())
+    hint = spoken_location()
+    if hint is not None and hint != base and (_is_drive_root(base) or not explicit_root):
+        found, _stopped = _walk_files(hint, match, count)
+        if found:
+            return ("在 " + str(hint) + " 里找到 " + str(len(found)) + " 个：" + _join_paths(found)
+                    + "（按你话里说的那个文件夹找的）")
+    matches, stopped = _walk_files(base, match, count)
     if not matches:
-        return "没找到匹配 " + pattern + " 的文件"
-    return "找到 " + str(len(matches)) + " 个：" + "、".join(p.name for p in matches[:6])
+        return ("在 " + str(base) + " 里没找到匹配 " + str(pattern) + " 的文件"
+                + ("（范围太大，**没扫完**就停了。给一个更具体的文件夹，比如 "
+                   "D:\\桌面\\对焦，会快得多也不会漏）" if stopped else ""))
+    text = "在 " + str(base) + " 里找到 " + str(len(matches)) + " 个：" + _join_paths(matches)
+    if stopped:
+        text += "（范围太大，扫了一部分就停下；想找全就给个更具体的文件夹）"
+    return text
 
 
 def grep_files(pattern: str = "", root: str = "", include: str = "*.txt") -> str:
     """在文件内容里搜一段文字（默认只在文本文件里找）。"""
+    import fnmatch  # noqa: PLC0415
+
     key = (pattern or "").strip()
     if not key:
         return "没说要找什么内容"
-    base = _resolve_path(root) if root else HOME
+    base = _resolve_path(root) if str(root or "").strip() else HOME
     if not base.is_dir():
-        return "找不到搜索的起点目录"
+        return "找不到搜索的起点目录：" + str(root)
+    # 和 find_files 一样：用户点明了文件夹就别整盘翻
+    hint = spoken_location()
+    if hint is not None and hint != base and (_is_drive_root(base) or not str(root or "").strip()):
+        if hint.is_dir():
+            base = hint
+    wanted = (include or "*").lower()
+    # 先有上限地收集候选文件（同样是广度优先 + 时限），再逐个读内容。
+    # 少了这道上限，一次「在 D 盘里搜 xxx」会读到天荒地老。
+    candidates, stopped = _walk_files(
+        base, lambda filename: fnmatch.fnmatch(filename.lower(), wanted), 800)
     hits: list[str] = []
-    scanned = 0
-    try:
-        for found in base.rglob(include or "*"):
-            if not found.is_file() or found.stat().st_size > 2 * 1024 * 1024:
+    for found in candidates:
+        try:
+            if found.stat().st_size > 2 * 1024 * 1024:
                 continue
-            scanned += 1
-            if scanned > 800:
-                break
-            try:
-                for number, line in enumerate(
-                        found.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-                    if key in line:
-                        hits.append(found.name + " 第 " + str(number) + " 行：" + line.strip()[:40])
-                        break
-            except OSError:
-                continue
-            if len(hits) >= 8:
-                break
-    except Exception as exc:  # noqa: BLE001
-        return "搜索出错了：" + str(exc)[:60]
+            for number, line in enumerate(
+                    found.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                if key in line:
+                    hits.append(str(found) + " 第 " + str(number) + " 行：" + line.strip()[:40])
+                    break
+        except OSError:
+            continue
+        if len(hits) >= 8:
+            break
     if not hits:
-        return "没找到包含「" + pattern + "」的文件"
-    return "找到 " + str(len(hits)) + " 处：" + "；".join(hits[:5])
+        return ("在 " + str(base) + " 里没找到包含「" + str(pattern) + "」的文件"
+                + ("（范围太大，**没扫完**就停了；给一个更具体的文件夹会快得多）" if stopped
+                   else ""))
+    text = "找到 " + str(len(hits)) + " 处：" + "；".join(hits[:5])
+    if stopped:
+        text += "（范围太大，只扫了一部分）"
+    return text
 
 
 def open_path(path: str = "") -> str:
@@ -274,19 +483,10 @@ def _resolve_path(raw: str) -> Path:
     if Path(expanded).is_absolute() or re.match(r"^[A-Za-z]:", expanded):
         return Path(expanded)
     lowered = value.lower()
-    named = {
-        "下载": HOME / "Downloads", "downloads": HOME / "Downloads",
-        "文档": HOME / "Documents", "documents": HOME / "Documents",
-        "图片": HOME / "Pictures", "pictures": HOME / "Pictures",
-        "音乐": HOME / "Music", "music": HOME / "Music",
-        "视频": HOME / "Videos", "videos": HOME / "Videos",
-        "主目录": HOME, "用户目录": HOME, "home": HOME,
-    }
-    for key, path in named.items():
-        if lowered == key.lower():
-            return path
-    if lowered in ("桌面", "desktop"):
-        return _desktop()
+    if lowered in ("主目录", "用户目录", "home"):
+        return HOME
+    if lowered in _NAMED_DIRS:
+        return _desktop() if _NAMED_DIRS[lowered] == "Desktop" else HOME / _NAMED_DIRS[lowered]
     drive = re.fullmatch(r"([A-Za-z])\s*(盘|:)?", value)
     if drive:
         return Path(drive.group(1).upper() + ":\\")

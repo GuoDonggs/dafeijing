@@ -15,6 +15,7 @@ from .. import paths
 from ..config import PROJECT_ROOT
 
 __all__ = ["PROJECT_ROOT", "HOME", "DEFAULT_SEARCH", "TURN", "reset_turn", "keep_listening",
+           "UTTERANCE", "set_utterance", "last_utterance",
            "screenshot_dir", "reference_dir", "memory_file", "build_dir"]
 
 HOME = Path.home()
@@ -79,6 +80,35 @@ class _TurnState:
 
 
 TURN = _TurnState()
+
+
+class _Utterance:
+    """用户这一轮说的那句话（按线程分开，和 TURN 同理）。
+
+    工具拿它做一件事：**用户已经在话里点明了文件夹，就别去整盘翻**。
+    模型经常把"D盘下的桌面下的对焦文件夹"这种口语吞掉、只给一个「D:\\」——
+    于是 find_files 变成一次整盘扫描，慢到用户以为助手死了。
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    def set(self, text: str) -> None:
+        self._local.text = str(text or "")
+
+    def get(self) -> str:
+        return str(getattr(self._local, "text", "") or "")
+
+
+UTTERANCE = _Utterance()
+
+
+def set_utterance(text: str) -> None:
+    UTTERANCE.set(text)
+
+
+def last_utterance() -> str:
+    return UTTERANCE.get()
 
 
 def reset_turn() -> None:

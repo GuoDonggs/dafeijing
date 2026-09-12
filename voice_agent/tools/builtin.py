@@ -371,10 +371,17 @@ _register(Tool(
 _register(Tool(
     name="find_files",
     title="按通配符找文件",
-    description="用 *.pdf、报表*.xlsx 这类通配符找文件，比按名字搜更精确。",
+    description=(
+        "用 *.pdf、报表*.xlsx 这类通配符找文件，比按名字搜更精确。"
+        "**用户说了在哪找，就把那个文件夹给 root**：他说「D盘下桌面里的对焦文件夹」，"
+        "root 就该是 D:\\桌面\\对焦。**不要只给一个盘符**（D:\\）—— "
+        "那是整盘扫描：慢好几倍，还会翻出一堆无关的同名文件把他带偏。"
+    ),
     parameters=_params(
         pattern={"type": "string", "description": "通配符，例如 *.pdf", "_required": True},
-        root={"type": "string", "description": "从哪个目录开始找，默认用户目录"},
+        root={"type": "string",
+              "description": "从哪个文件夹开始找（用户提到的那个）。默认用户目录；"
+                             "**不要只写盘符**"},
         limit={"type": "integer", "description": "最多返回几个，默认 20"},
     ),
     handler=find_files,
@@ -383,10 +390,13 @@ _register(Tool(
 _register(Tool(
     name="grep_files",
     title="在文件内容里搜",
-    description="在文件内容里搜一段文字，返回命中的文件名和行号。用户问「哪个文件里写过 xxx」时调用。",
+    description=("在文件内容里搜一段文字，返回命中的文件名和行号。"
+                 "用户问「哪个文件里写过 xxx」时调用。"
+                 "用户提到了具体文件夹就把它给 root（别只给盘符，整盘读内容很慢）。"),
     parameters=_params(
         pattern={"type": "string", "description": "要找的文字", "_required": True},
-        root={"type": "string", "description": "从哪个目录开始找，默认用户目录"},
+        root={"type": "string",
+              "description": "从哪个文件夹开始找，默认用户目录；**不要只写盘符**"},
         include={"type": "string", "description": "只看这类文件，默认 *.txt"},
     ),
     handler=grep_files,
@@ -643,10 +653,13 @@ _register(Tool(
 
 _register(Tool(
     name="search_files",
-    description="按文件名在电脑里找文件。",
+    description=("按文件名在电脑里找文件。用户说了在哪个文件夹/盘里找，"
+                 "就把那个位置原样给 root —— 说「D盘下桌面里的对焦」就给 "
+                 "D:\\桌面\\对焦，别只给 D:\\（整盘扫描又慢又吵）。"),
     parameters=_params(
         name=_S_REQ,
-        root={"type": "string", "description": "从哪个目录开始找，留空表示用户主目录"},
+        root={"type": "string",
+              "description": "从哪个文件夹开始找，留空表示用户主目录；**不要只写盘符**"},
         limit=_I,
     ),
     handler=search_files,
