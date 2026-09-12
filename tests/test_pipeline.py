@@ -140,6 +140,88 @@ def speak_to_pcm(agent: VoiceAgent, text: str, kind: str = "reply") -> np.ndarra
     return audio_io.resample(samples, rate, RATE)
 
 
+def stale_task_cancel() -> None:
+    """打断之后，**旧任务必须彻底作废**，不能接着往下做。
+
+    用户报的原话："我尝试打断，LLM 回复没有继续执行的任务，但后台日志仍然能
+    看到上一个任务正在运行"。根因是取消信号用的是共享的 threading.Event，
+    而新任务开头会把它 clear() —— 旧任务从一次长工具调用里醒过来时发现
+    "没人让我停"，于是接着把整个任务跑完（实测多跑 8 步）。
+
+    现在这一轮拿的是绑 epoch 的 TurnToken：epoch 只往前走，旧任务永远作废。
+    """
+    print("\n场景 10：打断之后旧任务必须作废（不是「把信号清掉」）")
+    import threading as _threading
+
+    from voice_agent import tools as tools_mod
+    from voice_agent.llm import LlmError
+
+    class _FakeClient:
+        """每轮都要求调一次工具（参数各不相同，所以不会触发绕圈检测）。"""
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+            self.cached_tokens = 0
+
+        def chat(self, messages, tools=None, interrupt=None):  # noqa: ANN001
+            self.calls += 1
+            if interrupt is not None and interrupt.is_set():
+                raise LlmError("被打断", interrupted=True)
+            return {"role": "assistant", "content": "",
+                    "tool_calls": [{"id": "c" + str(self.calls), "type": "function",
+                                    "function": {"name": "get_time",
+                                                 "arguments": "{\"step\": %d}" % self.calls}}]}
+
+    def run(use_token: bool) -> int:
+        cfg = Config.load()
+        cfg.llm.max_rounds = 10
+        worker = VoiceAgent(cfg, log=lambda *a: None)
+        client = _FakeClient()
+        worker.brain.llm = client
+        worker.brain._clients["chat"] = client
+        signal = worker._turn_token(worker._epoch) if use_token else worker._interrupt
+        seen: list = []
+        original = tools_mod.call_result
+
+        def slow(name, arguments=None, on_confirm=None):  # noqa: ANN001
+            seen.append(name)
+            if len(seen) == 2:
+                worker._epoch += 1          # 新任务接替（_spawn / _barge_in 做的事）
+                worker._interrupt.clear()   # 新任务把共享信号清掉
+            return tools_mod.ToolResult("好了")
+
+        tools_mod.call_result = slow
+        try:
+            worker.brain.respond("做很多步", interrupt=signal)
+        finally:
+            tools_mod.call_result = original
+        return len(seen)
+
+    token_steps = run(True)
+    old_steps = run(False)
+    check("绑 epoch 的 token：打断之后一步都不多做", token_steps == 2, str(token_steps))
+    check("（对照）共享 Event 的老做法会接着跑完剩下的步数",
+          old_steps > 2, str(old_steps))
+
+    # 单元层面：共享信号被 clear 也不影响它，且不可复活
+    fresh = VoiceAgent(Config.load(), log=lambda *a: None)
+    token = fresh._turn_token(fresh._epoch)
+    check("刚拿到时没被叫停", not token.is_set())
+    fresh._interrupt.set()
+    fresh._interrupt.clear()
+    check("共享信号被清掉不影响它", not token.is_set())
+    fresh._epoch += 1
+    fresh._interrupt.clear()
+    check("epoch 一变，旧任务的信号永远是停", token.is_set())
+    token.clear()
+    fresh._interrupt.clear()
+    check("而且不可复活（clear 是空的）", token.is_set())
+    check("引擎停止也算停", (fresh._stopping.set(), fresh._turn_token(fresh._epoch).is_set())[1])
+    fresh._stopping.clear()
+
+
 def main() -> int:
     cfg = Config.load()
     # 这条测试验证的是状态机本身，所以要固定两个外部变量：
@@ -468,6 +550,8 @@ def main() -> int:
         check("没有空块", bool(played) and all(size > 0 for size in played), str(played))
     finally:
         speech_mod.audio_io.play = original_play
+
+    stale_task_cancel()
 
     print()
     if failures:

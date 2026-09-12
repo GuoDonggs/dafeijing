@@ -65,6 +65,45 @@ _DOUBT_WORDS = ("怎么可能", "为什么", "真的吗", "至于吗", "再说",
 _WORDLIST_MAX = 16
 
 
+class TurnToken:
+    """一轮任务的「请停下」信号：**绑定当轮的 epoch**。
+
+    以前这里传的是共享的 threading.Event（self._interrupt），而**新任务一开始
+    就会把它 clear()** —— 于是旧任务从一次长工具调用里醒过来时发现「没人让我停」，
+    接着把整个任务跑完：日志里就是「上一个任务还在跑」。用户报的正是这个。
+
+    epoch 只会往前走，所以旧任务的信号一旦作废就**永远是停**，谁也没法把它复活。
+    接口只需要 is_set()（Llm._post 和 brain 都是这么用的），另外补一个 wait()
+    兼容 threading.Event 的用法。
+    """
+
+    __slots__ = ("_agent", "_epoch")
+
+    def __init__(self, agent: "VoiceAgent", epoch: int) -> None:
+        self._agent = agent
+        self._epoch = int(epoch)
+
+    def is_set(self) -> bool:
+        """还要不要继续：epoch 变了（被新任务取代）或者引擎停了。"""
+        return self._agent._epoch != self._epoch or self._agent._stopping.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """兼容 threading.Event 的用法：等它被置位（或超时），返回是否已置位。"""
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        while not self.is_set():
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+
+    def set(self) -> None:
+        """把这一轮标记成作废（等价于「有新任务接替」）。"""
+        self._agent._epoch += 1
+
+    def clear(self) -> None:
+        """什么都不做：作废是不可逆的 —— 这正是它比 Event 可靠的地方。"""
+
+
 class VoiceAgent:
     def __init__(self, cfg: Config, log: Callable[[str], None] = print) -> None:
         self.cfg = cfg
@@ -123,7 +162,10 @@ class VoiceAgent:
         self._stop_speak = threading.Event()   # 立刻停播
         # 这一轮播报是什么时候开始的：用来挡掉"自己把自己打断"
         self._speaking_since = 0.0
-        self._interrupt = threading.Event()    # 立刻取消当前任务
+        self._interrupt = threading.Event()    # 立刻取消当前任务（停播用）
+        #: 引擎级停止：stop() 置位、start() 清掉。TurnToken 会看它 ——
+        #: 停止之后旧任务不该再往下跑。
+        self._stopping = threading.Event()
         self._confirm_q: queue.Queue[str] = queue.Queue()
         # 这一轮里已经答过的确认：同一个操作（同一句确认提示）不再问第二遍。
         # 用户的抱怨是"明明确认过了，它又问一遍，好像刚才那句白说了" ——
@@ -190,6 +232,7 @@ class VoiceAgent:
                                            if self._wake_on else "已关闭"))
             self._speak("语音助手已就绪，随时听候吩咐。", kind="notice")
 
+        self._stopping.clear()
         self._running = True
         self.mic = audio_io.Mic(
             device=self._in_device,
@@ -240,6 +283,7 @@ class VoiceAgent:
     def stop(self) -> None:
         """停止监听并释放设备；可再次 start()。"""
         self._stop_background("停止引擎")
+        self._stopping.set()
         self._running = False
         self._stop_speak.set()
         self._interrupt.set()
@@ -359,7 +403,7 @@ class VoiceAgent:
         self._speaking.clear()
         self._state = _IDLE
         self._note("system", "已打断当前任务")
-        self.log("[agent] 已打断当前任务")
+        self.log("[agent] 已打断当前任务（旧任务已作废，不会再发起新的动作）")
 
     # ───────────────────── 音频回调（采集线程） ─────────────────────
 
@@ -826,17 +870,23 @@ class VoiceAgent:
         self._state = _THINK
         self._interrupt.clear()
         self._stop_speak.clear()
+        # 这一轮自己的取消信号：**不要**把共享的 self._interrupt 交给大脑 ——
+        # 下一个任务开头会 clear() 它，于是旧任务从长工具里醒来时以为"没人让我停"，
+        # 接着把整个任务跑完（用户看到的就是"上一个任务还在跑"）。
+        token = self._turn_token(epoch)
         # 新一轮：上一轮的确认不再复用（同一个操作重新问一遍才安全）
         self._confirm_memory.clear()
         started = time.perf_counter()
         try:
-            reply = self.brain.respond(text, confirm=self._ask_confirm, interrupt=self._interrupt)
+            reply = self.brain.respond(text, confirm=self._confirm_for(token), interrupt=token)
         except Exception as exc:  # noqa: BLE001 - 大脑出错也要说一句，不能静默
             self.log("[agent] 处理出错：" + str(exc))
             reply = "刚才处理的时候出错了。"
         elapsed = time.perf_counter() - started
-        if self._interrupt.is_set() or self._stale(epoch):
-            self.log("[agent] 任务被打断（{:.1f}s）".format(elapsed))
+        if token.is_set():
+            # 说清楚"上一个任务到此为止"，日志里能一眼看到它没有继续跑
+            self.log("[agent] 任务已作废（{:.1f}s，被新任务/打断取代，不会再有动作）"
+                     .format(elapsed))
             return
         self.log("[brain] {:.1f}s → {}".format(elapsed, reply[:120]))
         self.log("[agent] 这一轮说完：用时 %.1fs，回复 %d 字，追问窗口 %s"
@@ -847,7 +897,7 @@ class VoiceAgent:
         self._note("assistant", reply)
         if reply.strip():
             self._speak(reply, kind="reply")
-        if self._interrupt.is_set() or self._stale(epoch):
+        if token.is_set():
             return
         # 追问窗口：答完之后继续收音一小会儿，用户不用再喊一次唤醒词。
         # 这是「像人」和「像命令行」之间最关键的一处差别。
@@ -881,8 +931,22 @@ class VoiceAgent:
             return window, "（刚反问了用户一句）"
         return 0, ""
 
-    def _ask_confirm(self, question: str, fingerprint: str = "") -> bool:
-        """敏感操作前的语音确认：问一句，听一句，再判断同意与否。"""
+    def _confirm_for(self, token: "TurnToken"):
+        """把确认通道绑到这一轮的 token 上（工具层只认 (question, fingerprint)）。"""
+
+        def ask(question: str, fingerprint: str = "") -> bool:
+            return self._ask_confirm(question, fingerprint, token)
+
+        return ask
+
+    def _ask_confirm(self, question: str, fingerprint: str = "",
+                     token: "TurnToken | None" = None) -> bool:
+        """敏感操作前的语音确认：问一句，听一句，再判断同意与否。
+
+        token 是这一轮的取消信号（绑 epoch）；没传就退回共享的 self._interrupt ——
+        直接用共享那个会在"新任务把它 clear 掉"之后误判成"没人让我停"。
+        """
+        interrupt = token or self._interrupt
         if not self.cfg.agent.confirm.enabled:
             return True
         if self.tts is None and self.cfg.tts.enabled:
@@ -915,7 +979,7 @@ class VoiceAgent:
             self._note("system", prompt if attempt == 0 else ("（再问一次）" + prompt))
             self._cue("confirm")
             self._speak(prompt, kind="confirm")
-            if self._interrupt.is_set() or self._stale(epoch):
+            if interrupt.is_set() or self._stale(epoch):
                 return False
             while not self._confirm_q.empty():  # 清掉过期回答
                 self._confirm_q.get_nowait()
@@ -927,7 +991,7 @@ class VoiceAgent:
             except queue.Empty:
                 answer = ""
             # 等待期间可能已经被唤醒词打断/被新任务取代，此时不能再碰状态
-            if self._stale(epoch):
+            if interrupt.is_set() or self._stale(epoch):
                 self.log("[agent] 确认期间任务已被打断，忽略这次回答")
                 return False
             self._state = _THINK
@@ -1105,8 +1169,10 @@ class VoiceAgent:
         从阻塞里醒来，把刚设好的「正在听」状态改写回 thinking，于是采集循环只喂
         唤醒词、不再收指令，助手就「聋」了，得再喊一次才恢复。
 
-        epoch 是权威的取消机制；_interrupt / _stop_speak 只是让旧任务尽快退出的
-        快车道信号 —— 即使它们随后被新任务清掉，旧任务也不会再有任何副作用。
+        这一轮工作的取消信号是**绑 epoch 的 TurnToken**（见 TurnToken 的说明）：
+        新任务一开始，旧任务的 token 就永远作废，哪怕共享的 _interrupt 被 clear 掉 ——
+        这正是"打断之后旧任务还在跑"的根因。_interrupt / _stop_speak 只是让
+        停播和确认等待尽快退出的快车道。
         """
         self.log("[agent] 打断当前任务")
         self._stop_background("用户打断")
@@ -1117,7 +1183,10 @@ class VoiceAgent:
         if worker is not None and worker.is_alive():
             worker.join(timeout=2.0)
             if worker.is_alive():
-                self.log("[agent] 上一个任务仍卡在阻塞调用里，已作废（epoch 已推进）")
+                # 说清楚它的性质：卡在某次工具调用/HTTP 里，但**已经作废**，
+                # 不会再发起任何新的工具调用（用户看到这行就知道不用担心）
+                self.log("[agent] 上一个任务卡在阻塞调用里（工具或网络），已作废："
+                         "它不会再发起新的动作，日志里后续的 [tool] 行都是它收尾")
         self._stop_speak.clear()
         self._speaking.clear()
         self._on_wake()
@@ -1158,6 +1227,10 @@ class VoiceAgent:
         """
         return self._epoch if epoch is None else int(epoch)
 
+    def _turn_token(self, epoch: int | None = None) -> "TurnToken":
+        """这一轮的取消信号。绑定 epoch —— 新任务一开始，它立刻作废且不可复活。"""
+        return TurnToken(self, self._epoch_of(epoch))
+
     def _current_epoch(self) -> int:
         """当前执行流的任务代次。
 
@@ -1175,10 +1248,17 @@ class VoiceAgent:
         以前这里用「有 TTS 就直接放行」，结果输入「关机」真的会关机。
         """
         self._state = _THINK
+        # 界面上敲的指令也绑一个 token：这样「打断」按钮能让在途的模型调用立刻放弃，
+        # 不用干等那一轮跑完（以前 ask 没有取消信号，点了打断还得等）
+        token = self._turn_token()
         try:
-            reply = self.brain.respond(text, confirm=confirm or (lambda _question: False))
+            reply = self.brain.respond(text, confirm=confirm or (lambda _question: False),
+                                       interrupt=token)
         finally:
             self._state = _IDLE
+        if token.is_set():
+            self.log("[agent] 这条文字指令已被打断（不再继续）")
+            return "（这条指令被打断了）"
         if speak and self.tts is not None:
             self._speak(reply, kind="reply")
         return reply
