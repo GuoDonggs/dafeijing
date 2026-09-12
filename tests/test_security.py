@@ -195,6 +195,44 @@ def main() -> int:
     check("记录了限流", "rate_limited" in text)
     check("记录了明文链路降级", "transport_downgrade" in text)
 
+    print("\n放开模式：底线名单可以关掉")
+    security.configure(make_config("danger-full-access"))
+    security.reset_limits()
+    check("默认底线里执行命令仍然要确认",
+          security.check(tools.REGISTRY["run_command"]).needs_confirm)
+    loose = make_config("danger-full-access")
+    loose.security.floor_tools = []
+    loose.security.keep_floor_when_empty = False
+    security.configure(loose)
+    check("清空底线 + 关掉保留 → 执行命令也不问了",
+          security.check(tools.REGISTRY["run_command"]).allowed,
+          str(security.snapshot()["floor"]))
+    security.configure(make_config("danger-full-access"))
+    check("默认情况下快照里能看到底线名单",
+          "run_command" in security.snapshot()["floor"], str(security.snapshot()["floor"]))
+
+    print("\n同一句提示 ≠ 同一个操作（身份按参数算）")
+    a = tools.tool_fingerprint("run_command", {"command": "Get-ChildItem C:/x"})
+    b = tools.tool_fingerprint("run_command", {"command": "Get-ChildItem C:/x | Remove-Item"})
+    check("两条不同的命令指纹不同", a != b, a + " vs " + b)
+    check("参数的顺序不影响指纹",
+          tools.tool_fingerprint("x", {"a": 1, "b": 2})
+          == tools.tool_fingerprint("x", {"b": 2, "a": 1}))
+    # 提示是给人听的（会被"说人话"），所以两条命令的提示**可能碰巧一样**；
+    # 身份必须靠指纹区分开 —— 否则上一句的同意会被当成这一句的同意。
+    q1 = tools.REGISTRY["run_command"].confirm_question({"command": "Get-ChildItem C:/x"})
+    q2 = tools.REGISTRY["run_command"].confirm_question(
+        {"command": "Get-ChildItem C:/x | Remove-Item"})
+    check("管道 + 删除会按**最危险**的动作报", "删除" in q2 and "删除" not in q1,
+          q1 + " / " + q2)
+    same_hint = tools.REGISTRY["run_command"].confirm_question({"command": "Get-ChildItem C:/x"})
+    other_hint = tools.REGISTRY["run_command"].confirm_question({"command": "Get-ChildItem D:/y"})
+    check("提示可能一样，但指纹一定不一样",
+          same_hint == other_hint
+          and tools.tool_fingerprint("run_command", {"command": "Get-ChildItem C:/x"})
+          != tools.tool_fingerprint("run_command", {"command": "Get-ChildItem D:/y"}),
+          same_hint)
+
     print("\n用户自己定的名单")
     security.configure(make_config())
     security.reset_limits()

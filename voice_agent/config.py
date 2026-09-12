@@ -293,8 +293,15 @@ class SecurityCfg:
     # 一律拒绝的工具名（最高优先级，任何模式都不放行）。
     # 例：["run_command", "write_file"] —— 只想让它查、不想让它改的用法。
     deny_tools: list[str] = field(default_factory=list)
-    # 额外要求确认的工具名（在"永远要确认"的名单之外再加）
+    # 额外要求确认的工具名（在下面的"底线名单"之外再加）
     always_confirm: list[str] = field(default_factory=list)
+    # 「放开」模式下**仍然要确认**的底线名单。默认是执行命令 / 关机 / 杀进程 /
+    # 重启退出程序 —— 这四个是最危险的动作，放开权限不该等于把底线交出去。
+    # 想真的完全不问：把这里清空，并把 keep_floor_when_empty 设成 false。
+    floor_tools: list[str] = field(default_factory=lambda: [
+        "run_command", "power", "kill_process", "restart_self", "quit_self"])
+    # 名单被清空时，要不要保留内置的那几个底线（默认保留，安全优先）
+    keep_floor_when_empty: bool = True
     # 审计日志（build/audit.jsonl）
     audit: bool = True
 
@@ -755,6 +762,10 @@ class Config:
                 max_same_action=int(_get(raw, "security.max_same_action", 3)),
                 deny_tools=_str_list(_get(raw, "security.deny_tools", None), []),
                 always_confirm=_str_list(_get(raw, "security.always_confirm", None), []),
+                floor_tools=_str_list(_get(raw, "security.floor_tools", None),
+                                      SecurityCfg().floor_tools),
+                keep_floor_when_empty=bool(
+                    _get(raw, "security.keep_floor_when_empty", True)),
                 audit=bool(_get(raw, "security.audit", True)),
             ),
             ui=UiCfg(

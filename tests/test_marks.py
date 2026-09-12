@@ -129,14 +129,10 @@ def main() -> int:
     out = tools.call("screenshot", {"region": "左上角", "name": "crop"})
     check("截图工具认范围名", "左上角" in out and "crop" in out and "400×300" in out,
           out[:70])
-    saved = None
-    for token in out.replace("，", " ").split():
-        if token.endswith(".png"):
-            from voice_agent.tools._shared import screenshot_dir
+    import re as _re
 
-            candidate = screenshot_dir() / token
-            if candidate.is_file():
-                saved = candidate
+    found = _re.search(r"([A-Za-z]:\\[^\s，。]*?\.png)", out)
+    saved = Path(found.group(1)) if found and Path(found.group(1)).is_file() else None
     check("文件真的存下来了", saved is not None, str(saved))
     if saved is not None:
         from PIL import Image

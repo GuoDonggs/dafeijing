@@ -1093,9 +1093,23 @@ paths:
 | `workspace-write`    | **标准（默认）** | ✅    | ✅                    | 先语音确认                  |
 | `danger-full-access` | 放开         | ✅    | ✅                    | ✅ **但下面那份名单除外**        |
 
-**无论哪一档，这几件永远要用户确认**：执行任意命令、关机/重启/睡眠、
+**默认情况下，这几件即使「放开」也要用户确认**：执行任意命令、关机/重启/睡眠、
 杀进程、重启/退出本程序。放开权限不等于交出底线 —— 模型不能靠"先提权再动手"
 绕过去。
+
+这份"底线名单"是**可配置**的（设置 → 权限 →「放开模式下的底线」）：
+
+```yaml
+security:
+  # 放开模式下仍然要确认的工具。清空 + 下面设 false = 真的谁都不问（不建议：
+  # 执行命令等于把电脑交出去）
+  floor_tools: [run_command, power, kill_process, restart_self, quit_self]
+  keep_floor_when_empty: true
+```
+
+> 如果你把模式设成「放开」却发现执行命令还是要确认 —— 那不是设置没生效，
+> 是这份底线在起作用。语音切模式时它也会明说："注意：run_command 这几个
+> 仍然会问一次"。
 
 语音就能切：「进入只读模式」「恢复正常」「放开权限」（`permission_mode` 工具）。
 **放宽必须由用户本人确认**，模型自己提不了权；收窄随时可以。
@@ -1145,6 +1159,8 @@ security:
   max_same_action: 3           # 同一个操作最多连着要几次
   deny_tools: []               # 一律拒绝的工具，例：[run_command, write_file]
   always_confirm: []           # 额外要求确认的工具
+  floor_tools: [run_command, power, kill_process, restart_self, quit_self]
+  keep_floor_when_empty: true  # 底线清空时是否保留内置的那几个
   audit: true                  # build/audit.jsonl
 ```
 
@@ -1317,6 +1333,12 @@ Windows 把「有没有控制台」编在 PE 头里，所以一个 exe 没法同
 先音译成汉字。第一次遇到一个新词要问一次模型（约 1 秒），之后记在
 `build/translit.json` 里就不再联网。想彻底不联网就把 `tts.translit` 关掉，
 那样只认内置的 80 多个常见词，其余逐字母念。
+
+**它说截好图了，可按它说的地方找不到？**
+以前是它的错：提示里写死"存到图片文件夹里"，而数据目录已经改到
+`<数据目录>/screenshots` 了 —— 它自己都指错了地方，于是后面一路瞎试。
+现在截图会返回**完整路径**，而且别的工具只给文件名就能找到它
+（`open_path("screen-xxx.png")`、`find_in_image` 都认）。参考图片同理。
 
 **确认那句话听不清？**
 确认提示现在**只说人话**，机器文字一律不念：

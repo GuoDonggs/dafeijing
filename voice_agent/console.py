@@ -358,7 +358,7 @@ class Console:
 
     # 界面上用逗号写、配置文件里是列表的项
     LIST_KEYS = ("wake.keywords", "wake.replies", "agent.exit_words",
-                 "security.deny_tools", "security.always_confirm")
+                 "security.deny_tools", "security.always_confirm", "security.floor_tools")
 
     def settings(self) -> dict:
         """给设置表单用的一份扁平常量快照（不暴露真实 API Key）。"""
@@ -405,6 +405,8 @@ class Console:
             "security.audit": cfg.security.audit,
             "security.deny_tools": "、".join(cfg.security.deny_tools),
             "security.always_confirm": "、".join(cfg.security.always_confirm),
+            "security.floor_tools": "、".join(cfg.security.floor_tools),
+            "security.keep_floor_when_empty": cfg.security.keep_floor_when_empty,
             "llm.reasoning_effort": cfg.llm.reasoning_effort,
             "llm.vision_max_side": cfg.llm.vision_max_side,
             "llm.extra_body": "（高级：直接编辑 YAML）" if cfg.llm.extra_body else "",

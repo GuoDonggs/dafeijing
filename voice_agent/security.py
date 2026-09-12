@@ -90,9 +90,9 @@ EXEC_TOOLS = frozenset({
 
 #: **无论如何都要用户确认**的名单：即使把模式开到最宽也不免除。
 #: 这是防中转站的最后一道闸 —— 模型不能靠"先提权再动手"绕过它。
-ALWAYS_CONFIRM = frozenset({
-    "run_command", "power", "kill_process", "restart_self", "quit_self",
-})
+#: 用户可以在配置里改（floor_tools），但内置这几个是默认值。
+DEFAULT_FLOOR = ("run_command", "power", "kill_process", "restart_self", "quit_self")
+ALWAYS_CONFIRM = frozenset(DEFAULT_FLOOR)
 
 #: 这些工具的结果算"外部内容"：网页、文件、屏幕上的字都可能藏着注入的指令。
 UNTRUSTED_SOURCES = frozenset({
@@ -128,6 +128,9 @@ _state = {
     "mode": "workspace-write",
     "deny": set(),
     "confirm": set(),
+    # 放开模式下"仍然要确认"的名单（可以清空 —— 那就真的谁都不问）
+    "floor": set(),
+    "floor_enabled": True,
     "allow_insecure": False,
     "max_prompts": 6,
     "max_same": 3,
@@ -181,6 +184,16 @@ def configure(cfg: Any) -> None:
         _state["confirm"] = {str(x).strip()
                              for x in (getattr(security, "always_confirm", None) or [])
                              if str(x).strip()}
+        raw_floor = getattr(security, "floor_tools", None)
+        if raw_floor is None:
+            # 配置里没写这一项（老配置、或者测试用的假配置）→ 用内置默认
+            raw_floor = list(DEFAULT_FLOOR)
+            _state["floor_enabled"] = True
+        else:
+            names = {str(x).strip() for x in raw_floor if str(x).strip()}
+            _state["floor_enabled"] = bool(names) or bool(
+                getattr(security, "keep_floor_when_empty", False))
+            _state["floor"] = names
         wanted = str(getattr(security, "mode", "") or "").strip().lower()
         if wanted in MODES:
             _state["mode"] = wanted
@@ -268,7 +281,7 @@ def reset_limits() -> None:
         _same.clear()
 
 
-def note_prompt(tool_name: str = "") -> tuple[bool, str]:
+def note_prompt(tool_name: str = "", fingerprint: str = "") -> tuple[bool, str]:
     """记一次"要弹确认"。返回（是否允许继续问，说明）。
 
     两道限流，都是冲着"逼用户点确认点到麻木"去的：
@@ -289,15 +302,19 @@ def note_prompt(tool_name: str = "") -> tuple[bool, str]:
                    "count": len(_prompts)})
             return False, ("一分钟里已经问过 " + str(limit) + " 次确认了，先停一下。"
                            "如果是被反复要求做同一件危险操作，更要小心。")
-    if same_limit > 0 and tool_name:
-        same = sum(1 for name, _ts in _same if name == tool_name and now - _ts < 60.0)
+    # "同一个操作"按**指纹**算（工具+参数）：不同的命令不该互相顶掉，
+    # 而同一条命令被反复塞过来正是要拦的东西。
+    key = fingerprint or tool_name
+    if same_limit > 0 and key:
+        same = sum(1 for name, _ts in _same if name == key and now - _ts < 60.0)
         if same >= same_limit:
-            audit({"event": "repeat_blocked", "tool": tool_name, "count": same})
-            return False, ("同一个操作（" + tool_name + "）已经连着问了 " + str(same)
+            audit({"event": "repeat_blocked", "tool": tool_name, "count": same,
+                   "fingerprint": key[:80]})
+            return False, ("同一个操作已经连着问了 " + str(same)
                            + " 次，我先停下 —— 这可能是有人在反复诱导你同意。")
     _prompts.append(now)
-    if tool_name:
-        _same.append((tool_name, now))
+    if key:
+        _same.append((key, now))
     return True, ""
 
 
@@ -325,7 +342,10 @@ def check(tool: Any, args: Any = None) -> Decision:
             text=DELIMITER.format("只读模式下不能" + _verb(tier) + "，这条被拒绝了")
                  + " " + ESCALATION_HINT,
         )
-    force = name in ALWAYS_CONFIRM or extra_confirm
+    with _lock:
+        floor = ((set(_state["floor"]) | set(ALWAYS_CONFIRM))
+                 if _state["floor_enabled"] else set())
+    force = name in floor or extra_confirm
     if current == "danger-full-access" and not force:
         return Decision(tier=tier)
     if force or tier == "exec" or bool(getattr(tool, "confirm", False)):
@@ -396,6 +416,9 @@ def snapshot() -> dict:
             "transport_note": str(_state["transport_note"]),
             "allow_insecure": bool(_state["allow_insecure"]),
             "deny": sorted(_state["deny"]), "confirm": sorted(_state["confirm"]),
+            # 报**实际生效**的那份名单（配置 + 内置底线），别让界面显示了个空的
+            "floor": (sorted(set(_state["floor"]) | set(ALWAYS_CONFIRM))
+                      if _state["floor_enabled"] else []),
             "tainted": bool(_state["tainted"]),
             "prompts_last_minute": sum(1 for _ts in _prompts if time.monotonic() - _ts <= 60.0),
         }

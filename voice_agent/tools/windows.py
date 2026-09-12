@@ -26,6 +26,26 @@ __all__ = [
     "list_windows", "focus_window", "list_processes", "kill_process", "wait",
 ]
 
+def _decode(raw: bytes) -> str:
+    """把子进程的字节解成文字。
+
+    PowerShell 的 6 个流编码并不一致：我们设了 [Console]::OutputEncoding，
+    所以**正常输出**是 UTF-8，但**错误记录**（Copy-Item 找不到文件那种）
+    经常还是系统的 ANSI 代码页。一律按 UTF-8 解就会变成
+    "�Ҳ���·��" 这种乱码 —— 模型读不懂，只能瞎试。
+    这里先试 UTF-8，出现替换字符就改用 ANSI（mbcs）再解一次。
+    """
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    if "\ufffd" in text:
+        try:
+            return raw.decode("mbcs", errors="replace")
+        except (LookupError, ValueError):
+            return text
+    return text
+
+
 def _ps(script: str, timeout: float = 20.0, stdin_text: str | None = None) -> str:
     """跑一段 PowerShell，返回 stdout（失败返回空串）。"""
     try:
@@ -33,13 +53,10 @@ def _ps(script: str, timeout: float = 20.0, stdin_text: str | None = None) -> st
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_UTF8 + script],
             input=stdin_text,
             capture_output=True,
-            text=True,
             timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        return (proc.stdout or "").strip()
+        return _decode(proc.stdout or b"").strip()
     except Exception:
         return ""
 
@@ -204,8 +221,10 @@ def screenshot(monitor: int = 0, region: str = "", name: str = "") -> str:
         return "截屏存不下来：" + str(exc)[:80]
     where = ("范围 " + str(region)) if rect else (
         ("第 " + str(int(monitor)) + " 块屏幕") if int(monitor or 0) > 0 else "整个桌面")
+    # **必须给完整路径**：以前这里写死"存到图片文件夹里"，而数据目录已经改成
+    # 可配置的了 —— 模型照着"图片文件夹"去找，当然找不到，于是一路瞎试。
     return ("已经截屏（" + where + "，" + str(shot.shape[1]) + "×" + str(shot.shape[0])
-            + "），存到图片文件夹里的 " + path.name)
+            + "），存在：" + str(path))
 
 
 def open_folder(path: str = "", label: str = "") -> str:
@@ -443,17 +462,16 @@ def run_command(command: str = "", timeout: int = 30) -> str:
             line,
             shell=True,
             capture_output=True,
-            text=True,
             timeout=min(max(int(timeout), 3), 120),
-            encoding="utf-8",
-            errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
         return "命令执行超时了"
     except Exception as exc:
         return "命令执行失败：" + str(exc)[:80]
-    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    # 用同一个"先 UTF-8 再 ANSI"的解码：命令的错误输出经常是系统代码页，
+    # 一律按 UTF-8 解会变成乱码，模型看不懂就会开始瞎试别的办法。
+    output = (_decode(proc.stdout or b"") + " " + _decode(proc.stderr or b"")).strip()
     output = re.sub(r"\s+", " ", output)
     if not output:
         return "命令执行完了，没有输出，返回码 " + str(proc.returncode)

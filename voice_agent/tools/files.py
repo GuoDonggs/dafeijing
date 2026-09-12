@@ -267,6 +267,19 @@ def _resolve_path(raw: str) -> Path:
     drive = re.fullmatch(r"([A-Za-z])\s*(盘|:)?", value)
     if drive:
         return Path(drive.group(1).upper() + ":\\")
+    # 裸文件名：截图和参考图片都放在数据目录里，模型/用户只会说文件名
+    # （"screen-屏幕一截图-123416.png"、"下载按钮.png"），这里替它们补全路径。
+    if not re.search(r"[\\/]", value):
+        from ._shared import reference_dir, screenshot_dir  # noqa: PLC0415
+
+        for folder in (screenshot_dir(), reference_dir()):
+            try:
+                if folder.is_dir():
+                    for candidate in folder.rglob(value):
+                        if candidate.is_file() or candidate.is_dir():
+                            return candidate
+            except OSError:
+                continue
     # 最后查一次应用映射表：用户可以把目录映射成好记的名字
     # （「我的项目」→ D 盘的 code 目录），之后 list_files / read_file
     # 直接用那个名字就行 —— 这就是"映射目录"最实用的地方。

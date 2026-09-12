@@ -168,8 +168,13 @@ security:
   # 一律拒绝的工具（最高优先级，任何模式都不放行）：
   # 例：["run_command", "write_file"] —— 只想让它查、不想让它改。
   deny_tools: []
-  # 额外要求确认的工具（在"永远要确认"那份名单之外再加）
+  # 额外要求确认的工具（在下面的"底线名单"之外再加）
   always_confirm: []
+  # 「放开」模式下**仍然要确认**的底线名单。默认这五个是最危险的动作 ——
+  # 放开权限不该等于把底线交出去。
+  # 想真的完全不问：floor_tools: [] 并且 keep_floor_when_empty: false（不建议）。
+  floor_tools: [run_command, power, kill_process, restart_self, quit_self]
+  keep_floor_when_empty: true
   # 审计日志：build/audit.jsonl，记录每次敏感决定的工具、参数、批没批
   audit: true
 

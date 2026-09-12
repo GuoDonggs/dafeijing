@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -383,17 +384,52 @@ def _spoken_name(text: str) -> str:
     
     
 def _command_hint(command: str) -> str:
-    """一条命令大致在干什么；认不出来就返回空串（确认提示就只说"执行命令"）。"""
-    low = " " + str(command or "").lower() + " "
-    for keys, label in _COMMAND_HINTS:
+    """一条命令大致在干什么；认不出来就返回空串（确认提示就只说"执行命令"）。
+
+    多个动作都能对上时取**最危险**的那个（表是按危险程度排的），
+    并且在末尾标出"组合命令" —— 管道、分号、重定向意味着它不止干一件事。
+    """
+    raw = str(command or "")
+    low = " " + raw.lower() + " "
+    label = ""
+    for keys, name in _COMMAND_HINTS:
         if any(key in low for key in keys):
-            return label
-    return ""
+            label = name
+            break
+    if any(token in raw for token in ("|", ";", "&&", "> ", ">>")):
+        return (label + "等组合命令") if label else "一条组合命令"
+    return label
 
 
 #: 工具"缺参数"时的开场白。项目里的写法很统一（全是"没说…"），
 #: 于是这里能一眼认出来：接下去用户那句话就是来补参数的。
 _NEED_INPUT = re.compile(r"^(没说|没听清|没找到叫|看不懂这个|要同时给出)")
+
+
+def tool_fingerprint(name: str, args: Any) -> str:
+    """这次调用的**身份**：工具名 + 参数（按键排序）。
+
+    确认提示是给人听的，会被"说人话"处理（命令只说"列出文件"）；
+    但"哪个操作"必须按下层参数算 —— 否则两条不同的命令会共用一句提示，
+    上一句的同意就被当成这一句的同意（这是个真的安全漏洞）。
+    """
+    try:
+        payload = json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False,
+                             sort_keys=True)
+    except (TypeError, ValueError):
+        payload = str(args)
+    return name + "|" + payload[:400]
+
+
+def _ask_human(on_confirm: Callable, question: str, fingerprint: str) -> bool:
+    """问用户。确认通道愿意接收指纹就带上（引擎用它做"同一操作只问一次"）。"""
+    try:
+        parameters = inspect.signature(on_confirm).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if len(parameters) >= 2:
+        return bool(on_confirm(question, fingerprint))
+    return bool(on_confirm(question))
 
 
 def _needs_input(text: str) -> bool:
@@ -459,16 +495,20 @@ def call_result(name: str, arguments: Any = None,
             return ToolResult(CANCEL_REPLY, False, "denied")
         # 限流：一分钟最多问几次、同一个操作最多连着问几次。
         # 中转站最爱的就是"反复构造危险调用，把用户问到麻木"。
-        ok, why = security.note_prompt(tool.name)
+        # 计数按**指纹**（工具+参数），不是按工具名 —— 否则"列出文件"和
+        # "删掉文件"会被当成同一个操作。
+        fingerprint = tool_fingerprint(tool.name, args)
+        ok, why = security.note_prompt(tool.name, fingerprint)
         if not ok:
-            security.audit({"event": "rate_limited", "tool": tool.name})
+            security.audit({"event": "rate_limited", "tool": tool.name,
+                            "fingerprint": fingerprint[:80]})
             return ToolResult(security.DELIMITER.format(why) + " " + security.ESCALATION_HINT,
                               False, "denied")
         question = tool.confirm_question(args)
         if security.tainted():
             # 这一轮碰过网页/文件/屏幕——那些内容里可能藏着"去执行 xxx"的指令
             question = "注意，这是看过外部内容之后发起的操作。" + question
-        if not on_confirm(question):
+        if not _ask_human(on_confirm, question, fingerprint):
             security.audit({"event": "rejected", "tool": tool.name, "tier": decision.tier,
                             "mode": security.mode(), "tainted": security.tainted(),
                             "args": _audit_args(args)})
@@ -534,20 +574,24 @@ _ARG_LABELS = {
     "rounds": ("最多 ", " 轮"), "max": ("最多 ", " 个"),
 }
 #: 从命令里认出常见动作，好让确认提示说得出"要干什么"
+#: 顺序就是优先级：**危险的动作先说**。
+#: 一条命令里同时有 Get-ChildItem 和 Remove-Item 时，"列出文件"是误导 ——
+#: 说成"删除文件"用户才会认真看一眼。
 _COMMAND_HINTS = (
-    (("get-childitem", "dir ", " gci ", "ls "), "列出文件"),
-    (("start-process", "start ", "saps "), "打开程序"),
+    (("restart-computer",), "重启电脑"),
+    (("shutdown",), "关机"),
+    (("remove-item", " del ", "rm ", "erase ", "clear-content"), "删除文件"),
     (("stop-process", "taskkill", "kill "), "结束进程"),
-    (("remove-item", " del ", "rm ", "erase "), "删除文件"),
+    (("set-content", "out-file", "add-content", ">>", " > "), "写文件"),
     (("copy-item", "copy ", " cp ", "xcopy", "robocopy"), "复制文件"),
     (("move-item", "move ", " mv "), "移动文件"),
     (("new-item", "mkdir", " md "), "新建文件或目录"),
-    (("test-connection", "ping "), "测试网络"),
     (("invoke-webrequest", "invoke-restmethod", "curl", "wget"), "联网获取内容"),
-    (("shutdown",), "关机"),
-    (("restart-computer",), "重启电脑"),
+    (("start-process", "start ", "saps "), "打开程序"),
+    (("test-connection", "ping "), "测试网络"),
     (("get-process", "tasklist"), "查看进程"),
     (("get-service",), "查看服务"),
+    (("get-childitem", "dir ", " gci ", "ls "), "列出文件"),
 )
 _PS_UTF8 = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;"
 _ARG_WORDS = {

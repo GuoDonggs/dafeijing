@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import sys
 import tempfile
 import time
@@ -146,17 +147,25 @@ def live_tools() -> None:
 
     # 截屏
     text = str(tools.call("screenshot", {}))
-    # 工具只说文件名（"存到图片文件夹里的 xxx.png"），目录得自己补上
     from voice_agent.tools._shared import screenshot_dir
 
-    shot_path = None
-    for token in text.replace("：", " ").replace("，", " ").split():
-        if token.lower().endswith(".png"):
-            candidate = screenshot_dir() / token
-            if candidate.is_file():
-                shot_path = candidate
+    found = re.search(r"([A-Za-z]:\\[^\s，。]*?\.png)", text)
+    shot_path = Path(found.group(1)) if found and Path(found.group(1)).is_file() else None
     check("截图工具真的存下了文件", shot_path is not None,
           (str(shot_path) if shot_path else text[:60]))
+    # 提示里必须给**真实路径**：以前写死"图片文件夹"，数据目录改到别处之后
+    # 模型照着那句话去找，怎么也找不到（用户报的就是这个）
+    check("截图提示里给的是完整路径（以前写死「图片文件夹」，找不到）",
+          "存在：" in text and shot_path is not None,
+          text[:90])
+    check("那个路径确实在数据目录下",
+          shot_path is not None and str(shot_path).startswith(str(screenshot_dir())),
+          str(shot_path))
+    # 裸文件名要能解析：模型手上只有文件名，它不会知道数据目录在哪
+    if shot_path is not None:
+        check("裸文件名能解析到截图目录（读得到）",
+              "没找到" not in str(tools.call("read_file", {"path": shot_path.name})),
+              shot_path.name)
 
     import numpy as np
 

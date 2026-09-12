@@ -63,6 +63,11 @@ def permission_mode_tool(mode: str = "", reason: str = "") -> str:
     ok, message = security.set_mode(target, reason)
     if not ok:
         return message
+    if target == "danger-full-access" and security.snapshot().get("floor"):
+        # 说清楚"放开"到底放开了什么 —— 用户以为是"完全不问"，
+        # 结果执行命令还是问，就会觉得"设置没生效"
+        message += ("。注意：" + "、".join(security.snapshot()["floor"])
+                    + " 这几个仍然会问一次（可以在设置里把「放开模式下的底线」清空）")
     if was != security.mode() and str(reason or "").strip():
         return message + "（原因：" + str(reason)[:40] + "）"
     return message

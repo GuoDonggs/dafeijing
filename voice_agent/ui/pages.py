@@ -881,6 +881,11 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
          "text", None),
         ("security.always_confirm", "必须确认的工具",
          "在这些工具上额外要求确认（逗号隔开）。关机和执行命令本来就必须确认", "text", None),
+        ("security.floor_tools", "放开模式下的底线",
+         "「放开」模式下**仍然要确认**的工具。想真的完全不问，就把这里清空"
+         "并把下一项关掉 —— 不建议：执行命令等于把电脑交出去", "text", None),
+        ("security.keep_floor_when_empty", "清空底线时保留内置的四个",
+         "关掉之后，上面清空 = 连执行命令/关机都不再确认", "bool", None),
         ("security.allow_insecure", "允许明文 HTTP 模型地址",
          "关着时：非本机的 http 地址会自动降到只读（那种链路上任何人都能改写模型的回答）",
          "bool", None),

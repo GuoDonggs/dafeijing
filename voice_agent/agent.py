@@ -827,7 +827,7 @@ class VoiceAgent:
             return window, "（刚反问了用户一句）"
         return 0, ""
 
-    def _ask_confirm(self, question: str) -> bool:
+    def _ask_confirm(self, question: str, fingerprint: str = "") -> bool:
         """敏感操作前的语音确认：问一句，听一句，再判断同意与否。"""
         if not self.cfg.agent.confirm.enabled:
             return True
@@ -839,7 +839,10 @@ class VoiceAgent:
         if self._stale(epoch):
             return False
         prompt = question or self.cfg.agent.confirm.prompt
-        key = self._confirm_key(prompt)
+        # 身份用**指纹**（工具+参数），不是提示文本：命令的提示都被"说人话"成
+        # "列出文件"了，两条不同的命令会撞成同一个 key，上一句的同意就被
+        # 当成这一句的同意 —— 这是真会出事的。
+        key = fingerprint or self._confirm_key(prompt)
         remembered = self._confirm_memory.get(key)
         if remembered is not None:
             # 同一个操作这一轮已经问过：直接用上次的答案，别再问第二遍
