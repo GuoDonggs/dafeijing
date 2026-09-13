@@ -14,6 +14,8 @@ build/pyinstaller/
 # 打包前会把「放在 exe 旁边的用户数据」暂存到这里，打完再放回去。
 # config.yaml 就在其中（含 API Key），绝对不能入库。
 build/dist-user-data/
+# 安装包的工作目录：里面会有一份 4~5 GB 的 payload 副本，绝不能入库
+build/installer/
 
 # —— 运行期落盘的数据 ——
 build/memory.json

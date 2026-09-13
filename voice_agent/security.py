@@ -393,7 +393,11 @@ def check(tool: Any, args: Any = None) -> Decision:
         floor = ((set(_state["floor"]) | set(ALWAYS_CONFIRM))
                  if _state["floor_enabled"] else set())
     force = name in floor or extra_confirm
-    if current == "danger-full-access" and not force:
+    # confirm_if 是**按参数**判的（open_app 打开命令类映射、app_map 写表、
+    # window 空参数最小化全部……）。这类"这一次特别危险"的调用即使在放开模式下
+    # 也要问一句 —— 否则"写一条命令映射 + 打开它"就能把 run_command 的底线绕过去。
+    # 只声明了 confirm=True 的工具不受影响（放开模式下仍然不问，那是上一轮修好的）。
+    if current == "danger-full-access" and not force and not _confirm_if_only(tool, args):
         return Decision(tier=tier)
     if force or tier == "exec" or _wants_confirm(tool, args):
         # 注意：check() 本身**不**消耗限流额度 —— 要等到真的去问用户那一刻
@@ -424,6 +428,19 @@ def in_floor(name: str) -> bool:
         floor = ((set(_state["floor"]) | set(ALWAYS_CONFIRM))
                  if _state["floor_enabled"] else set())
     return str(name or "") in floor
+
+
+def _confirm_if_only(tool: Any, args: Any = None) -> bool:
+    """只看 confirm_if（按参数判的那个），不看 confirm=True。"""
+    if bool(getattr(tool, "confirm", False)):
+        return False
+    hook = getattr(tool, "confirm_if", None)
+    if hook is None:
+        return False
+    try:
+        return bool(hook(dict(args or {}))) if callable(hook) else False
+    except Exception:  # noqa: BLE001
+        return True   # 判不出来就当危险
 
 
 def _reads_only(tool: Any, args: Any = None) -> bool:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -377,11 +378,17 @@ class Voiceprint:
             return
         try:
             data = json.loads(self.profile_path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return
-        vectors = data.get("vectors") or {}
-        self._vectors = {str(k): [float(x) for x in v] for k, v in vectors.items() if v}
-        self._meta = {str(k): int(v) for k, v in (data.get("counts") or {}).items()}
+            vectors = data.get("vectors") or {}
+            # 解析也要在 try 里：字段类型不对（手改过、别的工具写过）以前会
+            # 直接把 ValueError 抛出构造函数 —— 引擎从此起不来，还不说该删哪个文件。
+            self._vectors = {str(k): [float(x) for x in v] for k, v in vectors.items() if v}
+            self._meta = {str(k): int(v) for k, v in (data.get("counts") or {}).items()}
+        except Exception as exc:  # noqa: BLE001
+            # 别静默：档案坏了 = "只认主人"这道门失效，必须留下痕迹
+            print("[speaker] 声纹档案读不出来（" + str(exc)[:80] + "）："
+                  + str(self.profile_path), file=sys.stderr, flush=True)
+            self._vectors = {}
+            self._meta = {}
 
     def save_profile(self) -> None:
         self.profile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,5 +400,8 @@ class Voiceprint:
             "vectors": self._vectors,
             "counts": getattr(self, "_meta", {}),
         }
-        self.profile_path.write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        # 原子替换：写一半被杀/断电时，旧档案还在（以前是截断再写，
+        # 半截 JSON 会让下次启动静默丢档，而且 check() 在"空档案"时一律放行）
+        temp = self.profile_path.with_suffix(self.profile_path.suffix + ".tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, self.profile_path)

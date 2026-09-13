@@ -242,8 +242,14 @@ def _make_handler(console: Console):
                     return self._json({"ok": True, "items": [s.as_dict() for s in console.skills]})
 
                 if path == "/api/skills/save":
+                    # **必须带 kind**：不带的话桌面版和网页版会各写各的目录 ——
+                    # 编辑 tools/ 里的自定义工具，结果写到 skills/ 去了（用户
+                    # "改了等于没改"，还多出一个重名工具）。前端从条目的 source
+                    # 里取不到目录时，用 kind 兜住。
                     return self._json(console.save_skill(
-                        str(payload.get("filename") or "my_skill.yaml"), str(payload.get("content") or "")
+                        str(payload.get("filename") or "my_skill.yaml"),
+                        str(payload.get("content") or ""),
+                        str(payload.get("kind") or "skill"),
                     ))
 
                 if path == "/api/skills/delete":
@@ -329,8 +335,12 @@ class _Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-#: 只认本机回环地址：这套控制台没有多用户概念，也不该被局域网访问
-_LOOPBACK = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+#: 只认**真正的**回环地址：这套控制台没有多用户概念，token 又是跟着首页下发的，
+#: 而 Host 校验只看请求头（客户端自己就能写成 127.0.0.1）—— 一旦绑到 0.0.0.0，
+#: 局域网里任何人都能：拿到首页里的 token → 读配置（含 llm.api_key）→ 改 base_url
+#: → 写一个带 shell 动作的技能。所以 0.0.0.0 **必须**在这里被拒（实测过：
+#: 伪造 Host 头的局域网客户端能拿到 200）。
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
 def serve(config_path: Path | None = None, host: str = "127.0.0.1", port: int = 8760,

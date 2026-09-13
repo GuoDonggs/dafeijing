@@ -213,6 +213,8 @@ class MainWindow(QWidget):
     self_control_requested = pyqtSignal(str)
     #: 工具要求"让用户在屏幕上框一下 / 点一下"（工作线程 → 界面线程）
     marks_select_requested = pyqtSignal(str)
+    #: 框选超时/作废：让界面线程把叠加层退出选择模式
+    marks_cancel_requested = pyqtSignal()
 
     def __init__(self, config_path: Path | None = None, autostart: bool = True) -> None:
         super().__init__()
@@ -243,6 +245,7 @@ class MainWindow(QWidget):
         self.console.app_hook = self.self_control_requested.emit
         # 标记层：助手说「框一下这块」时，由它出面让用户拖一个框出来
         self.marks_select_requested.connect(self._begin_selection)
+        self.marks_cancel_requested.connect(self._cancel_selection_mode)
         self._marks_overlay = None
         self._marks_wait: dict | None = None
         tools_marks.set_marks_handler(self.request_selection)
@@ -380,15 +383,21 @@ class MainWindow(QWidget):
         """
         import threading
 
-        self._marks_wait = {"done": threading.Event(), "result": None}
+        wait = {"done": threading.Event(), "result": None}
+        self._marks_wait = wait
         self.marks_select_requested.emit(kind)
-        wait = self._marks_wait
-        if wait is None or not wait["done"].wait(timeout):
+        if not wait["done"].wait(timeout):
             self.console.log("[ui] 框选超时了（没等到你在屏幕上选）")
-            self._marks_wait = None
+            # **界面也要跟着退出选择模式**：以前只把等待位清掉，overlay 还停在全屏
+            # 框选态（鼠标不穿透、键盘被抓着），用户之后随手一拖就被当成"界面框选"
+            # 存下来 —— 一个他完全不知道的幽灵标记，而且不按 Esc 出不去。
+            self.marks_cancel_requested.emit()
+            if self._marks_wait is wait:
+                self._marks_wait = None
             return None
         result = wait["result"]
-        self._marks_wait = None
+        if self._marks_wait is wait:
+            self._marks_wait = None
         return result
 
     def _begin_selection(self, kind: str) -> None:
@@ -412,6 +421,12 @@ class MainWindow(QWidget):
                          + "（按 Esc 取消）")
         if not overlay.start_selection(want):
             self.console.log("[ui] 框选没能打开，你再试一次")
+
+    def _cancel_selection_mode(self) -> None:
+        """把叠加层从选择模式里退出来（工具已经不等了，界面不能还停在那儿）。"""
+        overlay = self._marks_overlay
+        if overlay is not None and getattr(overlay, "_selecting", ""):
+            overlay.cancel_selection()
 
     def _on_selection_done(self, result) -> None:
         """用户选完了：要么交给等着的工具，要么直接存成标记（菜单进来的）。"""
@@ -669,14 +684,24 @@ class MainWindow(QWidget):
         self.latest = data
         state = self._state_of(data)
         self.current_state = state
-        self.home.on_tick(data, state)
-        self._refresh_notice(data)
+        # **每一处刷新都要自己兜住异常**：Qt 槽里逃出去的异常会走 PyQt 的 qFatal，
+        # 表现是"点一下程序就没了"（没有报错框、日志里也未必有）。以前只包住了
+        # snapshot() 那一句，页面里的一个意外键就能把整个进程带走。
+        self._safe_tick("主页", self.home.on_tick, data, state)
+        self._safe_tick("提示条", self._refresh_notice, data)
         if state != self._last_state:
             self._last_state = state
             self.setWindowIcon(app_icon(theme.STATE_COLORS.get(state, theme.BLUE)))
         for key, page in self.pages.items():
             if key != "home" and page.isVisible():
-                page.on_tick(data, state)
+                self._safe_tick(key, page.on_tick, data, state)
+
+    def _safe_tick(self, what: str, func, *args) -> None:  # noqa: ANN001
+        """跑一次界面刷新；出错就记日志，绝不让异常逃回 Qt 的事件循环。"""
+        try:
+            func(*args)
+        except Exception as exc:  # noqa: BLE001
+            self.console.log("[ui] " + str(what) + "刷新失败：" + str(exc)[:120])
 
     def _refresh_notice(self, data: dict) -> None:
         """该不该弹「要重启」：有几项设置改完没重启，而且引擎正在跑。"""

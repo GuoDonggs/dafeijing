@@ -308,6 +308,10 @@ class ChatPage(Page):
 
     #: 后台问完一句了（Qt 的东西只能在界面线程碰，所以用信号回来）
     asked = pyqtSignal()
+    #: 后台播报结束（回到界面线程收拾状态）
+    spoken = pyqtSignal()
+    #: 正在后台播报（避免连点两次叠着念）
+    _speaking = False
 
     def __init__(self, console: Console, parent: QWidget | None = None) -> None:
         super().__init__(console, parent)
@@ -367,7 +371,9 @@ class ChatPage(Page):
         bar.rangeChanged.connect(self._on_range_changed)
         bar.valueChanged.connect(self._on_scrolled)
         self._asking = False
+        self._speaking = False
         self.asked.connect(self._on_asked)
+        self.spoken.connect(self._on_spoken)
 
     # ── 发送 ──
     def send(self) -> None:
@@ -411,6 +417,10 @@ class ChatPage(Page):
 
         threading.Thread(target=work, name="ui-ask", daemon=True).start()
 
+    def _on_spoken(self) -> None:
+        """后台那句念完了（或失败了）：把状态收回来。"""
+        self._speaking = False
+
     def _on_asked(self) -> None:
         self._asking = False
         self._sync()
@@ -436,7 +446,32 @@ class ChatPage(Page):
         # 合成引擎会在需要时按需建起来（Agent._ensure_tts），这里不再裸调
         # agent.load()：模型不齐时它会抛 ConfigError，而 Qt 槽里的未捕获异常
         # 会让整个进程直接 abort（连日志都没有，用户看到的是"点一下程序就没了"）。
-        agent.speak(text)
+        #
+        # **必须丢到后台线程**：Tts.speak 是"合成 + 阻塞播放"，一句话要占住
+        # 好几秒；放在槽里同步跑，窗口整段话都不重绘（Windows 会标"无响应"，
+        # 「打断」按钮也点不动）—— 和上面 send() 里那条规矩一样。
+        if self._speaking:
+            self.console.log("[ui] 上一句还在播，等它念完")
+            return
+        self._speaking = True
+        if agent.tts is None:
+            # 先探一下引擎能不能建起来：这样"没有播报"的提示还留在主线程里弹
+            try:
+                agent._ensure_tts()  # noqa: SLF001 - 界面这边就用它按需建
+            except Exception as exc:  # noqa: BLE001
+                self.console.log("[ui] 语音合成没起来：" + str(exc)[:100])
+        if agent.tts is None:
+            self._speaking = False
+        else:
+            def speak_later() -> None:
+                try:
+                    agent.speak(text)
+                except Exception as exc:  # noqa: BLE001 - 后台线程不能把异常吞了
+                    self.console.log("[ui] 播报失败：" + str(exc)[:100])
+                self.spoken.emit()
+
+            threading.Thread(target=speak_later, name="ui-say", daemon=True).start()
+            return
         if agent.tts is None:
             hint = ("语音播报被关掉了（设置 → 语音与算力 → 语音播报）"
                     if not self.console.cfg.tts.enabled else
@@ -1697,10 +1732,19 @@ class SettingsPage(Page):
 class DevicesPage(Page):
     """麦克风与扬声器。"""
 
+    #: 后台录音结束（结果回界面线程）
+    recorded = pyqtSignal(dict)
+
     def __init__(self, console: Console, parent: QWidget | None = None) -> None:
         super().__init__(console, parent)
         self.inputs: list[dict] = []
         self.outputs: list[dict] = []
+        self._recording = False
+        self._record_left = 0
+        self._record_timer = QTimer(self)
+        self._record_timer.setInterval(1000)
+        self._record_timer.timeout.connect(self._on_record_tick)
+        self.recorded.connect(self._on_recorded)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 16, 24, 20)
         layout.setSpacing(12)
@@ -1799,8 +1843,33 @@ class DevicesPage(Page):
         if self.console.agent is not None and self.console.agent.running:
             self.hint.setText("正在监听中，请先停止引擎。")
             return
+        if self._recording:
+            self.hint.setText("正在录音，等这一遍说完。")
+            return
+        # **录音要占住最长 12 秒**（外加可能几秒的模型加载）：同步跑的话事件
+        # 循环被占死，连"请说话"这句提示都画不出来，用户对着一个卡住的窗口说话。
+        # 丢到后台线程，期间用定时器把提示语往前推。
+        self._recording = True
+        self._record_left = 12
         self.hint.setText("请说话，最长 12 秒…")
-        result = self.console.record_once(12.0)
+        self._record_timer.start(1000)
+
+        def work() -> None:
+            result = self.console.record_once(12.0)
+            self.recorded.emit(result)
+
+        threading.Thread(target=work, name="ui-record", daemon=True).start()
+
+    def _on_record_tick(self) -> None:
+        if self._record_left <= 0:
+            return
+        self._record_left -= 1
+        if self._recording:
+            self.hint.setText("正在录音…还剩 " + str(self._record_left) + " 秒")
+
+    def _on_recorded(self, result: dict) -> None:
+        self._recording = False
+        self._record_timer.stop()
         self.hint.setText("识别到：" + str(result.get("text")) if result.get("ok")
                           else str(result.get("error")))
 

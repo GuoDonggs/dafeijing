@@ -58,6 +58,15 @@ def app_version() -> str | None:
     return match.group(1) if match else None
 
 
+def _version_parts(text: str) -> tuple[int, int, int, int]:
+    """把 "1.2.0.0" 解析成四段整数（按段比，别用字符串 rstrip —— 那会把
+    1.20.0.0 和 1.2.0.0 判成一样、10.0.0.0 和 1.0.0.0 判成一样）。"""
+    parts = [int(p) for p in re.findall(r"\d+", str(text))][:4]
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts)  # type: ignore[return-value]
+
+
 def exe_version(exe: Path) -> str | None:
     """回读 exe 里的版本资源（"1.2.0.0"）；读不到返回 None。
 
@@ -78,9 +87,15 @@ def exe_version(exe: Path) -> str | None:
         return None
 
 
-def version_tuple(value: str) -> tuple[int, int, int, int]:
-    """把 1.1 这类写法补成 Windows 版本资源要的四段数字。"""
+def version_tuple(value: str) -> tuple[int, int, int, int] | None:
+    """把 1.1 这类写法补成 Windows 版本资源要的四段数字。
+
+    一个数字都没有（"beta"）时返回 None —— 否则会写出 0.0.0.0 的 exe，
+    而"回读比对"用的也是这个函数，两边一起变成 0 就"校验通过"了。
+    """
     parts = [int(p) for p in re.findall(r"\d+", str(value))][:4]
+    if not parts:
+        return None
     while len(parts) < 4:
         parts.append(0)
     return tuple(parts)  # type: ignore[return-value]
@@ -89,6 +104,8 @@ def version_tuple(value: str) -> tuple[int, int, int, int]:
 def write_version_info(version: str) -> Path:
     """生成 PyInstaller 的版本资源文件（exe 属性里看到的那份）。"""
     nums = version_tuple(version)
+    if nums is None:
+        raise ValueError("版本号里连一个数字都没有：" + repr(version))
     dotted = ".".join(str(n) for n in nums)
     # 只能有"一行注释 + 一个表达式"：PyInstaller 是拿 eval() 读这个文件的，
     # 中间夹一句 docstring 会被当成语句 → SyntaxError: invalid syntax。
@@ -251,7 +268,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # 以及用户自己往 skills/ 里加的技能。models 通常是目录联接（几百 MB），
 # 拷不动，只记下指向、打完重建。
 KEEP_FILES = ("config.yaml", "config.yaml.bak", "apps.yaml", ".env")
-KEEP_DIRS = ("build",)
+#: build/ 是运行期数据；**models 也要在里面** —— README 教的正是"把 models 整个
+#: 拷到 exe 旁边"，而它在白名单外时会被 remove_path(out_dir) 连模型一起删掉
+#: （实测：追不回来，程序随后"缺模型"起不来）。联接由 plan["models"] 单独处理，
+#: 这里只收真实目录。
+KEEP_DIRS = ("build", "models")
 
 
 def _same_file(left: Path, right: Path) -> bool:
@@ -276,7 +297,7 @@ def _stash_user_data(out_dir: Path, stash: Path) -> dict:
     plan: dict = {"files": [], "dirs": [], "skills": [], "models": ""}
     if not out_dir.is_dir():
         return plan
-    plan["models"] = _link_target(out_dir / "models")
+    plan["models"] = _link_target(out_dir / "models")   # 联接：只记指向，重建
     stash.mkdir(parents=True, exist_ok=True)
     for name in KEEP_FILES:
         source = out_dir / name
@@ -430,7 +451,10 @@ def main(argv: list[str] | None = None) -> int:
     # 上一次构建要是被 Ctrl+C / 杀死在半路（那时候还没修 finally），用户数据会
     # 只剩暂存区这一份 —— 而下面一句就是把它删掉。所以先判断"暂存区里有配置、
     # 产物目录里却没有"，是就先放回去再继续，别把唯一一份删了。
-    if (stash / "config.yaml").is_file() and not (out_dir / "config.yaml").is_file():
+    stash_has_data = (any((stash / name).is_file() for name in KEEP_FILES)
+                      or any((stash / name).is_dir() for name in KEEP_DIRS)
+                      or (stash / "skills").is_dir())
+    if stash_has_data and not (out_dir / "config.yaml").is_file():
         print("\n[0/4] 发现上一次构建留下的暂存数据，先放回产物目录")
         # 注意源路径就是 stash 本身（第一次写这段时手滑写成 stash+"-recover"，
         # 结果什么都没搬回来，紧接着 remove_path(stash) 把唯一一份删了 ——
@@ -533,13 +557,17 @@ def main(argv: list[str] | None = None) -> int:
         print("  " + name.ljust(18) + human_size(exe.stat().st_size).rjust(9))
     # 回读 exe 里的版本资源：**构建成功不等于版本写对了**（以前版本号取不到
     # 会静默变 0.0，构建照样返回 0）。这里当场核对，错了就明说。
-    want = version_tuple(version)
+    want = version_tuple(version) or (0, 0, 0, 0)
     got = exe_version(out_dir / expected[-1])
     want_text = ".".join(str(part) for part in want)
     if got is None:
         print("  ！exe 里没读到版本资源（属性 → 详细信息 会是空的）")
-    elif got.rstrip(".0") != want_text.rstrip(".0") and got != want_text:
-        print("  ！exe 里的版本是 " + got + "，和 __version__（" + want_text + "）不一致")
+    elif _version_parts(got) != want:
+        # **不一致就失败**：以前只多打一行"！"，脚本照样返回 0，
+        # 于是"版本号写错了"这件事根本拦不住。
+        print("  [异常] exe 里的版本是 " + got + "，和 __version__（" + want_text + "）不一致")
+        _restore_user_data(out_dir, stash, plan)
+        return 1
     else:
         print("  版本资源     " + got)
     files, total = dir_stats(out_dir)

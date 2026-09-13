@@ -32,6 +32,10 @@ SUITES: list[tuple[str, str]] = [
     ("test_marks", "屏幕标记：框选范围、标记点、解析成截图/看图用的矩形"),
     ("test_translit", "英文音译：内置表、学习缓存、问模型、失败兜底"),
     ("test_paths", "数据目录：运行时文件集中在一处、可切换、老文件自动迁移"),
+    # ⚠ test_input 会**真的移动鼠标、抢前台焦点、往窗口里打字** ——
+    # 电脑正在被人用时那是很讨厌的，所以默认不跑，要跑就显式点名：
+    #     python scripts/run_tests.py input
+    # （它自己也只在"鼠标安静"时才断言落点，但抢焦点这件事没法避免）
     ("test_input", "鼠标键盘：结构体大小、绝对坐标、真窗口打字点击"),
     ("test_webui", "网页版接口、鉴权、路径穿越、前后端一致性"),
     ("test_gui", "桌面界面：页面、导航、状态刷新、SVG 图标"),
@@ -70,6 +74,10 @@ def run_one(name: str, desc: str) -> tuple[bool, int, list[str]]:
     out = (proc.stdout or "") + (proc.stderr or "")
     count = len(PASSED.findall(out))
     if proc.returncode == 0:
+        if count == 0:
+            # **整套跳过 ≠ 通过**：没装 PyQt6 时 test_gui 会打印"[跳过]"然后
+            # return 0，于是"打包前跑一遍测试"这道闸门是空的（实测过）。
+            return False, 0, ["这个套件一项都没跑（可能缺依赖被整块跳过）"]
         return True, count, []
 
     # 崩溃时最后一行往往只是被打断的日志，多留几行才看得出真正的原因
@@ -82,6 +90,9 @@ def run_one(name: str, desc: str) -> tuple[bool, int, list[str]]:
 def main(argv: list[str]) -> int:
     picks = [a.lower() for a in argv[1:] if not a.startswith("-")]
     chosen = [s for s in SUITES if not picks or any(p in s[0].lower() for p in picks)]
+    if not picks:
+        # 默认不跑会动鼠标键盘的那个（电脑可能正被人用着）；要跑就点名 input
+        chosen = [s for s in chosen if s[0] != "test_input"]
     if not chosen:
         print("没有匹配的测试：" + ", ".join(picks))
         return 2

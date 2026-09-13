@@ -691,8 +691,13 @@ def resize_image(image: str | Path, width: int = 0, height: int = 0,
             target_h = max(1, round(original[1] * ratio))
         resized = img.resize((target_w, target_h), Image.LANCZOS)
 
-    destination = Path(out) if out else source.with_name(
-        source.stem + "_" + str(target_w) + "x" + str(target_h) + ".jpg")
+    # 不给 out 就落到**数据目录**（以前写在源图旁边 —— 于是"只读"的缩图会往
+    # 任意目录里丢文件，而权限层按"没给 out 就是只读"放行）。
+    from . import paths as _paths  # noqa: PLC0415
+
+    destination = (Path(out) if str(out or "").strip() else
+                   _paths.sub("screenshots", create=True)
+                   / (source.stem + "_" + str(target_w) + "x" + str(target_h) + ".jpg"))
     destination.parent.mkdir(parents=True, exist_ok=True)
     suffix = destination.suffix.lower()
     if suffix in (".jpg", ".jpeg"):

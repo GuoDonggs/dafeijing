@@ -316,7 +316,13 @@ def type_text(text: str = "") -> str:
     limit = 2000
     if len(value) > limit:
         value = value[:limit]
-    for char in value:
+    from . import cancelled as _cancelled  # noqa: PLC0415 - 顶层导入会成环
+
+    for index, char in enumerate(value):
+        if _cancelled():
+            # 打断之后还在往**当前焦点窗口**打字是最糟的：用户很可能已经切到
+            # 别的窗口了，字就打进那里去。每 5ms 查一次，几乎立刻收手。
+            return "打字被打断了（已经停下了，输入了 " + str(index) + " 个字）"
         # emoji 这类超出 BMP 的字符会展开成两三个事件（代理对），一起送
         _send_input(*_unicode_inputs(char))
         time.sleep(0.005)
@@ -520,6 +526,13 @@ def power(action: str = "", delay: int = 0) -> str:
     except (TypeError, ValueError):
         wait = 0
     after = ("，" + str(wait) + " 秒后执行") if wait else ""
+    # **否定说法先判**：以前 cancel 分支排在关机后面，而它用的是子串匹配 ——
+    # 说「取消关机」「别关机」「不关机」「取消重启」全都会走到 shutdown /s|/r，
+    # 工具自己那句"想取消就说「取消关机」"是空头支票（离线规则模式同样中招）。
+    if any(key in what for key in ("cancel", "取消", "别", "不要", "不用", "停止")
+           and ("关" in what or "重" in what or "sleep" in what or "睡眠" in what)) \
+            or what in ("cancel", "取消"):
+        return _cancel_power()
     if any(key in what for key in ("shutdown", "关机")):
         subprocess.Popen(["shutdown", "/s", "/t", str(wait), "/f"],
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -529,14 +542,7 @@ def power(action: str = "", delay: int = 0) -> str:
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return "好，正在重启" + after if wait else "正在重启"
     if any(key in what for key in ("cancel", "取消", "别关", "不关")):
-        try:
-            proc = subprocess.run(["shutdown", "/a"], capture_output=True, timeout=10,
-                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            if proc.returncode == 0:
-                return "已经取消了计划中的关机"
-        except Exception:  # noqa: BLE001
-            pass
-        return "没有可取消的关机计划（或者已经来不及了）"
+        return _cancel_power()
     if any(key in what for key in ("sleep", "睡眠", "休眠")):
         if wait:
             # 睡眠/注销的接口没有延迟参数，只能自己等
@@ -574,6 +580,18 @@ def _kill_tree(proc) -> None:  # noqa: ANN001
         proc.communicate(timeout=3)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _cancel_power() -> str:
+    """撤销计划中的关机（shutdown /a）。"""
+    try:
+        proc = subprocess.run(["shutdown", "/a"], capture_output=True, timeout=10,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if proc.returncode == 0:
+            return "已经取消了计划中的关机"
+    except Exception:  # noqa: BLE001
+        pass
+    return "没有可取消的关机计划（或者已经来不及了）"
 
 
 def run_command(command: str = "", timeout: int = 30) -> str:

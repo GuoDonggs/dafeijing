@@ -244,8 +244,10 @@ def resize_image_tool(image: str = "", width: int = 0, height: int = 0,
     if not str(image).strip():
         return "没说要缩放哪张图片"
     try:
+        # out 归一：空白串 = 没写（权限层也是这么判的，两边口径必须一致）
         result = _screen().resize_image(image, width=int(width or 0), height=int(height or 0),
-                                        out=out or None, quality=int(quality or 80))
+                                        out=str(out or "").strip() or None,
+                                        quality=int(quality or 80))
     except Exception as exc:  # noqa: BLE001
         return "缩放失败：" + str(exc)[:80]
     saved = round(result["bytes"] / 1024, 1)

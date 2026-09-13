@@ -688,6 +688,11 @@ def call_result(name: str, arguments: Any = None,
                         "args": _audit_args(args)})
 
     # 让工具在自己的长循环里能问"这一轮还算不算数"（打断/新指令 → 立刻收手）
+    # 进入这一层之前的状态要留着：组合技能会在工具里**再调工具**，
+    # 内层结束时如果把通道清成 None，第 2 个敏感步骤就再也拿不到确认通道了
+    # （实测：没执行、却回"用户取消了这次操作"，外层还报成功）。
+    prev_cancel = getattr(_cancel_ctx, "check", None)
+    prev_confirm = getattr(_confirm_ctx, "channel", None)
     set_cancel_check(cancel_check)
     # 组合技能的内层调用要用**真的**确认通道（以前那里塞的是 lambda: True，
     # 等于给 run_command/power 开了后门）。放在线程局部里：工具都跑在自己的线程上。
@@ -703,8 +708,8 @@ def call_result(name: str, arguments: Any = None,
         except Exception as exc:  # noqa: BLE001 - 工具层永不抛出，交给模型兜底
             outcome = ToolResult(ERROR_PREFIX + str(exc)[:100], False, "error")
     finally:
-        set_cancel_check(None)
-        set_confirm_channel(None)
+        set_cancel_check(prev_cancel)
+        set_confirm_channel(prev_confirm)
 
     # 连续对话：这三类结果之后用户通常还要接一句，先把窗口留着 ——
     # 否则他得再喊一次唤醒词才能说"点它"，那就不像人说话了。

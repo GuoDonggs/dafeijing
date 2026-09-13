@@ -242,6 +242,16 @@ class Console:
             agent = self.agent
             self.agent = None
         if agent is not None:
+            # 先把还在盯的事情停掉：它们绑的是**旧 agent** 的回调，重启之后
+            # 命中只会进旧队列（没人播），而且新会话既看不到也停不掉它们。
+            try:
+                watcher = getattr(getattr(agent, "brain", None), "watcher", None)
+                if watcher is not None:
+                    stopped = watcher.stop_all()
+                    if stopped:
+                        self.log("[ui] 重启前停掉了 " + str(stopped) + " 个还在盯的事情")
+            except Exception as exc:  # noqa: BLE001 - 停不掉也要继续重启
+                self.log("[ui] 停盯梢时出错：" + str(exc)[:80])
             agent.stop()
             deadline = time.monotonic() + 12.0
             while getattr(agent, "running", False) and time.monotonic() < deadline:
@@ -798,6 +808,11 @@ class Console:
         只是界面上归类成「自定义工具」，和内置工具并排站。
         """
         name = Path(str(filename or "")).name
+        if name.endswith(".py"):
+            # 以前会悄悄写出 network_info.py.yaml（原 .py 一个字没改），
+            # 用户以为改了、加载器还多出一个重名工具。Python 技能请直接改源文件。
+            return {"ok": False,
+                    "error": "Python 技能（.py）不能用这个方式保存，请直接编辑那个文件"}
         if not name.endswith((".yaml", ".yml")):
             name += ".yaml"
         target = (self.tool_dir if str(kind).lower() == "tool" else self.skill_dir) / name

@@ -87,11 +87,26 @@ def mapped_command(name: str) -> str:
         if not found.get("hit"):
             return ""
         entry = found.get("entry") or {}
-        if str(entry.get("type") or "") != "command":
-            return ""
-        return str(entry.get("target") or found.get("target") or "")
+        target = str(entry.get("target") or found.get("target") or "")
+        kind = str(entry.get("type") or "")
+        # type=command 一定走 shell；type 没写/是别的、而目标又不是 http(s) 网址的，
+        # 也会被 _launch 当成**本机文件或程序**启动（实测 file:///…/evil.bat 真跑了）。
+        if kind == "command" or not is_web_url(target):
+            return target
+        return ""
     except Exception:  # noqa: BLE001 - 表坏了就当不是命令（open_app 里还会再兜一层）
         return ""
+
+
+#: 只许这几种协议：file:// 交给系统默认程序 = **零确认执行本机文件**
+#: （实测 file:///C:/…/evil.bat 在默认模式下不问一句就把 bat 跑了），
+#: 而 run_command 是任何模式都要确认的底线工具 —— 不能让 open_url 变成旁路。
+_WEB_SCHEMES = ("http://", "https://", "mailto:")
+
+
+def is_web_url(value: str) -> bool:
+    """这个字符串是不是"真的网址"（给权限层判要不要确认用）。"""
+    return str(value or "").strip().lower().startswith(_WEB_SCHEMES)
 
 
 def open_url(url: str = "") -> str:
@@ -99,8 +114,11 @@ def open_url(url: str = "") -> str:
     value = (url or "").strip()
     if not value:
         return "没说要打开哪个网址"
-    if "://" not in value:
+    if "://" not in value and not value.lower().startswith("mailto:"):
         value = "https://" + value
+    if not is_web_url(value):
+        return ("这不是网址（" + value[:40] + "）。要打开本机的文件或程序，"
+                "用 open_path；要执行命令，用 run_command。")
     return "已经打开网页" if _launch(value) else "打不开这个网页"
 
 

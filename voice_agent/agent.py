@@ -878,7 +878,11 @@ class VoiceAgent:
         self.last_heard = text
         self._note("user", text)
         if rules.is_exit(text, self.cfg.agent.exit_words):
+            # 说「退下 / 关闭语音」= 用户要它停下来。以前只念一句告别就回待命，
+            # 引擎照旧在听（用户以为关掉了），而且这条分支短路了 LLM，
+            # 连"让模型调 quit_self"的机会都没有。现在真的停。
             self._spawn(self._say_notice, "好，我先退下了。")
+            self._stopping.set()
             return
         self._spawn(self._handle_command, text)
 

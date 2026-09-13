@@ -214,13 +214,33 @@ def _deps_from_source(path: Path) -> list[str]:
     return []
 
 
+#: 合法的包名（pip 的参数不能被技能文件里写的字符串带进去）
+_PKG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+
+def _safe_packages(names: list[str]) -> tuple[list[str], list[str]]:
+    """挑出合法包名，返回（可用, 被拒绝的）。"""
+    ok, bad = [], []
+    for raw in names:
+        name = str(raw or "").strip()
+        if name and _PKG_RE.match(name):
+            ok.append(name)
+        elif name:
+            bad.append(name)
+    return ok, bad
+
+
 def install_deps(packages: list[str], timeout: float = 600.0) -> dict:
     """用 pip 装依赖，返回 {ok, output/error}。
 
     打包版里 sys.executable 是 exe 自己，拿它跑 pip 是错的 ——
     那种情况去找机器上的 python，找不到就老实让用户自己装。
     """
-    names = [str(p).strip() for p in packages if str(p).strip()]
+    names, rejected = _safe_packages([str(p).strip() for p in packages if str(p).strip()])
+    if rejected:
+        # 技能文件里写的东西会原样进 pip 的命令行（实测能塞进 --index-url=…）
+        return {"ok": False,
+                "error": "这些名字不像包名，装不了：" + "、".join(rejected[:3])}
     if not names:
         return {"ok": False, "error": "没有要装的包"}
 
@@ -237,7 +257,7 @@ def install_deps(packages: list[str], timeout: float = 600.0) -> dict:
 
     try:
         proc = subprocess.run(
-            [python, "-m", "pip", "install", "--disable-pip-version-check", *names],
+            [python, "-m", "pip", "install", "--disable-pip-version-check", "--", *names],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -373,6 +393,7 @@ def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tupl
             if problem:
                 return problem
             command = _render(template, kwargs)
+            # 打断要能收手（run_shell 自己查 cancelled()，这里不用重复）
             # 复用内置 run_command 的实现：编码（先 UTF-8 再 ANSI）、返回码、
             # 打断、进程树回收都只有一份。以前这里自己写了一套 subprocess.run：
             # 中文输出按 UTF-8 硬解成乱码、返回码 7 也回"执行完了"（失败说成成功）、
@@ -417,9 +438,14 @@ def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tupl
             # 不知道内层要执行什么（实测：confirm: false 的组合技能把 run_command
             # 直接跑掉了）。
             base_confirm = tools_mod.current_confirm()
-            results.append(tools_mod.call(
-                tool_name, args,
-                on_confirm=_step_confirm(tool_name, base_confirm)))
+            outcome = tools_mod.call_result(
+                tool_name, args, on_confirm=_step_confirm(tool_name, base_confirm))
+            # **失败要透传**：以前只取 text 拼成字符串，于是"这一步没成"被外层
+            # 报成 ok=True，大脑那句"刚才有一步没成功"永远不出现。
+            if not outcome.ok:
+                results.append(outcome.text)
+                return tools_mod.ToolResult("；".join(results), False, outcome.code)
+            results.append(outcome.text)
         return "；".join(part for part in results if part) or "执行完了"
 
     # 组合技能里只要有一环是敏感工具（关机、执行命令……），整个技能就先问一句，
@@ -693,6 +719,12 @@ class SkillLoader:
 
                     if isinstance(tool, Tool) and tool.source == "builtin":
                         tool = _replace(tool, source=str(path))
+                    if _name_taken_by_builtin(getattr(tool, "name", "")):
+                        # 权限档位是按名字查表的：顶替 list_files 这种内置名
+                        # 等于换个身份过闸（实名探针：只读档放行且直接执行代码）
+                        raise ValueError(
+                            "「" + str(getattr(tool, "name", "")) + "」是内置工具的名字，"
+                            "自定义工具不能顶替它（换个名字）")
                     register(tool, replace=replace)
 
                 before = set(_registry_names())
