@@ -29,10 +29,19 @@
 | python scripts/build_exe.py --slim | 去掉 onnxruntime 的 CUDA / TensorRT provider DLL，产物小约 170 MB |
 | python scripts/build_exe.py --clean | 连 PyInstaller 缓存一起清掉（改了 spec 却像没生效时用） |
 | python scripts/build_exe.py --with-config | 把项目里的 config.yaml 也复制进产物（**里面有 API Key**） |
-| python scripts/build_exe.py --dry-run | 只打印要执行的命令 |
+| python scripts/build_exe.py --dry-run | 只打印要执行的命令（**什么都不动**：不删产物、不暂存数据、不写版本资源） |
 
 也可以直接 pyinstaller packaging/voice-agent.spec，但那样要自己维护
 --distpath/--workpath 和两个环境变量，不如走脚本。
+
+**版本号只有一个真源**：voice_agent/__init__.py 里的 __version__。脚本从它生成
+packaging/version_info.txt，构建完还会回读 exe 里的版本资源对一遍；读不到版本号
+直接中止（宁可不打，也不打一个属性里写着 0.0.0.0 的包）。
+
+**中途 Ctrl+C 不会丢数据**：构建前会把 exe 旁边的 config.yaml（含 API Key）、
+apps.yaml、运行期 build/ 暂存到 build/dist-user-data，任何退出路径（中断、异常、
+构建失败、正常结束）都会放回去。万一真在半路被强杀，下一次构建开头也会先把
+暂存区里的东西放回产物目录再继续。
 
 脚本默认把中间产物放在 build/pyinstaller/，**不会动 build/ 里程序运行期的数据**
 （memory.json、keywords.generated.txt、截图）。

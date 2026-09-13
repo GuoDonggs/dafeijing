@@ -59,24 +59,21 @@ def app_version() -> str | None:
 
 
 def exe_version(exe: Path) -> str | None:
-    """回读 exe 里的版本资源（四段数字拼成 x.y.z.w）；读不到返回 None。"""
-    try:
-        from PyInstaller.utils.win32.versioninfo import (  # noqa: PLC0415
-            LoadStringTable, load_version_info_from_text_file)
+    """回读 exe 里的版本资源（"1.2.0.0"）；读不到返回 None。
 
-        info = load_version_info_from_text_file(str(exe))  # type: ignore[arg-type]
-        if info is None:
-            return None
-        table = LoadStringTable(info) if hasattr(info, "kids") else None
-        if table:
-            for key, value in table.items():
-                if str(key).lower() == "fileversion":
-                    return str(value)
-        ffi = info.ffi
-        return ".".join(str(part) for part in (ffi.fileVersionMS >> 16,
-                                               ffi.fileVersionMS & 0xFFFF,
-                                               ffi.fileVersionLS >> 16,
-                                               ffi.fileVersionLS & 0xFFFF))
+    用 PowerShell 的 VersionInfo：PyInstaller 自带的 versioninfo 模块是**生成**用的，
+    拿它读一个二进制 exe 读不出来（第一版就踩了这个坑，白报了一次"没读到"）。
+    """
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "(Get-Item -LiteralPath '" + str(exe).replace("'", "''")
+             + "').VersionInfo.FileVersion"],
+            capture_output=True, text=True, timeout=90,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        text = (completed.stdout or "").strip()
+        return text or None
     except Exception:  # noqa: BLE001 - 读不到就当没带版本资源
         return None
 
@@ -435,12 +432,19 @@ def main(argv: list[str] | None = None) -> int:
     # 产物目录里却没有"，是就先放回去再继续，别把唯一一份删了。
     if (stash / "config.yaml").is_file() and not (out_dir / "config.yaml").is_file():
         print("\n[0/4] 发现上一次构建留下的暂存数据，先放回产物目录")
-        _restore_user_data(out_dir, Path(str(stash) + "-recover"),
+        # 注意源路径就是 stash 本身（第一次写这段时手滑写成 stash+"-recover"，
+        # 结果什么都没搬回来，紧接着 remove_path(stash) 把唯一一份删了 ——
+        # 打包脚本自己把用户数据弄丢过一次，这里必须是真的 stash）
+        skills_from_stash = [str(item.relative_to(stash / "skills"))
+                             for item in (stash / "skills").rglob("*")
+                             if item.is_file()] if (stash / "skills").is_dir() else []
+        _restore_user_data(out_dir, stash,
                            {"files": [name for name in KEEP_FILES
                                       if (stash / name).is_file()],
                             "dirs": [name for name in KEEP_DIRS
                                      if (stash / name).is_dir()],
-                            "skills": [], "models": ""})
+                            "skills": skills_from_stash, "models": ""})
+        print("  已放回：" + str(out_dir))
     remove_path(stash)
     plan = _stash_user_data(out_dir, stash)
     kept = len(plan["files"]) + len(plan["dirs"]) + len(plan["skills"])
