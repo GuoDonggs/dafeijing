@@ -534,10 +534,6 @@ class MainWindow(QWidget):
     def show_chat(self) -> None:
         self._page_for("chat", pages_mod.ChatPage, "对话与指令", 660, 640).show()
 
-    def show_command(self) -> None:
-        """兼容旧调用（Ctrl+R 等）：打开的就是对话页。"""
-        self.show_chat()
-
     def show_marks(self) -> None:
         """打开「屏幕标记」页：看列表、改名字坐标、删、再框一个。"""
         from .marks_page import MarksPage

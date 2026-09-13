@@ -92,6 +92,9 @@ def reference_dir_tool() -> str:
     folder = _screen().reference_dir()
     try:
         folder.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        # 建不出来就别说"放在这里" —— 用户去资源管理器里会发现根本没有这个目录，
+        # 而工具刚才还一本正经地报了路径。
+        return ("参考图片目录建不出来（" + str(exc)[:60] + "）：" + str(folder)
+                + "。手动建一个，或者到设置里换数据目录。")
     return "参考图片放在这里：" + str(folder)

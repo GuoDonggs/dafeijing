@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
+import os
 import queue
 import re
 import secrets
@@ -54,6 +56,9 @@ class Console:
     """把一个 VoiceAgent 包成可以远程操控的服务端对象。"""
 
     def __init__(self, config_path: Path | None, host: str = "127.0.0.1", port: int = 8760) -> None:
+        # 窗口版没有控制台：先把 stdout/stderr 接到日志文件，否则后面所有
+        # print(..., file=sys.stderr) 的告警都会静默消失
+        journal.capture_streams()
         self.config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
         self.host = host
         self.port = port
@@ -68,7 +73,9 @@ class Console:
         # 每条日志一个单调递增的序号。界面靠它判断"哪几条是新的" ——
         # 用下标是不行的：deque 一旦写满就开始从头丢，下标会永远追不上，
         # 日志窗口会静悄悄地不再更新（这正是以前的毛病）。
-        self._log_seq = 0
+        # 用 itertools.count：+= 不是原子操作，工作线程和界面线程同时打日志时
+        # 会丢更新（两条同号），界面按 seq 判断新旧就会漏一行。
+        self._log_seq = itertools.count(1)
         self._subscribers: list[queue.Queue] = []
         self._sub_lock = threading.Lock()
         self._engine_lock = threading.RLock()
@@ -149,10 +156,9 @@ class Console:
         """
         text = str(message)
         journal.write(level, text)
-        self._log_seq += 1
         item = {"type": "log", "ts": time.strftime("%H:%M:%S"), "text": text,
                 "level": "detail" if str(level) == "detail" else "info",
-                "seq": self._log_seq}
+                "seq": next(self._log_seq)}
         self.logs.append(item)
         self._broadcast(item)
 
@@ -289,6 +295,14 @@ class Console:
         """
         configured = str(getattr(getattr(config, "paths", None), "data_dir", "") or "")
         paths.set_data_dir(configured)
+        # **数据目录是被环境变量指定的（测试、沙箱、脚本）时绝不迁移**。
+        # 迁移是"把旧位置的文件搬到新位置"，而测试把新位置指到临时目录 ——
+        # 搬过去之后临时目录一删，用户的 memory.json（长期记忆）、
+        # voiceprint.json（声纹）、marks.json（屏幕标记）就永久没了。
+        # 实测发生过：跑一次 scripts/run_tests.py，<程序目录>/build 里的这三个
+        # 文件被搬进 %TEMP%\tmpXXXX 并随 TemporaryDirectory 一起删除。
+        if os.environ.get(paths.ENV_DATA_DIR) or os.environ.get(paths.ENV_LEGACY):
+            return
         # 旧位置 -> 新位置。marks.json 也要搬：换了数据目录之后，
         # 用户之前框的"范围1"、标的"点1"不该就这么消失（它们还在旧目录里，
         # 再框一次又会从"范围1"重新编号，看起来就像全丢了）。
@@ -573,7 +587,10 @@ class Console:
             try:
                 if getattr(agent, "tts", None) is None:
                     self.log("[试听] 正在加载合成模型……")
-                    agent.load()
+                    # **只补建合成引擎**，不要 agent.load()：引擎正在监听时
+                    # load() 会把 wake/vad/asr 逐个换掉（重载几秒、内存翻倍、
+                    # 新旧混用），而新 Tts 的 device 还是 None（走系统默认扬声器）。
+                    agent._ensure_tts()
                 tts = getattr(agent, "tts", None)
                 if tts is None:
                     self.audition.update(state="error",
@@ -984,10 +1001,16 @@ class Console:
                     block = mic.read(timeout=0.2)
                     if block is None:
                         continue
-                    utterance = agent.vad.feed(block) or utterance
-                    if utterance is not None:
+                    # **不能写 feed(...) or utterance**：VAD 切出整句时返回的是
+                    # 多元素 ndarray，对它求 bool() 会抛
+                    # "The truth value of an array with more than one element is
+                    # ambiguous" —— 用户一开口就炸（实测）。必须判 None。
+                    out = agent.vad.feed(block)
+                    if out is not None:
+                        utterance = out
                         break
-                utterance = utterance or agent.vad.flush()
+                if utterance is None:
+                    utterance = agent.vad.flush()
             finally:
                 mic.close()
             if utterance is None or utterance.size == 0:

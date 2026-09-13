@@ -267,10 +267,13 @@ def cmd_listen(args) -> int:
             block = mic.read(timeout=0.2)
             if block is None:
                 continue
-            utterance = agent.vad.feed(block) or utterance  # type: ignore[union-attr]
-            if utterance is not None:
+            # 见 console.record_once：feed() 返回的是 ndarray，or 会抛 ValueError
+            out = agent.vad.feed(block)  # type: ignore[union-attr]
+            if out is not None:
+                utterance = out
                 break
-        utterance = utterance or agent.vad.flush()  # type: ignore[union-attr]
+        if utterance is None:
+            utterance = agent.vad.flush()  # type: ignore[union-attr]
     finally:
         mic.close()
     if utterance is None or utterance.size == 0:

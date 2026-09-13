@@ -577,7 +577,16 @@ def _kill_tree(proc) -> None:  # noqa: ANN001
 
 
 def run_command(command: str = "", timeout: int = 30) -> str:
-    """执行一条系统命令并返回输出（敏感操作，需要确认）。"""
+    """执行一条系统命令并返回输出（敏感操作，需要确认）。
+
+    实现都在 run_shell 里 —— 技能的自定义 shell 动作也复用它，
+    这样解码、返回码、打断、进程树回收只有一份。
+    """
+    return run_shell(command, timeout)
+
+
+def run_shell(command: str, timeout: int | float = 30) -> str:
+    """跑一条 shell 命令，返回一句人话（工具与技能共用这一份实现）。"""
     line = (command or "").strip()
     if not line:
         return "没说要执行什么命令"

@@ -70,6 +70,30 @@ def open_app(name: str = "") -> str:
     return "没找到叫" + target_name + "的程序"
 
 
+def mapped_command(name: str) -> str:
+    """这个名字在应用映射表里是不是一条**命令**（是就返回那串命令，否则空串）。
+
+    给权限层用的：open_app 打开"命令类"映射时会走 shell 执行 ——
+    等于一条不需要确认的 run_command。判定要发生在 check() 那一步，
+    所以这里只查表、不执行。
+    """
+    want = str(name or "").strip().lower()
+    if not want:
+        return ""
+    try:
+        from .. import screen as screen_mod  # noqa: PLC0415
+
+        found = screen_mod.resolve_app(want)
+        if not found.get("hit"):
+            return ""
+        entry = found.get("entry") or {}
+        if str(entry.get("type") or "") != "command":
+            return ""
+        return str(entry.get("target") or found.get("target") or "")
+    except Exception:  # noqa: BLE001 - 表坏了就当不是命令（open_app 里还会再兜一层）
+        return ""
+
+
 def open_url(url: str = "") -> str:
     """用默认浏览器打开网址。"""
     value = (url or "").strip()

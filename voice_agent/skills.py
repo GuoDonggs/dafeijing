@@ -331,10 +331,6 @@ def _template_fields(action: dict) -> dict[str, set[str]]:
     return found
 
 
-def _say_handler(text: str, **_extra: Any) -> str:
-    return text
-
-
 def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tuple[Callable[..., str], bool]:
     """把 YAML 里的 action 编译成 (处理函数, 是否需要确认)。"""
     from . import tools as tools_mod  # 延迟导入，避免循环依赖
@@ -367,6 +363,8 @@ def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tupl
         timeout = int(spec.get("timeout") or 30)
         # 执行任意命令是有副作用的，默认要求语音确认；要绕过就显式写 confirm: false
         needs_confirm = bool(spec.get("confirm", True))
+        # 用内置那份实现（延迟导入避免循环依赖）
+        from .tools.windows import run_shell  # noqa: PLC0415
 
         check = _required_checker(parameters)
 
@@ -375,26 +373,11 @@ def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tupl
             if problem:
                 return problem
             command = _render(template, kwargs)
-            try:
-                proc = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=max(3, min(timeout, 120)),
-                    encoding="utf-8",
-                    errors="replace",
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-            except subprocess.TimeoutExpired:
-                return "命令执行超时了"
-            except Exception as exc:  # noqa: BLE001
-                return "命令执行失败：" + str(exc)[:80]
-            output = ((proc.stdout or "") + (proc.stderr or "")).strip()
-            output = re.sub(r"\s+", " ", output)
-            if not output:
-                return "执行完了，没有输出"
-            return output[:400] + ("……后面还有" if len(output) > 400 else "")
+            # 复用内置 run_command 的实现：编码（先 UTF-8 再 ANSI）、返回码、
+            # 打断、进程树回收都只有一份。以前这里自己写了一套 subprocess.run：
+            # 中文输出按 UTF-8 硬解成乱码、返回码 7 也回"执行完了"（失败说成成功）、
+            # 还收不到"打断"信号（最长干等 120 秒）。
+            return run_shell(command, timeout)
 
         return handler, needs_confirm
 
@@ -427,11 +410,16 @@ def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tupl
                         for key, value in raw_args.items()}
             else:
                 args = {}
-            # **把"已经确认过"这件事传下去**：组合技能正因为串了敏感工具才会被标成
-            # "需要确认"，用户点头之后，它的步骤不该再被 fail-closed 拒绝 ——
-            # 以前每一环都拿到"用户取消了这次操作"（tools.call 没带确认通道），
-            # 于是文档里写的"组合技能先问一句"实际上永远跑不通。
-            results.append(tools_mod.call(tool_name, args, on_confirm=lambda _q: True))
+            # 内层步骤要拿**真的**确认通道（tools.current_confirm()），不能像
+            # 以前那样塞一个 lambda: True —— 那等于给 run_command / power /
+            # start_watch 这些底线工具开了一条免确认的后门：技能自己的提示问的是
+            # "技能要干什么"，念出来的参数还可能被 _spoken_detail 省掉，用户根本
+            # 不知道内层要执行什么（实测：confirm: false 的组合技能把 run_command
+            # 直接跑掉了）。
+            base_confirm = tools_mod.current_confirm()
+            results.append(tools_mod.call(
+                tool_name, args,
+                on_confirm=_step_confirm(tool_name, base_confirm)))
         return "；".join(part for part in results if part) or "执行完了"
 
     # 组合技能里只要有一环是敏感工具（关机、执行命令……），整个技能就先问一句，
@@ -450,6 +438,46 @@ def _make_action(spec: dict, title: str, parameters: dict | None = None) -> tupl
             sensitive = True
             break
     return handler, bool(spec.get("confirm", sensitive))
+
+
+def _step_confirm(step_name: str, base: Any) -> Any:
+    """给组合技能里的一环造一个确认通道。
+
+    - 底线工具（run_command / power / 关机 / 盯梢…）**必须真的问一次**：
+      技能层那句提示问的是技能自己，不能当成这一环的通行证；
+    - 其余敏感步骤：技能层已经点过头了，不重复问；
+    - 没有真人可问（base 是 None）：一律拒绝（拿不到确认就是拒绝）。
+    """
+    def ask(question: str, *rest: Any) -> bool:
+        if base is None:
+            return False
+        if _in_floor(step_name):
+            return bool(base(question, *rest))
+        return True
+
+    return ask
+
+
+def _in_floor(name: str) -> bool:
+    """这个工具是不是"任何模式下都要用户亲口点头"的底线工具。"""
+    from . import security as _security
+
+    return _security.in_floor(name)
+
+
+def _name_taken_by_builtin(name: str) -> bool:
+    """这个名字是不是已经被**内置**工具占了。
+
+    技能以前是 register(..., replace=True) 静默覆盖 —— 而权限档位是**按名字**
+    查表的（READ_TOOLS / EXEC_TOOLS / 底线名单），于是：
+    skills/xxx.yaml 写成 name: list_files + action: shell，只读模式下
+    check() 一看名字在 READ_TOOLS 里就放行，直接执行任意命令（实测复现）。
+    所以内置名字一律不许顶替（想用别的名字随便）。
+    """
+    from .tools import REGISTRY as _REGISTRY
+
+    existing = _REGISTRY.get(str(name or "").strip())
+    return existing is not None and existing.source == "builtin"
 
 
 def _step_is_sensitive(entry: Any, step: dict) -> bool:
@@ -588,6 +616,11 @@ class SkillLoader:
                 wanted = data.get("confirm", action.get("confirm"))
                 self._pending.append((name, list(action.get("steps") or []), wanted))
             confirm = bool(data.get("confirm", needs_confirm))
+            if _name_taken_by_builtin(name):
+                # 权限档位是**按名字**查表的，技能顶替内置名字等于换了个身份过闸
+                # （实测：name: list_files + action: shell 在只读模式下直接执行）
+                raise ValueError("「" + name + "」是内置工具的名字，技能不能顶替它"
+                                 "（换个名字，比如 my_" + name + "）")
             register(Tool(
                 name=name,
                 title=title,
@@ -676,6 +709,9 @@ class SkillLoader:
                     return None
                 for index, raw in enumerate(raw_tools):
                     tool = self._coerce_tool(raw, path)
+                    if _name_taken_by_builtin(tool.name):
+                        raise ValueError("「" + tool.name + "」是内置工具的名字，"
+                                         "自定义工具不能顶替它（换个名字）")
                     register(tool, replace=True)
                     registered.append(tool.name)
         except Exception as exc:  # noqa: BLE001

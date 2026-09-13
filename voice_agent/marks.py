@@ -167,6 +167,12 @@ class MarkStore:
                             y2=int(raw.get("y2", 0)), note=str(raw.get("note") or "")[:60])
             except (TypeError, ValueError):
                 continue
+            if name in self._items:
+                # 文件里出现同名条目（手工编辑过、或者旧版本写进去的）：
+                # 以前照样 append 到 _order，于是 _order 比 _items 长 ——
+                # all() 按 _order 取就 KeyError，list_marks 回"执行失败"，
+                # 而且 remove 之后整个标记功能都用不了，只有全清能救。
+                continue
             self._items[name] = mark
             self._order.append(name)
 

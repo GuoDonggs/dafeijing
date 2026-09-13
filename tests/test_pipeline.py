@@ -453,6 +453,24 @@ def main() -> int:
               % float(vad._cfg.silero_vad.min_silence_duration),
               float(vad._cfg.silero_vad.min_silence_duration) > 0)
 
+    # 源码级防线：VAD 的 feed() 返回 ndarray，写成 "feed(...) or utterance" 会对
+    # 数组求 bool → ValueError（实测：用户一开口就炸；GUI 录音测试 / CLI listen /
+    # 自检三个入口全中）。这三处曾经都是那个写法，所以这里直接盯住源码。
+    print("\n场景 4d：不许再写 feed(...) or ...")
+    import re as _re
+
+    root = Path(__file__).resolve().parent.parent / "voice_agent"
+    bad: list[str] = []
+    for name in ("console.py", "__main__.py", "selftest.py"):
+        text = (root / name).read_text(encoding="utf-8")
+        for number, line in enumerate(text.splitlines(), 1):
+            if line.strip().startswith("#"):
+                continue
+            if _re.search(r"feed\([^)]*\)\s+or\s+", line):
+                bad.append(name + ":" + str(number))
+    check("没有 feed(...) or ... 的写法（对 ndarray 求 bool 会抛 ValueError）",
+          not bad, "、".join(bad))
+
     print("\n场景 5：唤醒后一直没人说话 → 超时回到待命")
     # 这条曾经是坏掉的：超时检查原本挂在「mic.read 返回 None」的分支里，
     # 而麦克风每 32ms 就送来一块，那个分支几乎永远不执行。

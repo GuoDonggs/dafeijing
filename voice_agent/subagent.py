@@ -286,9 +286,16 @@ class SubAgentManager:
                         continue
                     self.log("[subagent] " + item.name + " 调用工具 " + name)
                     started = time.time()
-                    # 后台没人给它按确认 —— 敏感工具一律拒绝，这是有意的
-                    outcome = tools.call_result(name, arguments,
-                                                on_confirm=lambda _q: False)
+                    # 后台没人给它按确认 —— 敏感工具一律拒绝，这是有意的。
+                    # on_confirm 传 None（而不是一个"永远拒绝"的 lambda）：
+                    # 那条路走的是 tools 层的"没有确认通道"分支，**不记账限流**。
+                    # 以前用 lambda 拒绝，每次都会 note_prompt 记一笔，于是子代理
+                    # 自己撞几次敏感工具之后，用户本人的确认反而被限流挡下
+                    # （还会收到一句"这可能是有人在反复诱导你同意"）。
+                    # cancel_check：打断时长工具（执行命令、整盘搜索）能半路收手。
+                    outcome = tools.call_result(
+                        name, arguments, on_confirm=None,
+                        cancel_check=item.stop_event.is_set)
                     self.log("[subagent] " + item.name + " ← " + name + " "
                              + ("成功" if outcome.ok else "失败(" + str(outcome.code) + ")")
                              + " %.0fms｜%s" % ((time.time() - started) * 1000,

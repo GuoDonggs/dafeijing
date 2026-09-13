@@ -76,8 +76,12 @@ TIERS = ("read", "act", "exec")
 READ_TOOLS = frozenset({
     "get_time", "system_info", "mouse_position", "list_files", "search_files",
     "find_files", "read_file", "grep_files", "recall", "screenshot",
-    "find_on_screen", "find_in_image", "list_reference", "resize_image",
-    "look_at_screen", "app_map",
+    "find_on_screen", "find_in_image", "list_reference",
+    "look_at_screen",
+    # resize_image（带 out 时往**任意路径**写文件）和 app_map（add/alias/remove
+    # 会改 apps.yaml）**不能整条算只读**：实测只读模式下它们真写出了文件、
+    # 真改了映射表 —— 而只读档正是"明文 HTTP 中转站"自动降级后的落点。
+    # 它们现在按参数判（Tool.read_if）：只查的时候放行，要写的时候不放。
     "list_windows", "list_processes", "subagent_status", "list_watches",
     "cancel_subagent", "stop_watch", "keep_listening", "new_session",
     "permission_mode",
@@ -265,8 +269,11 @@ def tier_of(tool: Any) -> str:
         return "read"
     if name in EXEC_TOOLS:
         return "exec"
-    if bool(getattr(tool, "confirm", False)) or getattr(tool, "confirm_if", None):
-        # 自定义技能里 shell / 敏感动作都会被打上 confirm，落到执行档
+    if bool(getattr(tool, "confirm", False)):
+        # 自定义技能里 shell / 敏感动作都会被打上 confirm，落到执行档。
+        # 注意**不能**把 confirm_if 也算进来：它是按参数判的（window 空参数才问、
+        # app_map 只有写才问），一旦算进来这些工具就整体落到 exec 档、
+        # 在标准模式下每次调用都要确认 —— 实测过，那样"只查一下映射表"也要点头。
         return "exec"
     return "act"
 
@@ -312,33 +319,50 @@ def note_prompt(tool_name: str = "", fingerprint: str = "") -> tuple[bool, str]:
         limit = int(_state["max_prompts"])
         same_limit = int(_state["max_same"])
     if limit > 0:
-        while _prompts and now - _prompts[0] > 60.0:
-            _prompts.popleft()
-        if len(_prompts) >= limit:
+        # 增删查都在同一把锁里：另一个线程正在遍历它，边遍历边 popleft/append
+        # 会抛 "deque mutated during iteration"（界面心跳读 snapshot 时实测复现）
+        with _lock:
+            while _prompts and now - _prompts[0] > 60.0:
+                _prompts.popleft()
+        recent = _count_recent(now)
+        if recent >= limit:
             audit({"event": "rate_limited", "tool": tool_name, "window_s": 60,
-                   "count": len(_prompts)})
+                   "count": recent})
             return False, ("一分钟里已经问过 " + str(limit) + " 次确认了，先停一下。"
                            "如果是被反复要求做同一件危险操作，更要小心。")
     # "同一个操作"按**指纹**算（工具+参数）：不同的命令不该互相顶掉，
     # 而同一条命令被反复塞过来正是要拦的东西。
     key = fingerprint or tool_name
     if same_limit > 0 and key:
-        same = sum(1 for name, _ts in _same if name == key and now - _ts < 60.0)
+        with _lock:
+            same = sum(1 for name, _ts in list(_same) if name == key and now - _ts < 60.0)
         if same >= same_limit:
             audit({"event": "repeat_blocked", "tool": tool_name, "count": same,
                    "fingerprint": key[:80]})
             return False, ("同一个操作已经连着问了 " + str(same)
                            + " 次，我先停下 —— 这可能是有人在反复诱导你同意。")
-    _prompts.append(now)
-    if key:
-        _same.append((key, now))
+    with _lock:
+        _prompts.append(now)
+        if key:
+            _same.append((key, now))
     return True, ""
+
+
+def _count_recent(now: float, window: float = 60.0) -> int:
+    """窗口内的确认次数（先把 deque 拷出来再数，别在遍历时被别的线程改）。"""
+    with _lock:
+        stamps = list(_prompts)
+    return sum(1 for stamp in stamps if now - stamp <= window)
 
 
 def check(tool: Any, args: Any = None) -> Decision:
     """这次调用允不允许、要不要确认。**模型说什么都不影响这个判断。**"""
     name = str(getattr(tool, "name", tool) or "")
     tier = tier_of(tool)
+    if tier != "read" and _reads_only(tool, args):
+        # 参数说了"这次只是查"（app_map action=list、resize_image 不带 out）：
+        # 只读模式该放行 —— 不能因为工具名里也有写操作就一律拦下
+        tier = "read"
     current = mode()
     with _lock:
         banned = name in _state["deny"]
@@ -388,6 +412,29 @@ def _wants_confirm(tool: Any, args: Any = None) -> bool:
     if callable(checker):
         return bool(checker(args if isinstance(args, dict) else {}))
     return bool(getattr(tool, "confirm", False))
+
+
+def in_floor(name: str) -> bool:
+    """这个工具是不是"任何模式下都要用户亲口点头"的底线工具。
+
+    组合技能内层要用它：技能那句确认问的是"技能要干什么"（参数还可能念不全），
+    不能当成内层 run_command 的通行证。
+    """
+    with _lock:
+        floor = ((set(_state["floor"]) | set(ALWAYS_CONFIRM))
+                 if _state["floor_enabled"] else set())
+    return str(name or "") in floor
+
+
+def _reads_only(tool: Any, args: Any = None) -> bool:
+    """这次调用是不是"只看不改"（由 Tool.read_if 按参数说了算）。"""
+    checker = getattr(tool, "reads_only", None)
+    if callable(checker):
+        try:
+            return bool(checker(args if isinstance(args, dict) else {}))
+        except Exception:  # noqa: BLE001 - 判不出来就当会改
+            return False
+    return False
 
 
 def _verb(tier: str) -> str:

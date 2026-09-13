@@ -41,15 +41,44 @@ CONSOLE_EXE = "VoiceAgentCLI.exe"
 VERSION_FILE = PROJECT_ROOT / "packaging" / "version_info.txt"
 
 
-def app_version() -> str:
-    """从 voice_agent/__init__.py 里读版本号（全项目唯一真源）。"""
+def app_version() -> str | None:
+    """从 voice_agent/__init__.py 里读版本号（全项目唯一真源）。
+
+    读不到就返回 None —— **绝不退化成 "0.0"**：那会打出一个属性里写着
+    0.0.0.0 的 exe，构建还照样返回成功，用户装了之后谁也说不清是哪个版本。
+    """
     source = PROJECT_ROOT / "voice_agent" / "__init__.py"
     try:
         text = source.read_text(encoding="utf-8")
     except OSError:
-        return "0.0"
-    match = re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.M)
-    return match.group(1) if match else "0.0"
+        return None
+    # 单引号 / 类型注解 / 前后空格都认（以前只认双引号，改个写法就静默变 0.0）
+    match = re.search(r"^__version__\s*(?::\s*str\s*)?=\s*['\"]([^'\"]+)['\"]",
+                      text, re.M)
+    return match.group(1) if match else None
+
+
+def exe_version(exe: Path) -> str | None:
+    """回读 exe 里的版本资源（四段数字拼成 x.y.z.w）；读不到返回 None。"""
+    try:
+        from PyInstaller.utils.win32.versioninfo import (  # noqa: PLC0415
+            LoadStringTable, load_version_info_from_text_file)
+
+        info = load_version_info_from_text_file(str(exe))  # type: ignore[arg-type]
+        if info is None:
+            return None
+        table = LoadStringTable(info) if hasattr(info, "kids") else None
+        if table:
+            for key, value in table.items():
+                if str(key).lower() == "fileversion":
+                    return str(value)
+        ffi = info.ffi
+        return ".".join(str(part) for part in (ffi.fileVersionMS >> 16,
+                                               ffi.fileVersionMS & 0xFFFF,
+                                               ffi.fileVersionLS >> 16,
+                                               ffi.fileVersionLS & 0xFFFF))
+    except Exception:  # noqa: BLE001 - 读不到就当没带版本资源
+        return None
 
 
 def version_tuple(value: str) -> tuple[int, int, int, int]:
@@ -115,16 +144,26 @@ def human_size(num_bytes: float) -> str:
 
 
 def dir_stats(path: Path) -> tuple[int, int]:
-    """返回 (文件数, 总字节数)。"""
+    """返回 (文件数, 总字节数)。
+
+    **不跟着目录联接走**：models/ 通常是指向几 GB 真模型的联接
+    （见 packaging/README.md），跟进去会把模型算成"产物体积"，
+    数字虚高，dry-run 预览还会白扫一遍整个模型目录。
+    """
     files = 0
     total = 0
-    for item in path.rglob("*"):
+    for root, dirs, names in os.walk(path):
         try:
-            if item.is_file():
+            dirs[:] = [name for name in dirs
+                       if not _link_target(Path(root) / name)]
+        except OSError:
+            pass
+        for name in names:
+            try:
+                total += (Path(root) / name).stat().st_size
                 files += 1
-                total += item.stat().st_size
-        except OSError:   # 打包过程中被占用的文件不该让统计失败
-            continue
+            except OSError:   # 打包过程中被占用的文件不该让统计失败
+                continue
     return files, total
 
 
@@ -218,6 +257,23 @@ KEEP_FILES = ("config.yaml", "config.yaml.bak", "apps.yaml", ".env")
 KEEP_DIRS = ("build",)
 
 
+def _same_file(left: Path, right: Path) -> bool:
+    """两个文件内容是不是一样（大小 + 逐块比较，不用读进内存）。"""
+    try:
+        if left.stat().st_size != right.stat().st_size:
+            return False
+        with left.open("rb") as a, right.open("rb") as b:
+            while True:
+                chunk_a = a.read(65536)
+                chunk_b = b.read(65536)
+                if chunk_a != chunk_b:
+                    return False
+                if not chunk_a:
+                    return True
+    except OSError:
+        return False
+
+
 def _stash_user_data(out_dir: Path, stash: Path) -> dict:
     """把产物目录里的用户数据挪到一边，返回一份「怎么放回去」的说明。"""
     plan: dict = {"files": [], "dirs": [], "skills": [], "models": ""}
@@ -237,10 +293,19 @@ def _stash_user_data(out_dir: Path, stash: Path) -> dict:
             plan["dirs"].append(name)
     # skills/：只收「源仓库里没有」的那些，也就是用户自己加的
     user_skills = out_dir / "skills"
-    shipped = {p.name for p in (PROJECT_ROOT / "skills").glob("*")} if (PROJECT_ROOT / "skills").is_dir() else set()
+    # "是不是自带的"不能只比文件名：用户在产物目录里**改过**的 greet.yaml
+    # 也是他的东西，只看名字会把它当成自带文件、重建后被仓库版本静默覆盖。
+    # 所以再加一条：内容和仓库那份不一样，就算用户改过的。
+    shipped: dict[str, Path] = {}
+    if (PROJECT_ROOT / "skills").is_dir():
+        for item in (PROJECT_ROOT / "skills").rglob("*"):
+            if item.is_file():
+                shipped[item.name] = item
     if user_skills.is_dir():
         for path in user_skills.rglob("*"):
-            if path.is_file() and path.name not in shipped:
+            keep = path.is_file() and (path.name not in shipped
+                                       or not _same_file(path, shipped[path.name]))
+            if keep:
                 rel = path.relative_to(user_skills)
                 target = stash / "skills" / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -303,6 +368,12 @@ def main(argv: list[str] | None = None) -> int:
     print("  voice-agent 打包（PyInstaller onedir）")
     print("=" * 68)
     version = app_version()
+    if not version:
+        print()
+        print("  [中止] 读不出 voice_agent/__init__.py 里的 __version__ ——")
+        print("  宁可不打包，也不打一个属性里写着 0.0.0.0 的 exe。")
+        print("  请检查那一行长这样：__version__ = \"1.2\"")
+        return 2
     print("  版本        : " + version)
     print("  Python      : " + sys.version.split()[0] + "  " + sys.executable)
     print("  项目目录    : " + str(PROJECT_ROOT))
@@ -326,11 +397,50 @@ def main(argv: list[str] | None = None) -> int:
         print("  [缺少文件] 找不到 spec：" + str(SPEC_PATH))
         return 2
 
+    # 0) --dry-run 必须**什么都不动**。以前它排在清理后面，于是"只打印命令"的
+    #    那一次照样把 dist/VoiceAgent 删了、把 exe 旁边的 config.yaml（含 API Key）
+    #    和运行期 build/ 挪进暂存区 —— 而 dry-run 走到最后直接 return，
+    #    连"放回去"都不会执行。用户只是想看看命令，产物却没了。
+    if args.dry_run:
+        cmd_preview = [sys.executable, "-m", "PyInstaller", "--noconfirm",
+                       "--distpath", str(dist_dir), "--workpath", str(work_dir)]
+        if args.clean:
+            cmd_preview.append("--clean")
+        cmd_preview.append(str(SPEC_PATH))
+        print("")
+        print("[--dry-run] 下面这些**都不会真的执行**：")
+        if args.no_clean:
+            print("  · 跳过清理旧产物（--no-clean）")
+        else:
+            print("  · 清理 " + str(out_dir) + ("" if not out_dir.is_dir()
+                                              else "（现在存在，里面有 "
+                                                   + str(dir_stats(out_dir)[0]) + " 个文件）"))
+            if out_dir.is_dir():
+                print("    用户的 config.yaml / build/ / skills/ 会先暂存到 "
+                      + str(work_dir.parent / "dist-user-data"))
+        print("  · 生成版本资源 " + str(VERSION_FILE) + "（版本 " + version + "）")
+        print("  · 构建命令：")
+        print("      " + " ".join('"' + p + '"' if " " in p else p for p in cmd_preview))
+        print("")
+        print("--dry-run：到此为止，没有改动任何文件。")
+        return 0
+
     # 1) 清理旧产物。默认清，--clean 额外让 PyInstaller 丢掉自己的缓存。
     #    清理会把「放在 exe 旁边的用户数据」一起带走，所以先收起来。
     # 暂存目录刻意放在 workpath 外面：PyInstaller 会整理 --workpath 下的东西，
     # 用户的配置不能被它顺手带走
     stash = work_dir.parent / "dist-user-data"
+    # 上一次构建要是被 Ctrl+C / 杀死在半路（那时候还没修 finally），用户数据会
+    # 只剩暂存区这一份 —— 而下面一句就是把它删掉。所以先判断"暂存区里有配置、
+    # 产物目录里却没有"，是就先放回去再继续，别把唯一一份删了。
+    if (stash / "config.yaml").is_file() and not (out_dir / "config.yaml").is_file():
+        print("\n[0/4] 发现上一次构建留下的暂存数据，先放回产物目录")
+        _restore_user_data(out_dir, Path(str(stash) + "-recover"),
+                           {"files": [name for name in KEEP_FILES
+                                      if (stash / name).is_file()],
+                            "dirs": [name for name in KEEP_DIRS
+                                     if (stash / name).is_dir()],
+                            "skills": [], "models": ""})
     remove_path(stash)
     plan = _stash_user_data(out_dir, stash)
     kept = len(plan["files"]) + len(plan["dirs"]) + len(plan["skills"])
@@ -378,27 +488,32 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n[2/4] 开始构建（第一次 3~10 分钟，之后有缓存会快不少）")
     print("  " + " ".join('"' + part + '"' if " " in part else part for part in cmd))
-    if args.dry_run:
-        print("\n--dry-run：到此为止。")
-        return 0
-
     started = time.perf_counter()
+    # **所有退出路径都要把用户数据放回去**。以前只有"构建失败"和"产物缺文件"
+    # 两个分支调了 _restore_user_data，Ctrl+C（或任何异常）直接 return ——
+    # 而暂存区在下一次构建开头会被整个删掉，用户的 config.yaml（含 API Key）、
+    # 声纹档、运行期 build/ 就此永久消失。这里改成 try/finally 兜住。
+    restored = False
     try:
-        code = subprocess.call(cmd, cwd=str(PROJECT_ROOT), env=env)
-    except KeyboardInterrupt:
-        print("\n已中断。")
-        return 130
-    elapsed = time.perf_counter() - started
-    if code != 0:
-        # **先把用户数据放回去**：暂存区在下一次构建开头会被整个删掉，
-        # 而这次没走到收尾那一步。不放回去，用户的 config.yaml（含 API Key）、
-        # 声纹档、运行期 build/ 就会在下次打包时静默消失。
-        print("\n  [构建失败] PyInstaller 退出码 " + str(code))
-        _restore_user_data(out_dir, stash, plan)
-        print("  排查顺序：先看上面的报错；再看 " + str(work_sub / ("warn-" + SPEC_PATH.stem + ".txt"))
-              + " 里的 missing module 清单。")
-        print("  改了 spec 却像没生效时加 --clean 再试。")
-        return 1
+        try:
+            code = subprocess.call(cmd, cwd=str(PROJECT_ROOT), env=env)
+        except KeyboardInterrupt:
+            print("\n已中断。")
+            return 130
+        elapsed = time.perf_counter() - started
+        if code != 0:
+            print("\n  [构建失败] PyInstaller 退出码 " + str(code))
+            _restore_user_data(out_dir, stash, plan)
+            restored = True
+            print("  排查顺序：先看上面的报错；再看 "
+                  + str(work_sub / ("warn-" + SPEC_PATH.stem + ".txt"))
+                  + " 里的 missing module 清单。")
+            print("  改了 spec 却像没生效时加 --clean 再试。")
+            return 1
+    finally:
+        if not restored:
+            # 中断、异常、正常结束都在这里兜底（_restore_user_data 自己幂等）
+            _restore_user_data(out_dir, stash, plan)
 
     # 3) 检查产物
     print("\n[3/4] 构建完成，用时 {:.0f}s".format(elapsed))
@@ -412,6 +527,17 @@ def main(argv: list[str] | None = None) -> int:
     for name in expected:
         exe = out_dir / name
         print("  " + name.ljust(18) + human_size(exe.stat().st_size).rjust(9))
+    # 回读 exe 里的版本资源：**构建成功不等于版本写对了**（以前版本号取不到
+    # 会静默变 0.0，构建照样返回 0）。这里当场核对，错了就明说。
+    want = version_tuple(version)
+    got = exe_version(out_dir / expected[-1])
+    want_text = ".".join(str(part) for part in want)
+    if got is None:
+        print("  ！exe 里没读到版本资源（属性 → 详细信息 会是空的）")
+    elif got.rstrip(".0") != want_text.rstrip(".0") and got != want_text:
+        print("  ！exe 里的版本是 " + got + "，和 __version__（" + want_text + "）不一致")
+    else:
+        print("  版本资源     " + got)
     files, total = dir_stats(out_dir)
     print("  整个目录           " + human_size(total).rjust(9) + "（" + str(files) + " 个文件）")
 

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable
 
 __all__ = ["LEVELS", "write", "info", "detail", "file_path", "tail", "install_crash_handler",
-           "prune", "recent_files", "process_line", "adapt"]
+           "prune", "recent_files", "process_line", "adapt", "capture_streams"]
 
 #: 两级：info 给用户看，detail 给排查用
 LEVELS = ("info", "detail")
@@ -84,6 +84,62 @@ def prune(keep_days: int = KEEP_DAYS) -> int:
         except OSError:
             continue
     return removed
+
+
+class _JournalStream:
+    """把 print() 出来的东西接到日志文件上。
+
+    窗口版（pythonw / exe 的 console=False）里 sys.stdout/stderr 是 None：
+    写 sys.stderr 的 print 既不报错也**什么都不输出**，于是
+    「唤醒词生成失败（喊它没反应）」「这条回复没能出声」「CUDA 回退 CPU」
+    这些告警全部静默消失 —— 正是本项目最忌讳的那种失败。
+    """
+
+    def __init__(self, level: str = "info") -> None:
+        self._level = level
+        self._buffer = ""
+        self._lock = threading.Lock()
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        with self._lock:
+            self._buffer += str(text)
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                if line.strip():
+                    write(self._level, line)
+        return len(text)
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._buffer.strip():
+                write(self._level, self._buffer)
+            self._buffer = ""
+
+    def isatty(self) -> bool:
+        return False
+
+    @property
+    def encoding(self) -> str:
+        return "utf-8"
+
+
+def capture_streams() -> bool:
+    """没有控制台时把 stdout/stderr 接到日志文件上（返回是否做了接管）。
+
+    只在**确实没有**流的时候动它们；有控制台时一个字都不改。
+    """
+    changed = False
+    if getattr(sys, "stdout", None) is None:
+        sys.stdout = _JournalStream()  # type: ignore[assignment]
+        changed = True
+    if getattr(sys, "stderr", None) is None:
+        sys.stderr = _JournalStream()  # type: ignore[assignment]
+        changed = True
+    if changed:
+        write("info", "[日志] 没有控制台（窗口版），stdout/stderr 已接到日志文件")
+    return changed
 
 
 def write(level: str, message: str, tag: str = "") -> None:

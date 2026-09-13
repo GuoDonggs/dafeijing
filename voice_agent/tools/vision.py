@@ -296,7 +296,13 @@ def app_map_tool(action: str = "list", name: str = "", target: str = "") -> str:
     module = _screen()
     what = (action or "list").strip().lower()
     if what in ("list", "列出", "查看"):
-        return "当前的本地应用映射：" + module.describe_app_map()
+        text = module.describe_app_map()
+        if text.startswith("应用映射表") and "读不出来" in text:
+            # 表坏了就是"查询失败"，不能报成 ok=True 让模型当成映射表念出来
+            from . import ToolResult  # noqa: PLC0415
+
+            return ToolResult("读不出应用映射表：" + text, False, "map_broken")
+        return "当前的本地应用映射：" + text
     if what in ("add", "添加", "新增", "设置"):
         key = str(name or "").strip()
         value = str(target or "").strip()

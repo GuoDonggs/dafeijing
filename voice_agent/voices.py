@@ -49,11 +49,6 @@ def count(engine: str, num_speakers: int = 0) -> int:
     return CHATTTS_MAX_SEED if engine_of(engine) == "chattts" else len(VITS_VOICES)
 
 
-def is_chinese(engine: str, sid: int) -> bool:
-    """这个音色能不能念中文 —— 两个引擎都可以。"""
-    return True
-
-
 def is_female(engine: str, sid: int) -> bool:
     if engine_of(engine) != "vits":
         return True   # ChatTTS 的种子不分性别

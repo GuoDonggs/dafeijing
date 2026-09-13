@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -611,9 +612,18 @@ class Config:
         missing = [n for n in names if n not in self.models]
         if missing:
             detail = "\n".join("  - " + n + ": " + str(self.models_dir / MODEL_FILES[n]) for n in missing)
+            # 打包版（frozen）exe 旁边没有 scripts/ 也没有 python：
+            # 让它去跑 download_models.py 是条死路，得说清楚"把 models 目录放哪"。
+            if getattr(sys, "frozen", False):
+                # 打包版：exe 旁边就是 PROJECT_ROOT（spec 里 contents_directory='.'）
+                how = ("把已有的 models 目录整个复制到 " + str(PROJECT_ROOT / "models")
+                       + "（每个模型一个子目录、文件名见上面那份清单），"
+                       "细节见打包目录里的 packaging/README.md。")
+            else:
+                how = ("运行  python scripts/download_models.py  下载，"
+                       "或把已有的 models 目录复制到 " + str(PROJECT_ROOT / "models") + "。")
             raise ConfigError(
-                "缺少模型文件（" + str(self.models_dir) + "）：\n" + detail + "\n"
-                "运行  python scripts/download_models.py  下载，或把已有的 models 目录复制过来。"
+                "缺少模型文件（" + str(self.models_dir) + "）：\n" + detail + "\n" + how
             )
         return {n: self.models[n] for n in names}
 

@@ -107,6 +107,11 @@ class Tool:
     #: 只有"真的动手"才敏感的补充判断（参数 → 要不要问）。
     #: permission_mode 就是这一类：**查**权限模式不该弹确认，**改**才该。
     confirm_if: Callable[[dict], bool] | None = None
+    #: "这次调用算不算只读"的补充判断（参数 → 是不是纯查）。
+    #: app_map 就是这一类：action=list 是查表，add/alias/remove 是**写文件**；
+    #: resize_image 不带 out 只产出到数据目录，带 out 就是往任意路径写。
+    #: 只读模式放行哪些调用，就看它（名字太粗，一个名字下能有好几种动作）。
+    read_if: Callable[[dict], bool] | None = None
     title: str = ""
     source: str = "builtin"
     # 离线规则模式用的触发词：((说法, {预设参数}), ...)
@@ -160,6 +165,16 @@ class Tool:
         except Exception:  # noqa: BLE001
             return True
 
+    def reads_only(self, args: dict | None = None) -> bool:
+        """这次调用是不是"只看不改"（只读模式下能不能放行）。"""
+        hook = self.read_if
+        if hook is None:
+            return False
+        try:
+            return bool(hook(dict(args or {})))
+        except Exception:  # noqa: BLE001 - 判不出来就当会改，宁可拒
+            return False
+
     def confirm_question(self, args: dict) -> str:
         """敏感操作前要念给用户听的那句话。
 
@@ -208,6 +223,14 @@ class Tool:
                     words.append(text)
                 else:
                     words.append("一段内容")
+                continue
+            if name == "target" and str(args.get("kind") or "").strip().lower() in (
+                    "命令", "command", "cmd", "shell"):
+                # 盯梢是"一次点头、反复执行"：提示里必须念出要跑的命令。
+                # 以前 target 走的是路径分支，念成「要盯着看：命令、一个文件，确认吗？」
+                # —— 用户批准的是一个他完全没被告知内容的操作。
+                hint = _command_hint(text)
+                words.append(hint or "一条命令")
                 continue
             if name in ("path", "file", "target", "out", "source", "image", "template"):
                 spoken = _spoken_path(text)
@@ -522,6 +545,19 @@ def _needs_input(text: str) -> bool:
 #: 当前工具调用的「本轮已作废？」查询（**线程私有**：工具都跑在自己的工作
 #: 线程里，用全局变量会串台）。
 _cancel_ctx = threading.local()
+#: 当前工具调用拿到的确认通道（同样是线程私有）。组合技能的内层步骤靠它
+#: 拿到**真的**用户确认，而不是伪造一个"永远同意"。
+_confirm_ctx = threading.local()
+
+
+def set_confirm_channel(channel: Callable[[str], bool] | None) -> None:
+    _confirm_ctx.channel = channel
+
+
+def current_confirm() -> Callable[[str], bool] | None:
+    """当前这次工具调用能用的确认通道（没有就是 None = 不许做敏感操作）。"""
+    channel = getattr(_confirm_ctx, "channel", None)
+    return channel if callable(channel) else None
 
 
 def set_cancel_check(check: Callable[[], bool] | None) -> None:
@@ -623,7 +659,9 @@ def call_result(name: str, arguments: Any = None,
             # 拿不到确认通道 = 拒绝（和 DSH 的 unavailable 一样，fail closed）
             security.audit({"event": "unavailable", "tool": tool.name,
                             "tier": decision.tier, "mode": security.mode()})
-            return ToolResult(CANCEL_REPLY, False, "denied")
+            # **别说"用户取消了"**：根本没人被问过（界面"试运行"、后台子代理、
+            # 自检都走这条路）。用户和排障的人看到的应该是一句真话。
+            return ToolResult(NO_CHANNEL_REPLY, False, "denied")
         # 限流：一分钟最多问几次、同一个操作最多连着问几次。
         # 中转站最爱的就是"反复构造危险调用，把用户问到麻木"。
         # 计数按**指纹**（工具+参数），不是按工具名 —— 否则"列出文件"和
@@ -651,15 +689,22 @@ def call_result(name: str, arguments: Any = None,
 
     # 让工具在自己的长循环里能问"这一轮还算不算数"（打断/新指令 → 立刻收手）
     set_cancel_check(cancel_check)
+    # 组合技能的内层调用要用**真的**确认通道（以前那里塞的是 lambda: True，
+    # 等于给 run_command/power 开了后门）。放在线程局部里：工具都跑在自己的线程上。
+    set_confirm_channel(on_confirm)
     try:
         try:
-            outcome = ToolResult(str(tool.handler(**args)))
+            raw = tool.handler(**args)
+            # 工具可以自己返回 ToolResult（想报"这一步没成"）。以前一律 str() 化，
+            # 于是 ok=False 被吃掉、模型把失败当成功念给用户听。
+            outcome = raw if isinstance(raw, ToolResult) else ToolResult(str(raw))
         except TypeError as exc:
             outcome = ToolResult("工具参数不对：" + str(exc)[:80], False, "bad_arguments")
         except Exception as exc:  # noqa: BLE001 - 工具层永不抛出，交给模型兜底
             outcome = ToolResult(ERROR_PREFIX + str(exc)[:100], False, "error")
     finally:
         set_cancel_check(None)
+        set_confirm_channel(None)
 
     # 连续对话：这三类结果之后用户通常还要接一句，先把窗口留着 ——
     # 否则他得再喊一次唤醒词才能说"点它"，那就不像人说话了。
@@ -746,6 +791,9 @@ _S = {"type": "string"}
 _S_REQ = {"type": "string", "_required": True}
 _I = {"type": "integer"}
 CANCEL_REPLY = "用户取消了这次操作"
+#: 拿不到确认通道时给模型看的那句（和"用户点了拒绝"分开 —— 根本没人被问过）
+NO_CHANNEL_REPLY = ("这个操作需要用户确认，但现在没有确认通道（比如在后台、"
+                    "或者界面点的是「试运行」），所以没有执行")
 ERROR_PREFIX = "执行失败："
 REGISTRY: dict[str, Tool] = {}
 _BUILTIN_TITLES = {

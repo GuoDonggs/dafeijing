@@ -101,8 +101,10 @@ def main() -> int:
     security.configure(make_config())
     security.reset_limits()
     outcome = tools.call_result("run_command", {"command": "calc"})
+    # 文案要如实：不是"用户取消了"（根本没人被问过），而是"没有确认通道"
     check("没有确认通道时敏感工具被拒绝",
-          outcome.code == "denied" and outcome.text == tools.CANCEL_REPLY, outcome.code)
+          outcome.code == "denied" and outcome.text == tools.NO_CHANNEL_REPLY,
+          outcome.text[:40])
     check("没有确认通道时普通工具照常",
           tools.call_result("get_time", {}).ok)
 
@@ -285,6 +287,60 @@ def main() -> int:
     check("提权确认里念得出目标模式", "放开权限" in question, question)
     readonly = tools.REGISTRY["permission_mode"].confirm_question({"mode": "read-only"})
     check("切回只读也说得出", "只读模式" in readonly, readonly)
+
+    print("\n参数决定档位：只读模式不能借「查询」工具写盘")
+    # 用户报过（审查实测复现）：只读模式下调 resize_image(out=…) 真的写出了文件、
+    # app_map(add) 真的改了 apps.yaml —— 而只读档正是"明文中转站"自动降级后的落点。
+    security.configure(make_config("read-only"))
+    art = tools.REGISTRY["resize_image"]
+    mapping = tools.REGISTRY["app_map"]
+    write_target = str(Path(_BUILD.name) / "sub" / "x.png")
+    check("只读模式下 resize_image(out=…) 被拒绝",
+          security.check(art, {"image": "a.png", "out": write_target}).code == "denied")
+    check("只读模式下 resize_image（不带 out，只进数据目录）放行",
+          security.check(art, {"image": "a.png"}).allowed)
+    check("只读模式下 app_map(add) 被拒绝",
+          security.check(mapping, {"action": "add", "name": "x", "target": "y"}).code == "denied")
+    check("只读模式下 app_map(list) 放行",
+          security.check(mapping, {"action": "list"}).allowed)
+    security.configure(make_config("workspace-write"))
+    check("标准模式下写映射表要先确认",
+          security.check(mapping, {"action": "add", "name": "x", "target": "y"}).needs_confirm)
+    check("而查映射表不用确认",
+          not security.check(mapping, {"action": "list"}).needs_confirm)
+
+    # open_app 打开"命令类"映射 = 一条免确认的任意命令通道（实测能把 run_command
+    # 的底线名单整个绕过去）。所以只要名字在表里指向命令，就必须先问用户。
+    from voice_agent import screen as screen_mod
+
+    saved_map = screen_mod.load_app_map()
+    try:
+        merged = dict(saved_map)
+        merged["探针命令项"] = {"type": "command", "target": "cmd /c echo hi"}
+        screen_mod.save_app_map(merged)
+        opener = tools.REGISTRY["open_app"]
+        check("打开「命令类映射」必须确认",
+              security.check(opener, {"name": "探针命令项"}).needs_confirm)
+        check("打开普通应用不额外问",
+              not security.check(opener, {"name": "记事本"}).needs_confirm)
+    finally:
+        screen_mod.save_app_map(saved_map)
+
+    # 空参数会做出有副作用的默认动作（最小化所有窗口 / 清掉所有标记）→ 要问一句
+    check("window 空参数（=最小化全部）要确认",
+          security.check(tools.REGISTRY["window"], {}).needs_confirm)
+    check("window 给了 action 就不问",
+          not security.check(tools.REGISTRY["window"], {"action": "desktop"}).needs_confirm)
+    check("clear_marks 空参数（=全清）要确认",
+          security.check(tools.REGISTRY["clear_marks"], {}).needs_confirm)
+
+    print("\n盯梢的确认提示必须念得出那条命令")
+    # 盯梢是"一次点头、反复执行"，提示里念不出命令等于用户批准了一个未知操作
+    watch_question = tools.REGISTRY["start_watch"].confirm_question(
+        {"kind": "命令", "target": "Get-Process | Remove-Item C:\\ -Recurse -Force",
+         "interval_s": 3})
+    check("命令类盯梢的提示里有命令要干什么",
+          "命令" in watch_question and "一个文件" not in watch_question, watch_question[:60])
 
     print("\n放开模式：底线名单可以关掉")
     security.configure(make_config("danger-full-access"))

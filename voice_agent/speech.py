@@ -702,7 +702,12 @@ class Tts:
                         break
             except Exception as exc:  # 合成崩了要让播放侧知道，不能干等
                 offer((failed, exc))
-            offer(done)
+            except BaseException:  # noqa: BLE001 - KeyboardInterrupt/SystemExit 也算
+                # **任何**退出方式都要给消费端一个 done，否则 out.get() 永久阻塞、
+                # 这条线程一直占着 _speaking（麦克风再也不会解除静音）。
+                pass
+            finally:
+                offer(done)
 
         worker = threading.Thread(target=produce, name="tts-prefetch", daemon=True)
         worker.start()

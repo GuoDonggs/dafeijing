@@ -118,8 +118,12 @@ def run(config_path: str | None = None, skip_tools: bool = False) -> bool:
             pcm = audio_io.resample(samples, rate, 16000)
             segment = None
             for index in range(0, pcm.size, 512):
-                segment = vad.feed(pcm[index : index + 512]) or segment
-            segment = segment or vad.flush()
+                # 同上：feed() 给的是 ndarray，X or Y 会抛 ValueError
+                out = vad.feed(pcm[index : index + 512])
+                if out is not None:
+                    segment = out
+            if segment is None:
+                segment = vad.flush()
             if segment is None or segment.size == 0:
                 raise RuntimeError("VAD 没有切出语音段")
             return "切出 {:.2f}s 语音段".format(segment.size / 16000)

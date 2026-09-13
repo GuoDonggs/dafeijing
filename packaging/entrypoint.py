@@ -43,10 +43,20 @@ def rewrite_argv(argv: list[str]) -> list[str]:
     if stem != WINDOWED_EXE_STEM:
         return argv
 
-    known = {"ui", "gui", "run", "ask", "say", "listen", "wake", "skills",
-             "tools", "devices", "doctor", "selftest"}
-    if any(arg in known for arg in argv):
-        return argv
+    # 子命令表**从命令行解析器现取**：手写一份迟早会漏（真漏过 ——
+    # 后来加的 voices / log 没写进去，窗口版敲 "VoiceAgent.exe log" 会被
+    # 改写成 "ui log"，argparse 报错后窗口版没有控制台，用户只看到"什么都没发生"）。
+    try:
+        from voice_agent.__main__ import build_parser
+
+        known = set(build_parser()._subparsers._group_actions[0].choices)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 - 取不到就退回一份保守的名单
+        known = {"ui", "gui", "run", "ask", "say", "listen", "wake", "skills",
+                 "tools", "devices", "voices", "log", "doctor", "selftest"}
+    if argv and argv[0] in known:
+        return argv                     # 明确给了子命令：原样执行
+    if argv and argv[0] in ("-h", "--help", "--version"):
+        return argv                     # 顶层选项：别加 ui，否则会变成"未知参数"
     return ["ui"] + list(argv)
 
 

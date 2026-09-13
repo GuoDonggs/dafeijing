@@ -135,17 +135,16 @@ def _make_handler(console: Console):
                     return self._json({"ok": False, "error": "token 不对"}, 403)
                 return self._events()
             if path == "/api/tools":
-                return self._json({"ok": True, "items": [
-                    {
-                        "name": t.name, "title": t.display, "description": t.description,
-                        "confirm": t.confirm, "confirm_if": bool(t.confirm_if),
-                        "group": t.group, "result_budget": int(t.result_budget or 0),
-                        "source": t.source,
-                        "tags": list(t.tags),
-                        "parameters": list((t.parameters.get("properties") or {}).keys()),
-                    }
-                    for t in tools.REGISTRY.values()
-                ]})
+                # 用 Console 那一份（桌面版也是它）：以前这里自己拼了一遍，
+                # 字段名还不一样（parameters vs params），加字段时必然漏一边。
+                items = []
+                for tool in console.tools_payload():
+                    item = dict(tool)
+                    # 网页版前端读的是 parameters（历史命名），这里补一个别名，
+                    # 免得改 JS 造成两套名字
+                    item["parameters"] = list(tool.get("params") or [])
+                    items.append(item)
+                return self._json({"ok": True, "items": items})
             if path == "/api/skills":
                 return self._json(dict(console.skills_payload(), ok=True))
             if path == "/api/config":
@@ -218,7 +217,8 @@ def _make_handler(console: Console):
                         return self._json({"ok": False, "error": "内容是空的"}, 400)
                     agent = console.ensure_agent()
                     if agent.tts is None:
-                        agent.load()
+                        # 只补建合成引擎（别 load() 整个语音栈，理由见 console.audition）
+                        agent._ensure_tts()
                     agent.speak(text, kind="reply")
                     return self._json({"ok": True})
 
@@ -329,8 +329,19 @@ class _Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+#: 只认本机回环地址：这套控制台没有多用户概念，也不该被局域网访问
+_LOOPBACK = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
 def serve(config_path: Path | None = None, host: str = "127.0.0.1", port: int = 8760,
           open_browser: bool = True) -> int:
+    if host not in _LOOPBACK:
+        # 以前绑得上、但从别的机器访问**每一个请求**都会被 Host 校验挡成 403，
+        # 界面上只说"Host 不合法"，用户以为坏了。其实是设计如此：只给本机用。
+        print("这个控制台只给本机用，不支持绑到 " + host + "。")
+        print("  · 想在本机用：python -m voice_agent ui --web")
+        print("  · 想在别的机器上用：先用远程桌面 / SSH 端口转发到 127.0.0.1:8760")
+        return 2
     console = Console(config_path, host=host, port=port)
     try:
         server = _Server((host, port), _make_handler(console))

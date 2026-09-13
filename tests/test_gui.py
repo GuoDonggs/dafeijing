@@ -116,6 +116,31 @@ def pure_logic() -> None:
     check("SVG 图标能渲染成图标对象", not icon("home").isNull())
     check("图标按颜色上色", b"#FF0000" in svg_bytes("mic", "#FF0000"))
 
+    # 打包后的入口脚本：双击 exe（没有参数）要开界面，而"给了子命令"必须原样执行。
+    # 这里曾经漏过 —— 子命令名单是手写的，后来加的 voices / log 没写进去，
+    # 于是窗口版敲 "VoiceAgent.exe log" 会被改写成 "ui log"，argparse 报错，
+    # 而窗口版没有控制台，用户只看到"双击了但什么都没发生"。
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packaging"))
+    import entrypoint  # noqa: PLC0415
+
+    from voice_agent.__main__ import build_parser  # noqa: PLC0415
+
+    sub = build_parser()._subparsers._group_actions[0].choices  # noqa: SLF001
+    entrypoint.sys.executable = r"D:\x\dist\VoiceAgent\VoiceAgent.exe"
+    check("双击（无参数）→ 打开界面", entrypoint.rewrite_argv([]) == ["ui"],
+          str(entrypoint.rewrite_argv([])))
+    missing = sorted(name for name in sub
+                     if entrypoint.rewrite_argv([name]) != [name])
+    check("所有子命令都会被原样执行（现取解析器里的名单）", not missing, "、".join(missing))
+    check("ui 自己的选项（--no-autostart）也走界面",
+          entrypoint.rewrite_argv(["--no-autostart"]) == ["ui", "--no-autostart"])
+    check("顶层的 --version / --help 不加 ui",
+          entrypoint.rewrite_argv(["--version"]) == ["--version"]
+          and entrypoint.rewrite_argv(["--help"]) == ["--help"])
+    entrypoint.sys.executable = r"D:\x\dist\VoiceAgent\VoiceAgentCLI.exe"
+    check("命令行版一个字都不改",
+          entrypoint.rewrite_argv([]) == [] and entrypoint.rewrite_argv(["log"]) == ["log"])
+
     # 设备下拉框：配置里存的值可以是序号、也可以是**名字子串**
     from PyQt6.QtWidgets import QComboBox, QApplication as _App
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from . import Tool, _I, _S, _S_REQ, _params, _register
 from ._shared import keep_listening
-from .apps import open_app, open_url, web_search
+from .apps import mapped_command, open_app, open_url, web_search
 from .files import (
     edit_file,
     find_files,
@@ -187,6 +187,12 @@ _register(Tool(
     handler=mark_point_tool,
 ))
 
+#: app_map 的"这次只是查表"判断：action 留空 / list / 列出 / 查看 都算查。
+def _is_map_query(args: dict) -> bool:
+    action = str((args or {}).get("action") or "").strip().lower()
+    return action in ("", "list", "列出", "查看", "show")
+
+
 _register(Tool(
     name="list_marks",
     description="列出屏幕上现有的框选范围和标记点。",
@@ -220,6 +226,8 @@ _register(Tool(
     description="清掉屏幕上的标记。kind 填「区域」只清框，填「点」只清点，留空全清。",
     parameters=_params(kind={"type": "string", "description": "区域 / 点，留空 = 全部"}),
     handler=clear_marks_tool,
+    # 空参数 = 把用户框过的标记全擦掉（不可撤销），问一句
+    confirm_if=lambda args: not str(args.get("kind") or "").strip(),
 ))
 
 _register(Tool(
@@ -426,6 +434,10 @@ _register(Tool(
                 "会先查用户自己的应用映射表（apps.yaml）。",
     parameters=_params(name=_S_REQ),
     handler=open_app,
+    # 映射表里 type=command 的项会走 shell 执行 —— 实测"先 app_map 写一条命令、
+    # 再 open_app 打开它"能把 run_command 的底线名单整个绕过去（两次都不用确认）。
+    # 所以：**这次打开的名字在表里是命令 → 必须先问用户**。
+    confirm_if=lambda args: bool(mapped_command(str(args.get("name") or ""))),
 ))
 
 _register(Tool(
@@ -450,6 +462,10 @@ _register(Tool(
                        name={"type": "string", "description": "说法，例如「我的项目」"},
                        target={"type": "string", "description": "程序名、完整路径或网址"}),
     handler=app_map_tool,
+    # 查表是只读的（只读模式下也放行），**改表要确认** —— 它写的是 apps.yaml，
+    # 而映射表里 type=command 的项会被 open_app 拿去执行（见下一条注释）。
+    read_if=_is_map_query,
+    confirm_if=lambda args: not _is_map_query(args),
 ))
 
 # ─────────────────────────── 系统类 ───────────────────────────
@@ -513,9 +529,12 @@ _register(Tool(
 
 _register(Tool(
     name="window",
-    description="窗口操作：显示桌面、关闭当前窗口、切换窗口。",
-    parameters=_params(action={"type": "string", "description": "desktop / close / switch"}),
+    description="窗口操作：显示桌面、关闭当前窗口、切换窗口。action 必填（desktop / close / switch）。",
+    parameters=_params(action={"type": "string", "description": "desktop / close / switch，必填"}),
     handler=window,
+    # 参数整个丢掉时，旧代码会走默认的"最小化所有窗口" —— 一句含糊指令就把
+    # 桌面清空，而且不需要确认。宁可问一句。
+    confirm_if=lambda args: not str(args.get("action") or "").strip(),
 ))
 
 _register(Tool(
@@ -635,6 +654,10 @@ _register(Tool(
                        out={"type": "string", "description": "另存路径，留空自动命名"},
                        quality=_I),
     handler=resize_image_tool,
+    # out 留空 = 只把缩好的图放进数据目录（和截图同类，只读模式放行）；
+    # 给了 out 就是**往任意路径写文件**，实测只读模式下真能写出去。
+    read_if=lambda args: not str(args.get("out") or "").strip(),
+    confirm_if=lambda args: bool(str(args.get("out") or "").strip()),
 ))
 
 _register(Tool(

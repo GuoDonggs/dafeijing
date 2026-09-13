@@ -171,8 +171,8 @@ def main() -> int:
     finally:
         tools_mod.call_result = original_call
     denied = [m for m in REQUESTS[1]["messages"] if m.get("role") == "tool"]
-    check("后台调用敏感工具被拒绝",
-          bool(denied) and tools_mod.CANCEL_REPLY in denied[0]["content"],
+    check("后台调用敏感工具被拒绝（说清是没有确认通道，不是用户取消）",
+          bool(denied) and tools_mod.NO_CHANNEL_REPLY in denied[0]["content"],
           denied[0]["content"][:40] if denied else "没有工具结果")
     # 注意 spy_calls 里还有派发本身那一次（spawn_subagent 也是工具）
     check("子代理真的走到工具层去调 power", "power" in spy_calls, str(spy_calls))

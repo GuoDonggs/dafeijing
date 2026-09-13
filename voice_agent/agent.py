@@ -280,6 +280,10 @@ class VoiceAgent:
             self.log("[agent] 主循环异常退出：" + str(exc))
         finally:
             self._running = False
+            # **把麦克风关掉**：以前只置 _running=False，流还开着 ——
+            # 界面显示"未在监听"，设备却被本进程占着，别的程序打不开；
+            # 再 start() 又建一路，旧的那条永远没人关（实测过）。
+            self._close_mic()
 
     def run(self) -> None:
         """阻塞运行（命令行模式），直到 Ctrl+C 或 stop()。"""
@@ -292,6 +296,19 @@ class VoiceAgent:
         finally:
             self.stop()
 
+    def _close_mic(self) -> None:
+        """关掉采集流并清掉引用（幂等：重复调用没副作用）。
+
+        采集循环异常退出时也必须走它 —— 否则流还开着，界面显示"未在监听"、
+        设备却被本进程占着，别的程序打不开麦克风。
+        """
+        mic, self.mic = self.mic, None
+        if mic is not None:
+            try:
+                mic.close()
+            except Exception as exc:  # noqa: BLE001 - 关不掉也要说一声
+                self.log("[agent] 关闭麦克风失败：" + str(exc)[:80])
+
     def stop(self) -> None:
         """停止监听并释放设备；可再次 start()。"""
         self._stop_background("停止引擎")
@@ -303,9 +320,7 @@ class VoiceAgent:
         if loop is not None and loop.is_alive() and loop is not threading.current_thread():
             loop.join(timeout=2.0)
         self._loop_thread = None
-        if self.mic is not None:
-            self.mic.close()
-            self.mic = None
+        self._close_mic()
         worker = self._worker
         if worker is not None and worker.is_alive() and worker is not threading.current_thread():
             worker.join(timeout=2.0)

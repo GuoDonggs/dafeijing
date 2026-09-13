@@ -82,7 +82,7 @@ def _spoken_head(segment: str, base: Path | None = None) -> Path | None:
         # 不能宽松地只看 endsWith：那样 "mymusic" 会被当成"音乐"目录 ——
         # 所以带 ASCII 字母数字的前缀一律不认。
         prefix = low[:-len(name)]
-        if not re.search(r"[a-z0-9]", prefix) and len(prefix) <= 4:
+        if not re.search(r"[a-z0-9]", prefix) and len(prefix) <= _LEAD_IN_MAX:
             return _resolve_path(name)
     try:
         from .. import screen as screen_mod  # noqa: PLC0415
@@ -489,7 +489,16 @@ def grep_files(pattern: str = "", root: str = "", include: str = "*.txt") -> str
     candidates, stopped = _walk_files(
         base, lambda filename: fnmatch.fnmatch(filename.lower(), wanted), 800)
     hits: list[str] = []
+    from . import cancelled as _cancelled  # noqa: PLC0415 - 顶层导入会成环
+    import time as _time  # noqa: PLC0415
+
+    # 读内容这一段同样要有预算和打断检查：候选最多 800 个、单文件到 2MB，
+    # 在慢盘/网络盘上能读很久 —— 用户已经听到"打断"了，工具还在读。
+    read_deadline = _time.monotonic() + SEARCH_SECONDS
     for found in candidates:
+        if _cancelled() or _time.monotonic() > read_deadline:
+            stopped = True
+            break
         try:
             if found.stat().st_size > 2 * 1024 * 1024:
                 continue

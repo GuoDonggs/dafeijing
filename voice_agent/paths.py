@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time as _time
 from pathlib import Path
 
 __all__ = [
@@ -125,8 +126,27 @@ def sub(name: str, create: bool = False) -> Path:
     return path
 
 
+#: describe() 的体积缓存（路径 → (时间, 字节数)）。界面每 280ms 就问一次状态，
+#: 而 _size_of 要对 screenshots/、vision/、logs/ 做整目录 rglob+stat ——
+#: 文件一多（实测 3000 个约 317ms）就把主线程占满，窗口看着像卡死。
+#: 体积不是实时数据，30 秒算一次足够。
+_SIZE_TTL = 30.0
+_size_cache: dict[str, tuple[float, int]] = {}
+
+
+def _size_cached(path: Path) -> int:
+    key = str(path)
+    now = _time.monotonic()
+    hit = _size_cache.get(key)
+    if hit is not None and now - hit[0] < _SIZE_TTL:
+        return hit[1]
+    size = _size_of(path)
+    _size_cache[key] = (now, size)
+    return size
+
+
 def describe() -> dict:
-    """给设置页 / doctor 看的一份清单。"""
+    """给设置页 / doctor 看的一份清单（体积带 30 秒缓存，见 _size_cached）。"""
     root = data_dir()
     rows = []
     for name in ("memory", "conversation", "voiceprint", "marks", "translit",
@@ -135,7 +155,7 @@ def describe() -> dict:
         path = sub(name)
         rows.append({"name": name, "path": str(path),
                      "exists": path.exists(),
-                     "size": _size_of(path)})
+                     "size": _size_cached(path)})
     return {"dir": str(root), "exists": root.is_dir(),
             "default": str(default_data_dir()), "items": rows}
 

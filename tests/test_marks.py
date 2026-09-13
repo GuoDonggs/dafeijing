@@ -93,8 +93,17 @@ def main() -> int:
     check("留空删最近一个", "擦掉" in tools.call("remove_mark", {}))
     check("按类型清：只清点", tools.call("clear_marks", {"kind": "点"}) and store.get("点1") is None)
     check("框还在", store.get("范围1") is not None)
-    check("全清", "擦掉" in tools.call("clear_marks", {}) and not store.all())
-    check("没标记时清会说实话", "本来就没有" in tools.call("clear_marks", {}))
+    # 空 kind = 把用户框过的东西**全擦掉**（不可撤销），所以现在要先问一句：
+    # 参数整个丢掉时（模型被截断）以前会静默全清。
+    check("空参数清全部要先确认",
+          tools.call("clear_marks", {}) == tools.NO_CHANNEL_REPLY,
+          tools.call("clear_marks", {})[:40])
+    check("同意之后才真的全清",
+          "擦掉" in tools.call("clear_marks", {}, on_confirm=lambda *_a, **_k: True)
+          and not store.all())
+    check("没标记时清会说实话",
+          "本来就没有" in tools.call("clear_marks", {"kind": "点"},
+                                     on_confirm=lambda *_a, **_k: True))
 
     print("\n落盘：重启之后标记还在")
     store.clear()

@@ -170,6 +170,83 @@ def main() -> int:
     check("旧日志被清掉", removed >= 1 and not old.exists(), "删了 " + str(removed) + " 个")
     check("今天的日志还在", log_path.is_file())
 
+    print("\n窗口版没有控制台时，告警不能消失")
+    # sys.stdout/stderr 是 None 时（pythonw / exe console=False），
+    # 写 sys.stderr 的 print 既不报错也不输出 —— 唤醒词生成失败、播报失败
+    # 这些告警就全没了。capture_streams() 把它们接到日志文件上。
+    saved_out, saved_err = sys.stdout, sys.stderr
+    try:
+        sys.stdout = None
+        sys.stderr = None
+        journal.capture_streams()
+        print("[探针] 这条告警必须进日志", file=sys.stderr, flush=True)
+        check("没有控制台时 stdout/stderr 被接管",
+              sys.stdout is not None and sys.stderr is not None)
+        check("接管的告警真的写进了日志",
+              any("这条告警必须进日志" in line for line in journal.tail(30)))
+    finally:
+        sys.stdout, sys.stderr = saved_out, saved_err
+
+    print("\n测试不许搬走用户真实的数据")
+    # **最要紧的一条**：数据目录是被环境变量指定的（测试、沙箱）时，
+    # _apply_data_dir 绝不能做"把旧位置的文件搬过来"的迁移 ——
+    # 目标是个临时目录，搬过去之后临时目录一删，用户的 memory.json（长期记忆）、
+    # voiceprint.json（声纹）、marks.json（屏幕标记）就永久没了。
+    # 实测发生过：跑一次 run_tests.py，<程序目录>/build 里那三个文件被搬走删掉。
+    from voice_agent import console as console_mod
+
+    moved_calls: list = []
+    original_migrate = paths.migrate_legacy
+    paths.migrate_legacy = lambda *a, **k: (moved_calls.append(a), [])[1]
+    try:
+        fake = console_mod.Console.__new__(console_mod.Console)
+        fake.log = lambda *_a, **_k: None
+        fake.cfg = None
+        config = type("C", (), {"paths": type("P", (), {"data_dir": ""})()})()
+        console_mod.Console._apply_data_dir(fake, config)
+    finally:
+        paths.migrate_legacy = original_migrate
+    check("环境变量指定数据目录时不做迁移（不然会搬走真实记忆/声纹/标记）",
+          not moved_calls, str(moved_calls))
+
+    print("\n打包脚本：版本号与断点安全")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_exe_probe", Path(__file__).resolve().parent.parent / "scripts" / "build_exe.py")
+    build_exe = importlib.util.module_from_spec(spec)
+    sys.modules["build_exe_probe"] = build_exe
+    spec.loader.exec_module(build_exe)  # type: ignore[union-attr]
+    from voice_agent import __version__
+
+    check("打包脚本读到的版本号 == __version__（" + __version__ + "）",
+          build_exe.app_version() == __version__, str(build_exe.app_version()))
+    check("版本号补成 Windows 要的四段数字",
+          build_exe.version_tuple("1.2") == (1, 2, 0, 0),
+          str(build_exe.version_tuple("1.2")))
+
+    sandbox = Path(tempfile.mkdtemp(prefix="va-build-probe-"))
+    dist = sandbox / "dist"
+    out = dist / build_exe.APP_NAME
+    work = sandbox / "work"
+    out.mkdir(parents=True)
+    (out / "config.yaml").write_text("llm:\n  api_key: SECRET\n", encoding="utf-8")
+    (out / "build").mkdir()
+    (out / "build" / "memory.json").write_text("{}", encoding="utf-8")
+    original_call = build_exe.subprocess.call
+
+    def interrupted(*_a, **_k):
+        raise KeyboardInterrupt
+
+    build_exe.subprocess.call = interrupted
+    code = build_exe.main(["--distpath", str(dist), "--workpath", str(work)])
+    build_exe.subprocess.call = original_call
+    check("打包中途 Ctrl+C 返回 130", code == 130, str(code))
+    check("中断之后 config.yaml 回到了产物目录（不再永久丢失）",
+          (out / "config.yaml").is_file()
+          and "SECRET" in (out / "config.yaml").read_text(encoding="utf-8"))
+    check("构建期间的用户数据也没少", (out / "build" / "memory.json").is_file())
+
     print()
     if failures:
         print("失败 " + str(len(failures)) + " 项：" + "、".join(failures))
