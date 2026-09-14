@@ -85,10 +85,18 @@ def download(urls: tuple[str, ...], target: Path, what: str) -> bool:
 
 
 def make_icon() -> bool:
-    """用界面里那颗麦克风画一个 .ico（快捷方式和控制面板里显示它）。
+    """生成安装程序/快捷方式用的图标。
 
-    没装 PyQt6 / Pillow 就跳过 —— 图标是锦上添花，不该拦住打包。
+    优先用 scripts/make_icon.py 从仓库根目录的 icon.webp 转出来的那份
+    （和 exe、任务栏是同一张图）；转不出来再退回"用界面里那颗麦克风画一个"。
     """
+    try:
+        import make_icon as icon_maker  # noqa: PLC0415
+
+        if icon_maker.make_icon(force=True):
+            return True
+    except Exception as exc:  # noqa: BLE001
+        print("  ！icon.webp 转 ico 失败（" + str(exc)[:60] + "），改用画的图标")
     if ICON_FILE.is_file():
         return True
     try:
@@ -126,15 +134,17 @@ def make_icon() -> bool:
         return False
 
 
-def stage_payload(with_config: bool, with_models: bool) -> int:
+def stage_payload(with_config: bool, with_models: bool,
+                  source_app: Path | None = None) -> int:
     """把 dist/VoiceAgent 复制成一份干净的 payload。
 
     故意**不带**运行期数据：build/（记忆、声纹、日志、截图）和 config.yaml
     （里面有 API Key）都不进安装包 —— 装到别人机器上不该带上你的密钥。
     模型默认带上（装完就能用），--no-models 可以不带。
     """
-    if not DIST_APP.is_dir():
-        print("找不到 " + str(DIST_APP) + "，先跑：python scripts/build_exe.py")
+    dist_app = source_app or DIST_APP
+    if not dist_app.is_dir():
+        print("找不到 " + str(dist_app) + "，先跑：python scripts/build_exe.py")
         return 0
     if PAYLOAD.exists():
         build_exe.remove_path(PAYLOAD)
@@ -145,7 +155,7 @@ def stage_payload(with_config: bool, with_models: bool) -> int:
     if not with_models:
         skip_dirs.add("models")
     count = 0
-    for item in DIST_APP.iterdir():
+    for item in dist_app.iterdir():
         if item.name in skip_files:
             continue
         if item.is_dir():
@@ -192,14 +202,13 @@ def main(argv: list[str] | None = None) -> int:
     print("  大肥鲸 VoiceAgent 安装包（Inno Setup）")
     print("=" * 68)
     print("  版本      : " + version)
-    global DIST_APP
-    DIST_APP = Path(args.dist).resolve()
-    print("  源产物    : " + str(DIST_APP))
+    source_app = Path(args.dist).resolve()
+    print("  源产物    : " + str(source_app))
     print("  输出目录  : " + str(OUT_DIR))
     print("  模型      : " + ("不带" if args.no_models else "带上（装完即用）"))
     # 安装包名里的版本号来自 __version__，里面装的 exe 却可能是上一次构建的 ——
     # 对一下，不一致就别打（否则用户装完发现"版本对不上"）。
-    exe_got = build_exe.exe_version(DIST_APP / build_exe.WINDOWED_EXE)
+    exe_got = build_exe.exe_version(source_app / build_exe.WINDOWED_EXE)
     if exe_got is not None and build_exe._version_parts(exe_got) != (build_exe.version_tuple(version) or (0, 0, 0, 0)):
         print()
         print("  [中止] dist 里的 exe 版本是 " + exe_got + "，和 __version__（"
@@ -234,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print("\n[1/4] 准备 payload")
-    stage_payload(args.with_config, not args.no_models)
+    stage_payload(args.with_config, not args.no_models, source_app)
 
     print("\n[2/4] 图标与语言文件")
     has_icon = make_icon()

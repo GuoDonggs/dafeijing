@@ -56,6 +56,13 @@ VERSION_FILE = os.environ.get("VOICE_AGENT_VERSION_FILE") or str(PACKAGING_DIR /
 if not Path(VERSION_FILE).is_file():
     VERSION_FILE = None
 
+# exe 的图标：用仓库根目录的 icon.webp 生成的那份 .ico
+# （scripts/make_icon.py，build_exe.py 打包前会自动跑一次）。
+ICON_FILE = os.environ.get("VOICE_AGENT_ICON") or str(PACKAGING_DIR / "voice-agent.ico")
+if not Path(ICON_FILE).is_file():
+    print("[spec] 没找到图标 " + str(ICON_FILE) + "，用默认图标")
+    ICON_FILE = None
+
 print("[spec] 构建模式：" + ("只出命令行版 VoiceAgentCLI.exe" if CONSOLE_ONLY
                              else "窗口版 VoiceAgent.exe + 命令行版 VoiceAgentCLI.exe"))
 print("[spec] 精简 CUDA/TensorRT：" + ("开" if SLIM else "关"))
@@ -190,6 +197,7 @@ _COMMON = dict(
     debug=False,
     bootloader_ignore_signals=False,
     version=VERSION_FILE,        # exe 属性里的版本号（取自 voice_agent.__version__）
+    icon=ICON_FILE,              # exe 自己的图标（任务栏、资源管理器里看到的）
 )
 
 targets = []

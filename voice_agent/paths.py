@@ -58,6 +58,10 @@ _LAYOUT = {
     "reference": "screenshots/reference",
     "vision": "vision",
     "logs": "logs",
+    # 自动下载的模型与下载缓存：和上面这些放在**同一个父目录**（数据目录）下，
+    # 用户想搬走/备份/清理，只要动这一个目录。
+    "models": "models",
+    "downloads": "downloads",
 }
 
 

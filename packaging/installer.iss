@@ -59,15 +59,12 @@ UninstallDisplayName=大肥鲸 VoiceAgent {#AppVersion}
 SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\voice-agent.ico
 #endif
-#if FileExists(LangFile)
-DefaultLanguage=chinese
-#endif
-
 [Languages]
-Name: "english"; MessagesFile: "compiler:Default.isl"
+; 第一个列出的就是默认语言：有简体中文文件时中文在前
 #if FileExists(LangFile)
 Name: "chinese"; MessagesFile: "{#LangFile}"
 #endif
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -75,7 +72,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; config.yaml 单独一条：升级时**绝不覆盖**用户自己那份（里面有 API Key），
 ; 只在没有的时候放一份初始配置进去
-Source: "{#PayloadDir}\config.yaml"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall; Check: FileExists(ExpandConstant('{#PayloadDir}\config.yaml'))
+Source: "{#PayloadDir}\config.yaml"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall skipifsourcedoesntexist
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Excludes: "config.yaml"; Flags: ignoreversion recursesubdirs createallsubdirs
 #if FileExists(IconFile)
 Source: "{#IconFile}"; DestDir: "{app}"; DestName: "voice-agent.ico"; Flags: ignoreversion

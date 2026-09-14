@@ -9,6 +9,7 @@ venv/
 # 注意：build/ 本身还是程序运行期的工作目录（记忆、自检音频、生成的关键词表），
 # 所以这里只忽略 PyInstaller 的那一层，不整个忽略 build/。
 dist/
+dist-new/
 dist-slim/
 build/pyinstaller/
 # 打包前会把「放在 exe 旁边的用户数据」暂存到这里，打完再放回去。

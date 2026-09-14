@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QVBoxLayout,
     QWidget,
@@ -63,7 +64,34 @@ PANEL_WIDTH = 384
 PANEL_MAX_HEIGHT = 700
 
 
+#: icon.webp 换来的 QIcon（只加载一次）
+_APP_ICON: list = [None]
+
+
+def _icon_from_webp() -> QIcon | None:
+    """程序图标：优先用仓库里的 icon.webp（打包后它在 voice_agent/web/ 里）。
+
+    找不到就返回 None，让调用方退回原来画的圆 —— 图标这种事不该让程序起不来。
+    """
+    if _APP_ICON[0] is not None:
+        return _APP_ICON[0]
+    for candidate in (Path(__file__).resolve().parent.parent / "web" / "icon.webp",
+                      Path(__file__).resolve().parent.parent.parent / "icon.webp"):
+        if candidate.is_file():
+            icon = QIcon(str(candidate))
+            if not icon.isNull():
+                _APP_ICON[0] = icon
+                return icon
+    _APP_ICON[0] = False       # 找过了，没有
+    return None
+
+
 def app_icon(color: str = theme.BLUE) -> QIcon:
+    # 有 icon.webp 就用它（任务栏/开始菜单/安装程序里是同一张图）；
+    # 状态色只在没有图片时用来画那个圆。
+    custom = _icon_from_webp()
+    if custom is not None:
+        return custom
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -529,6 +557,7 @@ class MainWindow(QWidget):
             ("mic", "设备", "", self.show_devices),
             (None, None, None, None),
             ("activity", "运行日志", "Ctrl+L", self.show_logs),
+            ("disk", "语音模型", "", self.show_model_setup),
             ("info", "关于", "", self.show_about),
             (None, None, None, None),
             ("power", "退出", "Ctrl+Q", self.close),
@@ -605,7 +634,34 @@ class MainWindow(QWidget):
     def start_engine(self) -> None:
         if self.console.agent is not None and self.console.agent.running:
             return
+        cfg = getattr(self.console, "cfg", None)
+        if cfg is not None and getattr(cfg, "missing_models", None):
+            # 缺模型就直接把向导弹出来：以前这里会打印一句"运行
+            # python scripts/download_models.py"，打包版里那条路根本不存在。
+            self.show_model_setup()
+            return
         self.console.start_engine()
+
+    def show_model_setup(self) -> None:
+        """「语音模型」向导：缺了就下/或指到已有目录，齐了就当状态页看。"""
+        from .model_setup_dialog import ModelSetupDialog
+
+        cfg = getattr(self.console, "cfg", None)
+        missing = list(getattr(cfg, "missing_models", []) or [])
+        if not missing:
+            self.console.log("[ui] 模型目录：" + str(getattr(cfg, "models_dir", "")))
+            box = QMessageBox(self)
+            box.setWindowTitle("语音模型")
+            box.setText("需要的模型都在：" + str(getattr(cfg, "models_dir", "")))
+            box.exec()
+            return
+        dialog = ModelSetupDialog(self.console, parent=self)
+        if dialog.exec():
+            self._refresh_notice(self.latest or {})
+            cfg = getattr(self.console, "cfg", None)
+            if cfg is not None and not getattr(cfg, "missing_models", None):
+                self.console.log("[ui] 模型就绪，可以启动监听了")
+                self.start_engine()
 
     def stop_engine(self) -> None:
         self.console.stop_engine()

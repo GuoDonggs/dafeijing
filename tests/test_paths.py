@@ -247,6 +247,55 @@ def main() -> int:
           and "SECRET" in (out / "config.yaml").read_text(encoding="utf-8"))
     check("构建期间的用户数据也没少", (out / "build" / "memory.json").is_file())
 
+    print("\n模型：自动下载目录与缓存/数据在同一个父目录下")
+    # 需求原话是"自动下载目录与缓存等数据保存在同一个父目录下"。这里把布局钉死：
+    # <数据目录>/models 装模型、<数据目录>/downloads 放压缩包缓存，其余运行期
+    # 文件也都在同一个目录里 —— 用户备份/搬家只动一个目录。
+    from voice_agent import config as config_mod
+    from voice_agent import models_setup
+
+    check("模型子目录在数据目录下",
+          paths.sub("models") == Path(paths.data_dir()) / "models", str(paths.sub("models")))
+    check("下载缓存在数据目录下",
+          paths.sub("downloads") == Path(paths.data_dir()) / "downloads",
+          str(paths.sub("downloads")))
+    candidates = config_mod.models_dir_candidates()
+    check("自动下载目录排在候选第一位（新装的先认它）",
+          Path(candidates[0]) == Path(paths.data_dir()) / "models", str(candidates[0]))
+    check("候选里还留着老布局（程序目录/models），老用户不用重下",
+          any(Path(c) == config_mod.PROJECT_ROOT / "models" for c in candidates),
+          str([str(c) for c in candidates]))
+
+    probe = Path(tempfile.mkdtemp(prefix="va-models-")) / "models"
+    info = models_setup.status(probe)
+    check("空目录里必需的模型全算缺",
+          sorted(info["missing"]) == sorted(models_setup.REQUIRED_KEYS),
+          str(info["missing"]))
+    probe.mkdir(parents=True, exist_ok=True)
+    (probe / "silero_vad.onnx").write_bytes(b"x")
+    check("放进去一个就少缺一个", "vad" not in models_setup.status(probe)["missing"])
+    check("认得出这个目录就是模型目录", models_setup.looks_like_models_dir(probe))
+    check("也认它的上一层（用户常选父目录）",
+          models_setup.resolve_models_root(probe.parent) == probe,
+          str(models_setup.resolve_models_root(probe.parent)))
+    check("空目录不会被误认为模型目录",
+          models_setup.resolve_models_root(Path(tempfile.mkdtemp())) is None)
+
+    print("\n程序图标：icon.webp → .ico（exe / 安装程序 / 任务栏同一张图）")
+    root_dir = Path(__file__).resolve().parent.parent
+    source_icon = root_dir / "icon.webp"
+    ico = root_dir / "packaging" / "voice-agent.ico"
+    check("仓库里有 icon.webp", source_icon.is_file(), str(source_icon))
+    check("packaging/voice-agent.ico 已生成", ico.is_file(), str(ico))
+    check("网页版放着同一个 favicon",
+          (root_dir / "voice_agent" / "web" / "icon.webp").is_file())
+    if ico.is_file():
+        with ico.open("rb") as handle:
+            head = handle.read(6)
+        check("是真正的 .ico 文件（ICONDIR 头）", head[:4] == b"\x00\x00\x01\x00",
+              head.hex())
+        check("内含 6 个尺寸（16~256，属性页里才清楚）", head[4] == 6, str(head[4]))
+
     print()
     if failures:
         print("失败 " + str(len(failures)) + " 项：" + "、".join(failures))

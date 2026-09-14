@@ -394,6 +394,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print("  版本        : " + version)
     print("  Python      : " + sys.version.split()[0] + "  " + sys.executable)
+    # 图标从仓库根目录的 icon.webp 现生成（和安装程序、任务栏用同一张图）
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import make_icon  # noqa: PLC0415
+
+        make_icon.make_icon()
+    except Exception as exc:  # noqa: BLE001 - 图标失败不该拦住打包
+        print("  ！图标没生成：" + str(exc)[:80])
     print("  项目目录    : " + str(PROJECT_ROOT))
     print("  产物目录    : " + str(out_dir))
     print("  中间目录    : " + str(work_sub))

@@ -198,7 +198,8 @@
       hint.textContent = '启动失败：' + data.last_error;
     } else if ((data.missing_models || []).length) {
       hint.className = 'hint error';
-      hint.textContent = '缺少模型：' + data.missing_models.join('、') + '；运行 python scripts/download_models.py';
+      hint.textContent = '缺少模型：' + data.missing_models.join('、')
+        + '；在桌面版菜单「语音模型」里可以自动下载，或执行 VoiceAgentCLI.exe models --download';
     } else if (!status.running && !data.starting) {
       hint.className = 'hint';
       hint.textContent = '引擎未启动。点「启动监听」后喊唤醒词即可对话；也可以直接在中间输入文字指令。';

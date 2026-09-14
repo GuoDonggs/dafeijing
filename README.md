@@ -83,16 +83,39 @@
 python -m pip install -r requirements.txt
 ```
 
-### 2. 准备模型（约 560 MB）
+### 2. 准备模型（约 420 MB）
+
+**什么都不用记**：直接启动就行。没检测到模型时，程序会当场问你一次 ——
+
+- **桌面版**：弹「缺少语音模型」窗口，两个按钮：**自动下载** / **选择已有目录…**
+- **命令行**：`run` / `ui` / `listen` 启动时打印同样的三个选项（下载 / 指路径 / 退出）
+
+也可以显式操作：
 
 ```powershell
-python scripts/download_models.py
+python -m voice_agent models                # 看现在有哪些、缺哪些
+python -m voice_agent models --download     # 自动下载缺的（约 420 MB）
+python -m voice_agent models --dir D:\models # 我已经有模型，指过去（记进 config.yaml）
 ```
 
-> 国内直连 GitHub Releases 实测只有几十 KB/s。脚本默认走 gh-proxy.com 镜像，
-> 失败自动换源；--mirror "" 可切回直连。
+**文件放哪**（都收在数据目录这一个父目录下，备份/搬家只动它）：
 
-模型落在**项目自己的 ./models/** 下，拷走整个目录就能跑，不依赖外部路径。
+```text
+<数据目录>/                 ← 默认 <程序目录>/build，可在设置里改
+├─ models/                  ← 自动下载装这里
+├─ downloads/               ← 下载缓存（压缩包，装完可以删）
+├─ logs/  screenshots/  vision/
+└─ memory.json  conversation.json  apps.yaml …
+```
+
+- 老用户把模型放在**程序目录的 ./models/**（或隔壁项目的 models/）照样能用，
+  不会被要求重下一遍；
+- 已经有模型也可以直接拷进 `<数据目录>/models`，或者把 `models` 目录做一次
+  目录联接放过去（不复制文件）；
+- 想固定位置就在 config.yaml 里写 `paths.models_dir: D:\models`。
+
+> 国内直连 GitHub Releases 实测只有几十 KB/s，下载默认走 gh-proxy.com 镜像，
+> 失败自动换源；`--mirror ""` 可切回直连。
 
 ### 3. 配置
 
@@ -855,32 +878,63 @@ python -m voice_agent tools
 
 ---
 
-## 九、自定义技能
+## 九、给助手加技能 / 工具（开发文档）
 
-往 skills/（或 ~/.voice-agent/skills/）丢一个文件即可，**不用改框架代码**。
+技能和自定义工具是**同一套机制**：往目录里丢一个 .yaml 或 .py，不用改框架代码。
+区别只在归类 —— 放 `skills/` 的叫「技能」，放 `tools/` 的叫「自定义工具」，
+在界面上分开显示、和内置工具并排站。
 
-### YAML 声明式
+| 放哪里 | 谁看得到 | 用途 |
+| --- | --- | --- |
+| `<项目>/skills/` | 这个项目 | 项目自带的演示技能 |
+| `<项目>/tools/` | 这个项目 | 项目自带的演示工具 |
+| `~/.voice-agent/skills/` | 当前用户所有项目 | 你自己攒的常用技能 |
+
+命令行帮手：`python -m voice_agent skills list|check|reload`，
+`python -m voice_agent skills new demo` 生成模板（`--force` 覆盖）。
+
+### 1. YAML 声明式（推荐先从这个开始）
 
 ```yaml
-name: greet
-title: 打招呼
-description: 用一句自定义的话跟用户打招呼。
-parameters:
-  who: {type: string, description: 称呼, required: true}
-tags: [打招呼, 闲聊]          # 用途标签：给模型看的"这是个什么活儿的工具"
-triggers:                    # 没配 API Key 时靠这些说法命中
-  - phrase: 打个招呼
-    args: {who: "你"}
+name: backup_docs            # 工具名：小写字母开头，只能是英文/数字/下划线
+title: 备份文档               # 给人看的名字（语音确认时会念出来）
+description: >-               # **这句是写给模型看的**：说清"什么时候该用它"
+  把「文档」目录打包备份到 D 盘。用户说「备份一下文档」时调用。
+parameters:                   # 参数表；required: true 表示必填
+  target: {type: string, description: 备份到哪里, required: false}
+tags: [备份, 文件]             # 用途标签：写在给模型的说明最前面（建议 1~4 个）
+triggers:                     # 没配 API Key（离线规则模式）时靠这些说法命中
+  - 备份文档
+  - phrase: 备份到
+    args: {target: "D:\backup"}
+deps: [requests]              # 需要第三方包时声明；界面上会给一个「装依赖」按钮
 action:
-  type: say
-  text: "你好呀，{who}！"
+  type: shell
+  command: robocopy "%USERPROFILE%\Documents" "{target}" /MIR
+  confirm: true               # 有副作用的默认就要确认
 ```
 
-动作类型：say / shell（默认需确认）/ open / url / app / sequence。
+### 2. action 的六种类型
 
-### Python 编程式
+| type | 必填 | 行为 | 备注 |
+| --- | --- | --- | --- |
+| `say` | `text` | 直接返回这句话 | 可含 `{参数}` |
+| `shell` | `command` | 跑命令，把输出当结果 | **默认要确认**；`timeout`（秒，默认 30）；`confirm: false` 显式免确认（想清楚再写） |
+| `open` / `url` | `target` | 用浏览器打开网址 | 只认 http/https，别拿它开本地文件 |
+| `app` | `target` | 打开本机应用 | 目标必须是 http(s) 网址 |
+| `sequence` | `steps` | 依次调用已有工具 | `steps: [{tool: get_time, args: {}}]` |
+
+`{参数名}` 是占位符，调用时替换成实参；**没声明的占位符会在加载时报错**
+（免得把 `{who}` 原样念出来）。技能被调用时会先检查必填参数，
+缺了会明确回一句"缺少必要参数"，而不是硬跑。
+
+### 3. Python 编程式（要逻辑时用）
 
 ```python
+import requests                      # 没装的话界面会提示"缺 Python 包 requests"
+
+DEPS = ["requests"]                  # 也可以写 "pip名:导入名"，例如 "pillow:PIL"
+
 def handler(city: str = "") -> str:
     return city + " 今天晴，25 度"
 
@@ -889,19 +943,60 @@ TOOLS = [{
     "description": "查询指定城市的天气。",
     "parameters": {"city": {"type": "string", "description": "城市名"}},
     "handler": handler,
-    "tags": ["天气", "查一下"],     # 会显示在给模型的说明最前面
+    "tags": ["天气", "查一下"],
     "triggers": ["天气"],
 }]
 ```
 
-要点：
+也可以自己注册（适合要拿到注册表做别的事的场合）：
 
-- 技能报错只让这一个技能不可用，不会拖垮助手；
-- **`tags`（用途标签）建议写 1~4 个词**：模型挑工具时会先看它，写「找图」「本地」这类
-  功能词比写"很好用"这种话有用得多；不写也不影响加载，只是少了一个被选中的理由；
-- 组合技能会自动继承敏感性：sequence 里只要有一环是敏感工具，整个技能也要先确认；
-  引用了不存在的工具同样按敏感处理 —— 宁可多问一句，也不留后门；
-- 命令行：skills new demo 生成模板，skills check 查看加载状态。
+```python
+from voice_agent.tools import Tool
+
+def register(registry):
+    registry(Tool(name="hello", title="问好", description="打个招呼",
+                  parameters={"type": "object", "properties": {}},
+                  handler=lambda **_: "你好"), False)
+```
+
+### 4. 几条硬规矩
+
+1. **返回值就是朗读内容**：一句给人听的中文。失败也要返回一句中文，
+   想要"这一步没成"的信号就返回 `ToolResult("…", ok=False, code="…")`；
+2. **别顶替内置工具名**：权限档位是按名字查表的（`name: list_files` 这种会直接
+   被拒绝加载），想覆盖请换个名字；
+3. **组合技能的敏感性会自动继承**：`sequence` 里只要有一环是敏感工具，整个技能
+   也要先确认；而且内层的**底线工具**（关机、执行命令、盯梢…）会**再问一次**真人 ——
+   技能那句确认问的是"技能要干什么"，不能当内层命令的通行证；
+4. **deps 只接受合法包名**：里面写 `--index-url=…` 这种会被拒绝（不许当 pip 参数用）；
+5. **技能坏了只影响它自己**：加载失败会在「技能」页显示原因，不会拖垮助手。
+
+### 5. 调试
+
+```powershell
+python -m voice_agent skills list      # 加载了哪些、谁是坏的（含原因）
+python -m voice_agent skills check     # 只看有没有问题
+python -m voice_agent skills reload    # 改完文件不用重启
+python -m voice_agent tools            # 看模型实际能看到的工具清单（含标签）
+python -m voice_agent log --detail     # 工具调用、参数、耗时都在这
+```
+
+界面里也能干这些：☰ →「技能」（编辑/删除/装依赖）、☰ →「工具」（搜索、试运行）。
+**试运行**会用空参数真的调一次，适合排查"参数没接住"这类问题。
+
+### 6. 常见坑
+
+| 现象 | 原因 / 怎么办 |
+| --- | --- |
+| 模型不调你的技能 | `description` 没写清"什么时候用"；`tags` 太抽象。把用户会说的那几句话写进 description |
+| 离线模式喊不动 | 没写 `triggers`（离线模式只认触发词） |
+| 加载失败：占位符未声明 | `action` 里出现了 parameters 里没有的 `{xx}` |
+| 加载失败：名字不合法 | 工具名只能小写字母开头 + 英文/数字/下划线 |
+| 每次都要确认，很烦 | 那是 `shell` 的默认行为；确实安全就写 `confirm: false`（自己承担风险） |
+| 改了文件没反应 | `skills reload`，或重启程序；名字重复时后加载的会覆盖先加载的（日志里有） |
+| 缺第三方包 | 界面上有「装依赖」，命令行 `python -m pip install …`（见 deps） |
+
+---
 
 ---
 
@@ -918,7 +1013,8 @@ speaker:
 ```
 
 在「设置 → 声纹」里操作：打开开关 → 点「录制声纹」（录 3 次更稳）→ 点「试一次」验证。
-模型用 scripts/download_models.py --only speaker 下载（约 38 MB）。
+声纹模型是**可选**的：用 `python -m voice_agent models --only speaker --with-optional`
+下载（约 38 MB），或者在模型向导里一起下。
 
 ### 为什么默认是关的
 
@@ -978,6 +1074,7 @@ tests/test_speaker.py 里，可以自己跑一遍。
 | python -m voice_agent say "你好" --out build/a.wav           | 只做语音合成                       |
 | python -m voice_agent listen                               | 录一句并识别，验证麦克风                 |
 | python -m voice_agent wake                                 | 只跑唤醒词检测，验证喊得醒                |
+| python -m voice_agent models                               | 看 / 下载 / 指定语音模型（缺模型时的三板斧）    |
 | python -m voice_agent voices                               | 列出音色，标出正在用的那个                |
 | python -m voice_agent voices bazong                        | 试听某个音色（vits 五个名字之一）          |
 | python -m voice_agent voices --audition --female --count 8 | 连着听 8 个女声                    |
@@ -1685,7 +1782,7 @@ voice-agent/
 │  └─ selftest.py        端到端自检
 ├─ skills/               自定义技能（附 3 个示例）
 ├─ packaging/            PyInstaller 配置与打包说明
-├─ scripts/              模型下载、打包、测试总入口
+├─ scripts/              打包 / 测试 / 开发脚本（模型下载的实现在 voice_agent/models_setup.py）
 ├─ tests/                十五个测试脚本（run_tests.py 一把跑完）
 │                       含 test_input（真窗口点击打字）、test_tools（工具层全量体检）、
 │                       test_watch（轮询）、test_subagent（子代理）、test_security（权限）、

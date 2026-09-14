@@ -271,7 +271,8 @@ class HomePage(Page):
         if snapshot.get("last_error"):
             return "启动失败：" + str(snapshot["last_error"])
         if missing:
-            return "缺少模型：" + "、".join(missing) + "（运行 python scripts/download_models.py）"
+            return ("缺少模型：" + "、".join(missing)
+                    + "（菜单 ☰ →「语音模型」可以自动下载，或指到已有的模型目录）")
         if state == "off":
             return theme.STATE_HINTS["off"]
         if state == "listen":

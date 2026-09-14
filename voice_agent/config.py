@@ -24,11 +24,34 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config.example.yaml"
 
-# 模型目录候选，按顺序探测
-MODEL_DIR_CANDIDATES = (
+# 老布局的模型目录（程序目录旁边 / 隔壁项目）。新布局由 models_dir_candidates() 拼。
+LEGACY_MODEL_DIRS = (
     PROJECT_ROOT / "models",
     PROJECT_ROOT.parent / "voice-assistant" / "models",
 )
+#: 兼容旧名字
+MODEL_DIR_CANDIDATES = LEGACY_MODEL_DIRS
+
+
+def models_dir_candidates(explicit: Any = None) -> tuple[Path, ...]:
+    """模型目录的探测顺序（谁在前用谁）。
+
+    1. 显式指定的（配置里写 models_dir / paths.models_dir，或环境变量）；
+    2. **<数据目录>/models** —— 自动下载就装在这里，和 build/、logs/、downloads/
+       同一个父目录，用户备份/迁移只要搬一个目录；
+    3. 程序目录/models、../voice-assistant/models —— 老用户的现成布局，不能让人重下。
+    """
+    from . import paths  # noqa: PLC0415 - 放函数里，避免模块级循环导入
+
+    order: list[Path] = []
+    if explicit:
+        order.append(Path(str(explicit)).expanduser())
+    env = os.environ.get("VOICE_AGENT_MODELS_DIR", "").strip()
+    if env:
+        order.append(Path(env).expanduser())
+    order.append(paths.data_dir() / "models")
+    order.extend(LEGACY_MODEL_DIRS)
+    return tuple(order)
 
 # sherpa-onnx 官方模型包名（scripts/download_models.py 会下到这些目录里）
 KWS_DIR = "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
@@ -604,6 +627,24 @@ class Config:
         return changed
 
     # -- 模型可用性 -------------------------------------------------------
+    @property
+    def auto_models_dir(self) -> Path:
+        """自动下载会装到哪：<数据目录>/models（和日志、下载缓存同一个父目录）。"""
+        from . import paths  # noqa: PLC0415
+
+        return paths.data_dir() / "models"
+
+    def models_help(self) -> str:
+        """缺模型时给用户看的那几句（打包版和源码运行都走得通）。"""
+        base = ("自动下载：python -m voice_agent models --download"
+                "（桌面版打开时会直接问你，也可以点「关于 → 模型」）\n"
+                "  下载位置：" + str(self.auto_models_dir) + "（和日志、下载缓存同一个目录）\n"
+                "  已经有模型：python -m voice_agent models --dir D:\\path\\to\\models")
+        if getattr(sys, "frozen", False):
+            base += ("\n  （打包版就在安装目录里：把 models 文件夹整体放进 "
+                     + str(PROJECT_ROOT) + " 也行）")
+        return base
+
     def has(self, *names: str) -> bool:
         return all(name in self.models for name in names)
 
@@ -612,18 +653,9 @@ class Config:
         missing = [n for n in names if n not in self.models]
         if missing:
             detail = "\n".join("  - " + n + ": " + str(self.models_dir / MODEL_FILES[n]) for n in missing)
-            # 打包版（frozen）exe 旁边没有 scripts/ 也没有 python：
-            # 让它去跑 download_models.py 是条死路，得说清楚"把 models 目录放哪"。
-            if getattr(sys, "frozen", False):
-                # 打包版：exe 旁边就是 PROJECT_ROOT（spec 里 contents_directory='.'）
-                how = ("把已有的 models 目录整个复制到 " + str(PROJECT_ROOT / "models")
-                       + "（每个模型一个子目录、文件名见上面那份清单），"
-                       "细节见打包目录里的 packaging/README.md。")
-            else:
-                how = ("运行  python scripts/download_models.py  下载，"
-                       "或把已有的 models 目录复制到 " + str(PROJECT_ROOT / "models") + "。")
             raise ConfigError(
-                "缺少模型文件（" + str(self.models_dir) + "）：\n" + detail + "\n" + how
+                "缺少模型文件（" + str(self.models_dir) + "）：\n" + detail + "\n"
+                + self.models_help()
             )
         return {n: self.models[n] for n in names}
 
@@ -645,7 +677,9 @@ class Config:
                 raise ConfigError("配置文件顶层必须是映射：" + str(cfg_path))
             raw = normalize_keys(raw)
 
-        models_dir = _detect_models_dir(_get(raw, "models_dir", None))
+        # paths.models_dir 是新的写法（和 paths.data_dir 一伙），models_dir 是老的
+        models_dir = _detect_models_dir(
+            _get(raw, "models_dir", None) or _get(raw, "paths.models_dir", None))
         models, missing = _resolve_models(models_dir)
         # 用 dataclass 自己的默认值兜底，别在别处再抄一份列表 —— 抄漏了就会出现
         # 「默认值改了但配置没写时仍然是旧值」这种极难发现的问题。
@@ -802,13 +836,14 @@ class Config:
         )
 
 
-def _detect_models_dir(explicit: Any) -> Path:
-    if explicit:
-        return Path(str(explicit)).expanduser().resolve()
-    for candidate in MODEL_DIR_CANDIDATES:
+def _detect_models_dir(explicit: Any = None) -> Path:
+    """找出该用哪个模型目录（见 models_dir_candidates 的顺序）。"""
+    candidates = models_dir_candidates(explicit)
+    for candidate in candidates:
         if (candidate / "silero_vad.onnx").is_file() or (candidate / ASR_DIR).is_dir():
-            return candidate
-    return MODEL_DIR_CANDIDATES[0]
+            return Path(candidate).expanduser().resolve()
+    # 一个都没有：把"自动下载会装到哪"告诉调用方（第一个候选就是它）
+    return Path(candidates[0]).expanduser().resolve()
 
 
 def _resolve_models(root: Path) -> tuple[dict[str, Path], list[str]]:

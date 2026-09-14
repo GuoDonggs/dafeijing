@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import time
 from pathlib import Path
 
-from . import __version__, audio as audio_io, tools
+from . import __version__, audio as audio_io, models_setup, paths, tools
 from . import voices as voice_table
 from .agent import VoiceAgent
 from .config import PROJECT_ROOT, Config, ConfigError, MODEL_DIR_CANDIDATES
@@ -42,10 +43,8 @@ def _load(args) -> Config:
 
 
 def cmd_run(args) -> int:
-    cfg = _load(args)
-    if cfg.missing_models:
-        print("缺少模型：" + "、".join(cfg.missing_models), file=sys.stderr)
-        print("先运行  python scripts/download_models.py", file=sys.stderr)
+    cfg = _ensure_models(args)
+    if cfg is None:
         return 2
     agent = VoiceAgent(cfg, log=_log)
     print("加载模型中……", flush=True)
@@ -147,6 +146,187 @@ def _save_voice_setting(cfg_path: Path, value: str, engine: str) -> str:
         cfg_path.with_suffix(cfg_path.suffix + ".bak").write_text(text, encoding="utf-8")
     cfg_path.write_text(new_text, encoding="utf-8")
     return ""
+
+
+
+
+def _save_paths_setting(cfg_path: Path, key: str, value: str) -> str:
+    """把 paths.<key> 写进配置文件（只动那一行，保留注释）。
+
+    和 _save_voice_setting 同一套路子：文本级替换 + 落盘前用 Config.load 验一遍。
+    返回空串表示成功，否则是要给用户看的原因。
+    """
+    text = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
+    out: list[str] = []
+    in_paths = False
+    seen_paths = False
+    done = False
+    for line in text.splitlines():
+        if re.match(r"^paths:\s*$", line):
+            in_paths, seen_paths = True, True
+            out.append(line)
+            continue
+        if in_paths and line and not line[0].isspace():
+            in_paths = False
+        if in_paths and re.match(r"^\s+" + re.escape(key) + r"\s*:", line):
+            out.append('  ' + key + ': ' + json.dumps(value, ensure_ascii=False))
+            done = True
+            continue
+        out.append(line)
+    if not seen_paths:
+        out.extend(["", "paths:", "  " + key + ": " + json.dumps(value, ensure_ascii=False)])
+    elif not done:
+        head = next(i for i, ln in enumerate(out) if re.match(r"^paths:\s*$", ln))
+        out.insert(head + 1, "  " + key + ": " + json.dumps(value, ensure_ascii=False))
+    new_text = "\n".join(out).rstrip("\n") + "\n"
+    probe = cfg_path.with_name(cfg_path.name + ".probe")
+    try:
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        probe.write_text(new_text, encoding="utf-8")
+        Config.load(probe)
+    except Exception as exc:  # noqa: BLE001
+        return "配置没有写入（校验没通过）：" + str(exc)[:140]
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+    if cfg_path.is_file():
+        cfg_path.with_suffix(cfg_path.suffix + ".bak").write_text(text, encoding="utf-8")
+    cfg_path.write_text(new_text, encoding="utf-8")
+    return ""
+
+
+def _models_report(cfg) -> dict:
+    """当前模型状态（给 CLI 和 GUI 共用的一句话 + 结构化数据）。"""
+    info = models_setup.status(cfg.models_dir)
+    info["auto_dir"] = str(paths.data_dir() / "models")
+    return info
+
+
+def _print_models(cfg) -> None:
+    info = _models_report(cfg)
+    print("模型目录：" + info["dir"])
+    for key, spec in models_setup.MODEL_SPECS.items():
+        mark = "已就绪" if key in info["ready"] else ("缺少（可选）" if spec.optional else "缺少")
+        print("  [" + mark + "] " + spec.label + "（约 " + str(spec.size_mb) + " MB）")
+    if info["missing"]:
+        print("\n自动下载会装到这里（和日志、下载缓存在同一个目录下）：" + info["auto_dir"])
+        print("  下载：python -m voice_agent models --download")
+        print("  已有模型：python -m voice_agent models --dir D:\\path\\to\\models")
+    else:
+        print("\n需要的模型都齐了。")
+
+
+def cmd_models(args) -> int:
+    """看模型状态 / 自动下载 / 指定已有的模型目录。"""
+    cfg = _load(args)
+    if getattr(args, "dir", None):
+        chosen = models_setup.resolve_models_root(Path(args.dir))
+        if chosen is None:
+            print("这个目录里没有找到模型文件：" + str(args.dir), file=sys.stderr)
+            print("（应该能看到 silero_vad.onnx、sherpa-onnx-* 这些文件/子目录）", file=sys.stderr)
+            return 2
+        problem = _save_paths_setting(cfg.config_path, "models_dir", str(chosen))
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
+        print("已经把模型目录记到配置里：" + str(chosen))
+        cfg = _load(args)
+        _print_models(cfg)
+        return 0 if not cfg.missing_models else 1
+    if getattr(args, "download", False):
+        target = Path(models_setup.status(cfg.models_dir)["dir"])
+        if cfg.missing_models and not (target / "silero_vad.onnx").exists() and target != Path(
+                str(paths.data_dir() / "models")).resolve():
+            # 一个模型都没有：装到"自动下载目录"，和缓存同一个父目录
+            target = Path(paths.data_dir() / "models")
+        print("下载到：" + str(target))
+        result = models_setup.download(
+            target, keys=getattr(args, "only", None) or None,
+            mirror=getattr(args, "mirror", None),
+            include_optional=bool(getattr(args, "with_optional", False)),
+            log=lambda line: print(line, flush=True))
+        print()
+        if result["failed"]:
+            print("以下模型没装好：" + "、".join(result["failed"]), file=sys.stderr)
+            return 1
+        print("模型目录：" + result["dir"])
+        print("下一步：python -m voice_agent selftest")
+        return 0
+    _print_models(cfg)
+    return 0 if not cfg.missing_models else 1
+
+
+def _ensure_models(args):
+    """缺模型时问用户怎么办：自动下载 / 指定目录 / 退出。
+
+    打包版里没有 scripts/、也没有 python，所以这条交互必须在包里 ——
+    models_setup 就是为此搬进来的。返回可用的 Config，用户选了退出则返回 None。
+    """
+    cfg = _load(args)
+    if not cfg.missing_models:
+        return cfg
+    info = _models_report(cfg)
+    print("缺少语音模型：" + "、".join(
+        models_setup.MODEL_SPECS[k].label for k in info["missing"]), file=sys.stderr)
+    print("  当前模型目录：" + info["dir"], file=sys.stderr)
+    print("  自动下载会装到：" + info["auto_dir"] + "（和日志、下载缓存在同一个目录下）",
+          file=sys.stderr)
+    if not (sys.stdin and sys.stdin.isatty()):
+        print("  这是非交互环境，请自己执行：python -m voice_agent models --download",
+              file=sys.stderr)
+        return None
+    print("")
+    print("  1) 自动下载（约 " + str(max(1, info["missing_bytes"] // (1024 * 1024)))
+          + " MB，走国内镜像，断点缓存留在 downloads/）")
+    print("  2) 我已经有模型，指定目录")
+    print("  3) 退出")
+    while True:
+        try:
+            answer = input("请选择 [1/2/3，默认 1]：").strip() or "1"
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if answer == "1":
+            print("开始下载……", flush=True)
+            result = models_setup.download(
+                Path(info["auto_dir"]), include_optional=False,
+                log=lambda line: print(line, flush=True))
+            if result["failed"]:
+                print("有模型没下成功：" + "、".join(result["failed"]), file=sys.stderr)
+                print("可以重跑一次（下好的不会重下）：python -m voice_agent models --download",
+                      file=sys.stderr)
+                return None
+            cfg = _load(args)
+            if not cfg.missing_models:
+                print("模型齐了。\n")
+                return cfg
+            print("下完了但还是找不到，请检查 " + str(cfg.models_dir), file=sys.stderr)
+            return None
+        if answer == "2":
+            try:
+                raw = input("模型目录（含 silero_vad.onnx 的那个）：").strip().strip('"')
+            except (EOFError, KeyboardInterrupt):
+                return None
+            if not raw:
+                continue
+            chosen = models_setup.resolve_models_root(Path(raw))
+            if chosen is None:
+                print("这个目录里没找到模型文件，再试一次（或按 3 退出）。")
+                continue
+            problem = _save_paths_setting(cfg.config_path, "models_dir", str(chosen))
+            if problem:
+                print(problem, file=sys.stderr)
+                return None
+            print("已经把模型目录记到配置里：" + str(chosen))
+            cfg = _load(args)
+            if not cfg.missing_models:
+                print("模型齐了。\n")
+                return cfg
+            print("这个目录里还缺：" + "、".join(cfg.missing_models) + "，再选一次？")
+        else:
+            print("已取消。")
+            return None
 
 
 def _audition(cfg, engine: str, sids: list[int], text: str | None) -> int:
@@ -550,6 +730,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_log.add_argument("--prune", action="store_true", help="只清理旧日志")
     p_log.add_argument("--keep-days", type=int, default=14, help="清理时保留几天")
     p_log.set_defaults(func=cmd_log)
+
+    p_models = sub.add_parser("models", parents=[common],
+                              help="看 / 下载 / 指定语音模型（缺模型时也能用）")
+    p_models.add_argument("--download", action="store_true", help="下载缺少的模型")
+    p_models.add_argument("--dir", metavar="PATH", help="指定已有的模型目录（会记进配置）")
+    p_models.add_argument("--only", nargs="*", choices=sorted(models_setup.MODEL_SPECS),
+                          help="只处理指定模型")
+    p_models.add_argument("--with-optional", action="store_true", help="连可选模型一起下")
+    p_models.add_argument("--mirror", help="GitHub 镜像前缀，传空字符串表示直连")
+    p_models.set_defaults(func=cmd_models)
 
     sub.add_parser("doctor", help="环境体检").set_defaults(func=cmd_doctor)
     sub.add_parser("selftest", help="端到端自检").set_defaults(func=cmd_selftest)
