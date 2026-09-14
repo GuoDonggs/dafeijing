@@ -390,9 +390,17 @@ class Tts:
 
         def build(provider: str):
             paths = cfg.require("tts_model", "tts_tokens", "tts_lexicon")
+            # 多音字修正：模型自带的发音词典只有两万条，大量常用词缺失
+            # （重庆、重阳、行走、会议、成都…），查不到就逐字念，于是读错。
+            # 这里在模型词典上补一层「词 → 正确读音」，出问题自动退回原词典。
+            from . import polyphone  # noqa: PLC0415
+
+            lexicon = polyphone.lexicon_for(
+                Path(paths["tts_lexicon"]),
+                log=lambda line: print(line, file=sys.stderr, flush=True))
             vits = sherpa_onnx.OfflineTtsVitsModelConfig(
                 model=str(paths["tts_model"]),
-                lexicon=str(paths["tts_lexicon"]),
+                lexicon=str(lexicon),
                 tokens=str(paths["tts_tokens"]),
                 data_dir="",
                 dict_dir=str(cfg.tts_dict_dir) if cfg.tts_dict_dir.is_dir() else "",

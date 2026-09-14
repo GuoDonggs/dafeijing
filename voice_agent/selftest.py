@@ -89,7 +89,19 @@ def run(config_path: str | None = None, skip_tools: bool = False) -> bool:
 
     report.check("端点检测模型", load_vad)
     report.check("语音识别模型", lambda: (holder.__setitem__("asr", Asr(cfg)), "paraformer 就绪")[1])  # type: ignore[arg-type]
-    report.check("语音合成模型", lambda: (holder.__setitem__("tts", Tts(cfg)), "VITS 就绪，音色数 " + str(holder["tts"].num_speakers))[1])  # type: ignore[arg-type]
+    def load_tts() -> str:
+        holder["tts"] = Tts(cfg)
+        # 顺带报一下多音字修正：模型词典缺的常用词（重庆、成都…）会被逐字念错，
+        # 我们在这个环节合并了一份带读音修正的词典，用户能看到它有没有生效。
+        from . import polyphone  # noqa: PLC0415
+
+        lexicon = cfg.models.get("tts_lexicon")
+        fixed = len(polyphone.meaningful_entries(lexicon, polyphone.load_user_words())) \
+            if lexicon is not None else 0
+        return ("VITS 就绪，音色数 " + str(holder["tts"].num_speakers)
+                + "，多音字修正 " + str(fixed) + " 个词")
+
+    report.check("语音合成模型", load_tts)
 
     tts: Tts | None = holder.get("tts")
     asr: Asr | None = holder.get("asr")

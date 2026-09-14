@@ -125,6 +125,107 @@ def main() -> int:
         check("vits 按名字选", V.resolve("vits", loaded.tts.voice) == 4, loaded.tts.voice)
 
     print()
+    print("=== 多音字：拼音 → 模型词典的注音符号 ===")
+    from voice_agent import polyphone as P
+
+    check("chóng → ㄔ ㄨ ㄥ ˊ",
+          P.syllable_tokens("chóng") == ["ㄔ", "ㄨ", "ㄥ", "ˊ"],
+          str(P.syllable_tokens("chóng")))
+    check("数字调写法一样认", P.syllable_tokens("chong2") == P.syllable_tokens("chóng"))
+    check("轻声不加声调数字也是 ˙", P.syllable_tokens("bu") == ["ㄅ", "ㄨ", "˙"],
+          str(P.syllable_tokens("bu")))
+    check("zhi 里的 i 不发音", P.syllable_tokens("zhi3") == ["ㄓ", "ˇ"],
+          str(P.syllable_tokens("zhi3")))
+    check("ju/qu/xu 里的 u 是 ü", P.syllable_tokens("ju4") == ["ㄐ", "ㄩ", "ˋ"],
+          str(P.syllable_tokens("ju4")))
+    check("ong → ㄨ ㄥ", P.syllable_tokens("dong1") == ["ㄉ", "ㄨ", "ㄥ", "ˉ"],
+          str(P.syllable_tokens("dong1")))
+    check("iong → ㄩ ㄥ", P.syllable_tokens("xiong2") == ["ㄒ", "ㄩ", "ㄥ", "ˊ"],
+          str(P.syllable_tokens("xiong2")))
+    check("er → ㄦ", P.syllable_tokens("er2") == ["ㄦ", "ˊ"], str(P.syllable_tokens("er2")))
+    check("整串读音和逐字列表两种写法等价",
+          P.word_tokens("chóng qìng") == P.word_tokens(["chóng", "qìng"])
+          == P.word_tokens(["chóng qìng"]),
+          str(P.word_tokens("chóng qìng")))
+    check("认不出来的音节不硬编（返回空）", P.syllable_tokens("zzz9") == [])
+
+    print()
+    print("=== 多音字：只在「模型读错」时才写进合并词典 ===")
+    fake = Path(tempfile.mkdtemp(prefix="va-lex-")) / "lexicon.txt"
+    # 造一份迷你词典：重庆 读错（zhòng），银行 读对，成都 干脆没有
+    fake.write_text("重庆 ㄓ ㄨ ㄥ ˋ ㄑ ㄧ ㄥ ˋ\n\n银行 ㄧ ㄣ ˊ ㄏ ㄤ ˊ\n\n",
+                    encoding="utf-8")
+    entries = P.meaningful_entries(fake)
+    check("模型读错的词要修正（重庆）", "重庆" in entries, str(entries.get("重庆")))
+    check("模型读对的词不动它（银行）", "银行" not in entries)
+    check("模型没有的词补上（成都）", "成都" in entries)
+    check("用户自己加的词也算（行不行）",
+          "行不行" in P.meaningful_entries(fake, {"行不行": "xíng bu xíng"}))
+    check("拼音写错了就不收（宁可不改，也不要写错）",
+          "行不行" not in P.meaningful_entries(fake, {"行不行": "zzz"}))
+
+    print()
+    print("=== 多音字：合并词典 ===")
+    out = fake.parent / "merged.txt"
+    merged = P.merge_lexicon(fake, out)
+    check("合并成功", merged is not None and out.is_file())
+    table = P.read_lexicon(out)
+    check("修正后的读音写进去了",
+          table.get("重庆") == " ".join(P.word_tokens("chóng qìng")), str(table.get("重庆")))
+    check("模型原本就对的词还在（银行）", table.get("银行") == "ㄧ ㄣ ˊ ㄏ ㄤ ˊ")
+    check("同名的旧条目被替换掉，不会留两条",
+          sum(1 for ln in out.read_text(encoding="utf-8").splitlines()
+              if ln.startswith("重庆 ")) == 1)
+    again = P.merge_lexicon(fake, out)
+    check("重复生成内容稳定（幂等）", again is not None
+          and P.read_lexicon(out) == table)
+    check("合并词典用空行分隔条目（模型词典就是这个格式）",
+          "\n\n" in out.read_text(encoding="utf-8"))
+
+    print()
+    print("=== 多音字：用户词表 + 缓存失效 ===")
+    P.save_user_words({"测试词一": "cè shì cí yī"})
+    check("写进去还能读出来", P.load_user_words() == {"测试词一": "cè shì cí yī"})
+    first = P.lexicon_for(fake)
+    check("给 TTS 的是合并后的词典", P.read_lexicon(first).get("测试词一") is not None,
+          str(first))
+    P.save_user_words({"测试词二": "cè shì cí èr"})
+    second = P.lexicon_for(fake)
+    check("改了词表会重新合并（缓存要失效）",
+          P.read_lexicon(second).get("测试词二") is not None)
+    check("旧的词不再出现在词典里", P.read_lexicon(second).get("测试词一") is None)
+    check("词典读不出来时退回原词典（不抛异常）",
+          P.lexicon_for(fake.parent / "不存在.txt") == fake.parent / "不存在.txt")
+
+    print()
+    print("=== 多音字：拿模型真实词典对表（有模型才跑） ===")
+    cfg = Config.load()
+    real = cfg.models.get("tts_lexicon")
+    if real is None:
+        print("  [跳过] 没装语音合成模型")
+    else:
+        model_table = P.read_lexicon(real)
+        from pypinyin import Style, pinyin
+
+        checked = explained = 0
+        for ch, symbols in model_table.items():
+            if len(ch) != 1 or not ("\u4e00" <= ch <= "\u9fff"):
+                continue
+            checked += 1
+            readings = {s[0] for s in pinyin(ch, style=Style.TONE3, heteronym=True)}
+            if any(" ".join(P.syllable_tokens(r)) == symbols for r in readings):
+                explained += 1
+        ratio = explained / max(1, checked)
+        check("换算表能解释模型词典里 " + str(checked) + " 个字条的读音（%.1f%%）"
+              % (ratio * 100), ratio > 0.99, "%.3f" % ratio)
+        entries = P.meaningful_entries(real)
+        check("内置词表里每个词都是「模型缺的或读错的」",
+              len(entries) > 100,
+              str(len(entries)) + " 个词")
+        check("抽查：重庆/成都/行走 都需要修正",
+              all(w in entries for w in ("重庆", "成都", "行走")))
+
+    print()
     if FAILED:
         print("失败 " + str(len(FAILED)) + " 项：" + "、".join(FAILED))
         return 1

@@ -458,6 +458,37 @@ tts:
 > （那是一串路径和引号），只说"要执行命令：列出文件，确认吗？"——
 > 认不出动作时就是"要执行命令，确认吗？"。
 
+### 多音字念错了？（重庆、成都、行走…）
+
+模型自带的发音词典只有 **2 万条**，而且是「jieba 切词 → 查词典」的玩法：
+查得到的词念得对（银行 yín háng、长大 zhǎng dà），**查不到的就退回一个字一个字念**，
+而单个汉字只存一个最常用的读音 —— 于是：
+
+| 文本 | 以前 | 现在 |
+| --- | --- | --- |
+| 重庆 | zhòng qìng | **chóng qìng** |
+| 成都 | chéng dōu | **chéng dū** |
+| 行走 / 会议 / 归还 / 朝阳 / 调研 / 便宜 / 露面 / 给予 | 逐字念（多半念错） | 按词念对 |
+
+做法：**不动模型，在它自己的词典上补一层**。内置了一张常用多音字词表（290 多个词，
+读音取自 pypinyin 的词组读音），启动合成时按模型词典的格式（注音符号 + 声调）合并成
+一份新词典放在 `<数据目录>/tts/`，而且只把「模型缺的或读错的」词写进去。
+
+**你自己的人名、公司名、术语**也能加：
+
+```powershell
+python -m voice_agent voices --fix-word 行不行=xíng bu xíng   # 声调符号、数字调都行
+python -m voice_agent voices --fix-word 重汽=zhong4 qi4
+python -m voice_agent voices --fixes                          # 看现在有哪些修正
+python -m voice_agent voices --fix-remove 重汽                # 删掉
+```
+
+写完不用重启：下次合成会自动重建合并词典（缓存按模型词典 + 你的词表指纹失效）。
+词表本身是纯文本，也能直接编辑：`<数据目录>/tts/polyphone.yaml`。
+
+> 合并词典做不出来（没装 pypinyin、YAML 写坏、磁盘满）时**自动退回模型原词典**，
+> 绝不会因为这个小功能让语音合成起不来。
+
 ### 声音不好听，往往是这三件事
 
 1. **音色选错**（上面那条）—— 影响最大，且最容易被忽略；
@@ -1079,6 +1110,8 @@ tests/test_speaker.py 里，可以自己跑一遍。
 | python -m voice_agent voices bazong                        | 试听某个音色（vits 五个名字之一）          |
 | python -m voice_agent voices --audition --female --count 8 | 连着听 8 个女声                    |
 | python -m voice_agent voices --set bazong                  | 把音色写进配置文件                    |
+| python -m voice_agent voices --fixes                        | 看多音字读音修正表（TTS 发音词典）          |
+| python -m voice_agent voices --fix-word 重庆=chóng qìng     | 加一个多音字读音（人名/术语很有用）           |
 | python -m voice_agent skills list / check / reload         | 技能管理：列出、校验、重新加载              |
 | python -m voice_agent skills new demo                      | 生成一个技能模板（--force 覆盖同名文件）       |
 | python -m voice_agent tools                                | 列出全部工具                       |

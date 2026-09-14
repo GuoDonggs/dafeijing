@@ -19,6 +19,8 @@ build/dist-user-data/
 build/installer/
 
 # —— 运行期落盘的数据 ——
+# 多音字修正：合并后的发音词典（1MB 多，随时能从模型词典重建）和用户词表
+build/tts/
 build/memory.json
 build/selftest.wav
 build/keywords.generated.txt

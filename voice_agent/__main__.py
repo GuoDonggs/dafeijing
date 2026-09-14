@@ -351,6 +351,63 @@ def _audition(cfg, engine: str, sids: list[int], text: str | None) -> int:
     return 0
 
 
+def _cmd_polyphone(cfg, fix_word: str | None, fix_remove: str | None) -> int:
+    """看 / 改多音字读音表。
+
+    模型自带的发音词典只有两万条，缺的常用词会被逐字念（「重庆」→ zhòng qìng）。
+    这里让用户把人名、公司名、术语的读音写进去，语音合成会用一份合并词典。
+    """
+    from . import polyphone
+
+    model_lexicon = cfg.models.get("tts_lexicon")
+    if model_lexicon is None:
+        print("还没装语音合成模型（先 python -m voice_agent models --download）")
+        return 2
+    words = polyphone.load_user_words()
+    if fix_remove:
+        key = str(fix_remove).strip()
+        if key in words:
+            words.pop(key)
+            polyphone.save_user_words(words)
+            print("已删除：" + key)
+        else:
+            print("词表里没有「" + key + "」")
+        return 0
+    if fix_word:
+        raw = str(fix_word).strip()
+        if "=" not in raw:
+            print("写法：--fix-word 词=拼音，例如 --fix-word 重庆=chóng qìng")
+            return 2
+        word, readings = raw.split("=", 1)
+        word, readings = word.strip(), readings.strip()
+        if not word or not readings:
+            print("词和拼音都要给：--fix-word 词=拼音")
+            return 2
+        if not polyphone.word_tokens(readings):
+            print("这个拼音我认不出来：" + readings
+                  + "（写「chóng qìng」或「chong2 qing4」都行）")
+            return 2
+        words[word] = readings
+        polyphone.save_user_words(words)
+        print("已记下：" + word + " → " + readings)
+        print("  文件：" + str(polyphone.user_table_path()))
+        print("  下次合成生效（合并词典会自动重建）")
+        return 0
+
+    builtin = polyphone.meaningful_entries(model_lexicon, words)
+    user_only = {w: polyphone.word_tokens(r) for w, r in words.items()}
+    print("当前生效的多音字修正：" + str(len(builtin)) + " 个词")
+    print("  内置：" + str(len([w for w in builtin if w not in words])) + " 个"
+          "（模型词典里缺的或读错的常用词）")
+    print("  你自己加的：" + str(len(user_only)) + " 个"
+          + ("（" + "、".join(list(words)[:6]) + "）" if words else ""))
+    print("  词典文件：" + str(polyphone.user_table_path()))
+    print("\n加一个词：python -m voice_agent voices --fix-word 重庆=chóng qìng")
+    print("删一个词：python -m voice_agent voices --fix-remove 重庆")
+    print("改完不用重启程序，下次合成就会用新的词典。")
+    return 0
+
+
 def cmd_voices(args) -> int:
     """列音色表、试听、改配置。
 
@@ -359,6 +416,12 @@ def cmd_voices(args) -> int:
     """
     cfg = _load(args)
     engine = voice_table.engine_of(args.engine or cfg.tts.engine)
+
+    # ── 多音字读音修正（TTS 的发音词典）──
+    if (getattr(args, "fixes", False) or getattr(args, "fix_word", None)
+            or getattr(args, "fix_remove", None)):
+        return _cmd_polyphone(cfg, getattr(args, "fix_word", None),
+                              getattr(args, "fix_remove", None))
 
     if args.save:
         sid = voice_table.resolve(engine, args.save)
@@ -719,6 +782,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_voices.add_argument("--start", type=int, default=0, help="--audition 从第几个开始")
     p_voices.add_argument("--count", type=int, default=8, help="--audition 听几个")
     p_voices.add_argument("--text", help="试听用的文本")
+    p_voices.add_argument("--fixes", action="store_true",
+                          help="看多音字读音修正表（TTS 发音词典）")
+    p_voices.add_argument("--fix-word", metavar="词=拼音",
+                          help="加一个多音字读音，例如 --fix-word 重庆=chóng qìng")
+    p_voices.add_argument("--fix-remove", metavar="词", help="删掉一个多音字读音")
     p_voices.set_defaults(func=cmd_voices)
 
     sub.add_parser("tools", help="列出可用工具").set_defaults(func=cmd_tools)

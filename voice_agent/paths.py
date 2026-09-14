@@ -62,6 +62,8 @@ _LAYOUT = {
     # 用户想搬走/备份/清理，只要动这一个目录。
     "models": "models",
     "downloads": "downloads",
+    # 多音字读音修正：合并后的发音词典 + 用户自己的词表
+    "tts": "tts",
 }
 
 
