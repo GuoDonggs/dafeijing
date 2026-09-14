@@ -309,6 +309,71 @@ def main() -> int:
     check("而查映射表不用确认",
           not security.check(mapping, {"action": "list"}).needs_confirm)
 
+    # 放开模式：软提醒（参数看着吓人的那种）直接做，只有"这一步本身会执行任意东西"
+    # 的硬闸门才继续问。用户的原话是"放开模式下仍然无法进行部分权限操作" ——
+    # 以前 app_map 写表、window/clear_marks 空参数、resize_image 另存都会被拦，
+    # 拿不到确认通道时更是直接拒绝。
+    security.configure(make_config("danger-full-access"))
+    check("放开模式：写映射表不再确认",
+          security.check(mapping, {"action": "add", "name": "x", "target": "y"}).allowed)
+    check("放开模式：window 空参数不再确认",
+          security.check(tools.REGISTRY["window"], {}).allowed)
+    check("放开模式：clear_marks 空参数不再确认",
+          security.check(tools.REGISTRY["clear_marks"], {}).allowed)
+    check("放开模式：resize_image 另存到指定路径不再确认",
+          security.check(art, {"image": "a.png", "out": write_target}).allowed)
+
+    # 底线名单**以用户写的那份为准**：以前会把内建的六个并上去，于是
+    # "我只想让 write_file 要确认"变成了"内建那六个也照样问"。
+    custom = make_config("danger-full-access")
+    custom.security.floor_tools = ["write_file"]
+    security.configure(custom)
+    check("自定义底线名单：写的那一个要确认",
+          security.check(tools.REGISTRY["write_file"], {}).needs_confirm)
+    check("自定义底线名单：没写的（执行命令）不再确认",
+          security.check(tools.REGISTRY["run_command"], {}).allowed)
+    check("快照里报的就是用户写的那份", security.snapshot()["floor"] == ["write_file"],
+          str(security.snapshot()["floor"]))
+    loose = make_config("danger-full-access")
+    loose.security.floor_tools = []
+    loose.security.keep_floor_when_empty = False
+    security.configure(loose)
+    check("底线清空 + keep=false：执行命令也不问了",
+          security.check(tools.REGISTRY["run_command"], {}).allowed)
+    kept = make_config("danger-full-access")
+    kept.security.floor_tools = []
+    kept.security.keep_floor_when_empty = True
+    security.configure(kept)
+    check("底线清空 + keep=true（默认）：内建那几个仍然问",
+          security.check(tools.REGISTRY["run_command"], {}).needs_confirm)
+    security.configure(make_config("workspace-write"))
+
+    # 桌面版的确认通道：引擎没启动时弹一个模态框（console.confirm_hook），
+    # 点了"执行"就真的能做 —— 以前这条路永远返回 False，等于没有通道。
+    from voice_agent.console import Console
+
+    probe_console = Console.__new__(Console)
+    probe_console.log = lambda *_a, **_k: None
+    probe_console.cfg = make_config("workspace-write")
+    probe_console.confirm_hook = None
+    check("没有对话框时 confirm_channel() 是 None（工具层会如实说没有通道）",
+          probe_console.confirm_channel() is None)
+    probe_console.confirm_hook = lambda _q: True
+    check("有对话框时 confirm_channel() 可用",
+          callable(probe_console.confirm_channel()))
+    target = Path(_BUILD.name) / "confirmed.txt"
+    outcome = tools.call_result("write_file", {"path": str(target), "content": "ok"},
+                                on_confirm=probe_console.confirm_channel())
+    check("标准模式下点了「执行」就真的写进去",
+          outcome.ok and target.is_file(), outcome.text[:40])
+    probe_console.confirm_hook = lambda _q: False
+    blocked = tools.call_result("write_file", {"path": str(Path(_BUILD.name) / "no.txt"),
+                                               "content": "no"},
+                                on_confirm=probe_console.confirm_channel())
+    check("点「取消」就不执行", not blocked.ok and blocked.text == tools.CANCEL_REPLY,
+          blocked.text[:30])
+    security.configure(make_config())
+
     # open_app 打开"命令类"映射 = 一条免确认的任意命令通道（实测能把 run_command
     # 的底线名单整个绕过去）。所以只要名字在表里指向命令，就必须先问用户。
     from voice_agent import screen as screen_mod

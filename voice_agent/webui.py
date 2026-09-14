@@ -194,10 +194,13 @@ def _make_handler(console: Console):
                     agent = console.ensure_agent()
                     if not agent.running:
                         console.log("[ui] 文字指令（引擎未启动）：" + text)
-                        reply = agent.ask(text, speak=False, confirm=console.web_confirm)
+                        # 没有确认通道就传 None：工具层会如实回"没有确认通道，这一步
+                        # 没执行"，而不是拿一个永远 False 的通道谎称"用户取消了"。
+                        reply = agent.ask(text, speak=False, confirm=console.confirm_channel())
                         if reply == tools.CANCEL_REPLY:
                             reply = ("这条指令属于敏感操作，需要语音确认。"
-                                     "请先点右上角「启动监听」，再对着麦克风说一次。")
+                                     "请先点右上角「启动监听」，再对着麦克风说一次"
+                                     "（或者在桌面版里操作，那边可以弹确认框）。")
                         return self._json({"ok": True, "reply": reply, "spoke": False})
                     agent.dispatch(text)
                     return self._json({"ok": True, "reply": "", "spoke": True})

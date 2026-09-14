@@ -406,7 +406,8 @@ class ChatPage(Page):
 
         def work() -> None:
             try:
-                reply = agent.ask(text, speak=False, confirm=self.console.web_confirm)
+                # 桌面版：引擎没启动时走界面里的模态确认框（console.confirm_hook）
+                reply = agent.ask(text, speak=False, confirm=self.console.confirm_channel())
                 if reply == CANCEL_REPLY:
                     reply = ("这条指令属于敏感操作，需要语音确认。"
                              "先启动监听，再对着麦克风说一次。")
@@ -639,7 +640,9 @@ class ToolsPage(Page):
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             args = dialog.value
-        result = self.console.call_tool(name, args)
+        # 用户亲手点了「试运行」并填了参数 = 明确意图：allow_sensitive 让它不要
+        # 再被"没有确认通道"挡下（权限模式、deny_tools、只读档仍然照旧生效）
+        result = self.console.call_tool(name, args, allow_sensitive=True)
         box = QMessageBox(self)
         box.setWindowTitle("试运行结果")
         box.setText(str(result.get("result")) if result.get("ok") else str(result.get("error")))
@@ -972,10 +975,12 @@ SETTING_SECTIONS: list[tuple[str, list[tuple]]] = [
         ("security.always_confirm", "必须确认的工具",
          "在这些工具上额外要求确认（逗号隔开）。关机和执行命令本来就必须确认", "text", None),
         ("security.floor_tools", "放开模式下的底线",
-         "「放开」模式下**仍然要确认**的工具。想真的完全不问，就把这里清空"
-         "并把下一项关掉 —— 不建议：执行命令等于把电脑交出去", "text", None),
+         "「放开」模式下**仍然要确认**的工具。**写了就以你写的为准**（不再自动并上"
+         "内建那几个）；想真的完全不问，就把这里清空并把下一项关掉 —— 不建议："
+         "执行命令等于把电脑交出去", "text", None),
         ("security.keep_floor_when_empty", "清空底线时保留内置的那几个",
-         "关掉之后，上面清空 = 连执行命令/关机都不再确认", "bool", None),
+         "只在上面**留空**时起作用：开着（默认）= 仍然问执行命令/关机那几个；"
+         "关掉 = 连它们也不再确认", "bool", None),
         ("security.allow_insecure", "允许明文 HTTP 模型地址",
          "关着时：非本机的 http 地址会自动降到只读（那种链路上任何人都能改写模型的回答）",
          "bool", None),

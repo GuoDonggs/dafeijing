@@ -21,7 +21,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -69,6 +69,10 @@ class Console:
         #: 界面注册的「重启 / 退出程序」实现（PyQt 窗口接管；
         #: 命令行和网页版没有，就走 agent 的默认路径）
         self.app_hook = None
+        #: 界面注册的「弹一句确认」实现（PyQt 窗口接的是模态对话框）。
+        #: 有了它，引擎没启动时也能确认执行命令这类操作 —— 以前这条路直接
+        #: 返回 False，用户把权限开到"放开"却仍然什么都干不了。
+        self.confirm_hook: Callable[[str], bool] | None = None
         self.logs: deque[dict] = deque(maxlen=LOG_LIMIT)
         # 每条日志一个单调递增的序号。界面靠它判断"哪几条是新的" ——
         # 用下标是不行的：deque 一旦写满就开始从头丢，下标会永远追不上，
@@ -276,13 +280,25 @@ class Console:
         with self._engine_lock:
             self._recording = False
 
-    def web_confirm(self, question: str) -> bool:
-        """网页端没有语音通道时无法完成确认：一律拒绝，并写清楚原因。
+    def confirm_channel(self) -> Callable[[str], bool] | None:
+        """当前能用的确认通道：桌面版有对话框就用它，否则 None（= 没有通道）。
 
-        宁可让用户多点一次「启动监听」，也不能让一个 HTTP 请求把关机、执行命令
-        这类敏感操作默默放行。
+        返回 None 时工具层会回一句"没有确认通道，这一步没执行"——
+        比谎称"用户取消了这次操作"诚实，也比默默放行安全。
         """
-        self.log("[ui] 敏感操作需要语音确认，但引擎未启动，已拒绝：" + question)
+        return self.web_confirm if self.confirm_hook is not None else None
+
+    def web_confirm(self, question: str) -> bool:
+        """没有语音通道时的确认：桌面版弹个对话框，网页版一律拒绝。
+
+        桌面版会把 confirm_hook 接到一个模态框上；网页版什么都没有
+        （token 公开、浏览器不可信），宁可让用户去桌面版点一下，也不能让一个
+        HTTP 请求把关机、执行命令这类操作默默放行。
+        """
+        if self.confirm_hook is not None:
+            return bool(self.confirm_hook(question))
+        self.log("[ui] 这一步需要用户确认，但当前没有确认通道（网页版/引擎未启动）："
+                 + question)
         return False
 
     def ensure_agent(self) -> VoiceAgent:
@@ -899,16 +915,19 @@ class Console:
     def call_tool(self, name: str, args: Any = None, allow_sensitive: bool = False) -> dict:
         """试运行一个工具。
 
-        敏感工具默认拒绝：界面上的按钮不该成为绕过语音确认的后门。
+        权限**交给安全闸门判定**（以前这里自己看 entry.confirm：于是
+        write_file / open_path / lock_screen 这类"exec 档但 confirm=False"的工具
+        即使 allow_sensitive=True 也永远拒，allow_sensitive 实际是个死参数）。
+        allow_sensitive=True 的语义是"调用方就是用户本人、且已经表示了明确意图"
+        （界面上的「试运行」按钮、用户自己点的那一下），此时用"永远同意"的通道；
+        否则用真实通道（桌面版对话框 / 没有就拒绝）。
         """
         tools.autoload_skills()
         entry = tools.REGISTRY.get(str(name or ""))
         if entry is None:
             return {"ok": False, "error": "没有这个工具：" + str(name)}
-        if entry.confirm and not allow_sensitive:
-            return {"ok": False,
-                    "error": "「" + entry.display + "」属于敏感操作，请对着麦克风说一遍再确认"}
-        outcome = tools.call_result(entry.name, args or {})
+        channel = (lambda _question: True) if allow_sensitive else self.confirm_channel()
+        outcome = tools.call_result(entry.name, args or {}, on_confirm=channel)
         self.log("[ui] 试运行 " + entry.name + " → " + str(outcome.text)[:80])
         # 按工具自己的成败上报：以前无论结果如何都回 ok=True，
         # 于是"用户取消了这次操作""被安全闸门拒绝了"都会显示成绿色成功。

@@ -243,6 +243,8 @@ class MainWindow(QWidget):
     marks_select_requested = pyqtSignal(str)
     #: 框选超时/作废：让界面线程把叠加层退出选择模式
     marks_cancel_requested = pyqtSignal()
+    #: 工具线程要弹一个"确认吗"（Qt 的东西只能在界面线程碰）
+    confirm_requested = pyqtSignal(str)
 
     def __init__(self, config_path: Path | None = None, autostart: bool = True) -> None:
         super().__init__()
@@ -263,6 +265,13 @@ class MainWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._size_to_screen()
         self._restore_position()
+
+        # 没有语音通道时（引擎没启动、界面里点"试运行"）也要能确认：
+        # 以前这条路直接返回 False，于是放开模式下"执行命令"这类操作
+        # 全被拒，用户看到的是"明明放开了却什么都干不了"。
+        self._confirm_pending: dict | None = None
+        self.confirm_requested.connect(self._show_confirm_box)
+        self.console.confirm_hook = self._ask_confirm_from_worker
 
         self._build()
         self._bind_shortcuts()
@@ -630,6 +639,51 @@ class MainWindow(QWidget):
         self._logs_dialog = dialog
 
     # ───────────────── 控制 ─────────────────
+
+    # ───────────────── 确认通道（无语音时用对话框）─────────────────
+    def _ask_confirm_from_worker(self, question: str) -> bool:
+        """接口给 Console 用：工作线程里问一句"确认吗"，在界面线程弹模态框。
+
+        超时按**拒绝**处理（fail closed），和语音确认一个口径。
+        """
+        import threading
+
+        if threading.current_thread() is threading.main_thread():
+            return self._confirm_box(question)
+        holder: dict = {"answer": False, "done": threading.Event()}
+        self._confirm_pending = holder
+        self.confirm_requested.emit(question)
+        limit = float(getattr(self.console.cfg.agent.confirm, "timeout_ms", 10000)) / 1000.0
+        if not holder["done"].wait(max(5.0, limit + 5.0)):
+            self.console.log("[ui] 确认超时（没等到你回答），这一步没执行")
+            return False
+        return bool(holder["answer"])
+
+    def _show_confirm_box(self, question: str) -> None:
+        """界面线程：弹框并把答案交回等待中的工作线程。"""
+        holder, self._confirm_pending = self._confirm_pending, None
+        try:
+            answer = self._confirm_box(question)
+        except Exception as exc:  # noqa: BLE001 - 弹框失败也不能把工具线程卡死
+            self.console.log("[ui] 确认框出错：" + str(exc)[:80])
+            answer = False
+        if holder is not None:
+            holder["answer"] = answer
+            holder["done"].set()
+
+    def _confirm_box(self, question: str) -> bool:
+        """真的问一句（默认按钮是「否」：手滑回车不会执行危险操作）。"""
+        box = QMessageBox(self)
+        box.setWindowTitle("需要确认")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(question)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.button(QMessageBox.StandardButton.Yes).setText("执行")
+        box.button(QMessageBox.StandardButton.No).setText("取消")
+        limit = int(getattr(self.console.cfg.agent.confirm, "timeout_ms", 10000))
+        QTimer.singleShot(max(3000, limit), box.reject)
+        return box.exec() == QMessageBox.StandardButton.Yes
 
     def start_engine(self) -> None:
         if self.console.agent is not None and self.console.agent.running:

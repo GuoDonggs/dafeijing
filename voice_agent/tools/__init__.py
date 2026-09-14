@@ -107,6 +107,12 @@ class Tool:
     #: 只有"真的动手"才敏感的补充判断（参数 → 要不要问）。
     #: permission_mode 就是这一类：**查**权限模式不该弹确认，**改**才该。
     confirm_if: Callable[[dict], bool] | None = None
+    #: **硬闸门**：按参数判、而且**放开模式下也要问**的那种。
+    #: 只留给"这一步本身就会执行任意东西"的形状 —— 目前只有 open_app
+    #: 打开 type=command 的映射（那等于一条 run_command，绕不得）。
+    #: 其余"参数看着吓人"的（空参数=最小化全部窗口、写映射表、另存图片）
+    #: 用 confirm_if 就够了：标准模式问一句，放开模式直接做。
+    floor_confirm_if: Callable[[dict], bool] | None = None
     #: "这次调用算不算只读"的补充判断（参数 → 是不是纯查）。
     #: app_map 就是这一类：action=list 是查表，add/alias/remove 是**写文件**；
     #: resize_image 不带 out 只产出到数据目录，带 out 就是往任意路径写。
@@ -157,12 +163,24 @@ class Tool:
         """
         if self.confirm:
             return True
+        if self.hard_confirm(args):      # 硬闸门：任何模式（含放开）都要问
+            return True
         hook = self.confirm_if
         if hook is None:
             return False
         try:
             return bool(hook(dict(args or {})))
         except Exception:  # noqa: BLE001
+            return True
+
+    def hard_confirm(self, args: dict | None = None) -> bool:
+        """这一步是不是"连放开模式都要问一句"（见 floor_confirm_if）。"""
+        hook = self.floor_confirm_if
+        if hook is None:
+            return False
+        try:
+            return bool(hook(dict(args or {})))
+        except Exception:  # noqa: BLE001 - 判不出来就当危险，宁可多问一句
             return True
 
     def reads_only(self, args: dict | None = None) -> bool:

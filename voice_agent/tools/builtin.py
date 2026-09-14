@@ -436,8 +436,10 @@ _register(Tool(
     handler=open_app,
     # 映射表里 type=command 的项会走 shell 执行 —— 实测"先 app_map 写一条命令、
     # 再 open_app 打开它"能把 run_command 的底线名单整个绕过去（两次都不用确认）。
-    # 所以：**这次打开的名字在表里是命令 → 必须先问用户**。
-    confirm_if=lambda args: bool(mapped_command(str(args.get("name") or ""))),
+    # 所以这是**硬闸门**：连放开模式也要问一句（真正执行任意命令的是这一步）。
+    # app_map 的写操作只是软提醒（放开模式直接做）—— 拦住"执行"这一步就足够
+    # 断掉那条链；写表本身不该在放开模式下变成"干不了"。
+    floor_confirm_if=lambda args: bool(mapped_command(str(args.get("name") or ""))),
 ))
 
 _register(Tool(

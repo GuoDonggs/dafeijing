@@ -102,6 +102,8 @@ EXEC_TOOLS = frozenset({
 #: 所以至少要用户亲口点一次头。
 DEFAULT_FLOOR = ("run_command", "power", "kill_process", "restart_self", "quit_self",
                  "start_watch")
+#: 兼容旧名字（配置里没写 floor_tools 时装进 _state["floor"] 的就是它）。
+#: 注意：**不要**再把它和用户配置并集** —— 那会让"自定义底线名单"永远清不掉内置那六个。
 ALWAYS_CONFIRM = frozenset(DEFAULT_FLOOR)
 
 #: 这些工具的结果算"外部内容"：网页、文件、屏幕上的字都可能藏着注入的指令。
@@ -212,8 +214,13 @@ def configure(cfg: Any) -> None:
             _state["floor_enabled"] = True
         else:
             names = {str(x).strip() for x in raw_floor if str(x).strip()}
-            _state["floor_enabled"] = bool(names) or bool(
-                getattr(security, "keep_floor_when_empty", False))
+            keep = bool(getattr(security, "keep_floor_when_empty", False))
+            if not names and keep:
+                # "清空底线名单时保留内置的那几个"：以前靠 check() 里的并集实现，
+                # 结果是**任何**自定义名单都会被并上内置六个；现在在这里真的装回去，
+                # 别的地方不再并集 —— 用户的名单就是他写的那个。
+                names = set(DEFAULT_FLOOR)
+            _state["floor_enabled"] = bool(names) or keep
             _state["floor"] = names
         wanted = str(getattr(security, "mode", "") or "").strip().lower()
         if wanted in MODES:
@@ -389,15 +396,20 @@ def check(tool: Any, args: Any = None) -> Decision:
             text=DELIMITER.format("只读模式下不能" + _verb(tier) + "，这条被拒绝了")
                  + " " + ESCALATION_HINT,
         )
+    # 底线名单以 _state["floor"] 为准，**不再并上 ALWAYS_CONFIRM**：
+    # 配置里没写这一项时 configure() 已经把 DEFAULT_FLOOR 装进去了，并集是多余的；
+    # 而用户**自己写了**名单时，并集会让"我只想让 write_file 需要确认"变成
+    # "内建的六个也照样问" —— 加上"放开模式"就表现成"明明放开了还是什么都干不了"。
     with _lock:
-        floor = ((set(_state["floor"]) | set(ALWAYS_CONFIRM))
-                 if _state["floor_enabled"] else set())
+        floor = set(_state["floor"]) if _state["floor_enabled"] else set()
     force = name in floor or extra_confirm
-    # confirm_if 是**按参数**判的（open_app 打开命令类映射、app_map 写表、
-    # window 空参数最小化全部……）。这类"这一次特别危险"的调用即使在放开模式下
-    # 也要问一句 —— 否则"写一条命令映射 + 打开它"就能把 run_command 的底线绕过去。
-    # 只声明了 confirm=True 的工具不受影响（放开模式下仍然不问，那是上一轮修好的）。
-    if current == "danger-full-access" and not force and not _confirm_if_only(tool, args):
+    # 放开模式下**只保留硬闸门**（floor_confirm_if）：那代表"这一步本身就会执行
+    # 任意东西"，例如 open_app 打开 type=command 的映射 —— 等于一条 run_command。
+    # confirm_if 只是"参数看着吓人"的软提醒（空参数=最小化全部窗口、写映射表、
+    # 另存图片）：标准模式问一句，放开模式直接放行 —— 用户把模式开到放开，
+    # 意思就是别再来问；这些若还要问，拿不到确认通道时会被直接拒绝，
+    # 表现就是"放开模式下仍然什么都干不了"。
+    if current == "danger-full-access" and not force and not _hard_confirm_if(tool, args):
         return Decision(tier=tier)
     if force or tier == "exec" or _wants_confirm(tool, args):
         # 注意：check() 本身**不**消耗限流额度 —— 要等到真的去问用户那一刻
@@ -425,22 +437,16 @@ def in_floor(name: str) -> bool:
     不能当成内层 run_command 的通行证。
     """
     with _lock:
-        floor = ((set(_state["floor"]) | set(ALWAYS_CONFIRM))
-                 if _state["floor_enabled"] else set())
+        floor = set(_state["floor"]) if _state["floor_enabled"] else set()
     return str(name or "") in floor
 
 
-def _confirm_if_only(tool: Any, args: Any = None) -> bool:
-    """只看 confirm_if（按参数判的那个），不看 confirm=True。"""
-    if bool(getattr(tool, "confirm", False)):
-        return False
-    hook = getattr(tool, "confirm_if", None)
-    if hook is None:
-        return False
-    try:
-        return bool(hook(dict(args or {}))) if callable(hook) else False
-    except Exception:  # noqa: BLE001
-        return True   # 判不出来就当危险
+def _hard_confirm_if(tool: Any, args: Any = None) -> bool:
+    """只看硬闸门 floor_confirm_if（连放开模式都要问的那一个）。"""
+    checker = getattr(tool, "hard_confirm", None)
+    if callable(checker):
+        return bool(checker(args if isinstance(args, dict) else {}))
+    return False
 
 
 def _reads_only(tool: Any, args: Any = None) -> bool:
@@ -514,9 +520,9 @@ def snapshot() -> dict:
             "transport_note": str(_state["transport_note"]),
             "allow_insecure": bool(_state["allow_insecure"]),
             "deny": sorted(_state["deny"]), "confirm": sorted(_state["confirm"]),
-            # 报**实际生效**的那份名单（配置 + 内置底线），别让界面显示了个空的
-            "floor": (sorted(set(_state["floor"]) | set(ALWAYS_CONFIRM))
-                      if _state["floor_enabled"] else []),
+            # 报**实际生效**的那份名单：配置里没写时就是内置的 DEFAULT_FLOOR
+            # （configure() 已经装进去了），用户自己写了就以他写的为准
+            "floor": (sorted(_state["floor"]) if _state["floor_enabled"] else []),
             "tainted": bool(_state["tainted"]),
             "prompts_last_minute": sum(1 for _ts in _prompts if time.monotonic() - _ts <= 60.0),
         }
