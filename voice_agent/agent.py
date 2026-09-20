@@ -60,6 +60,15 @@ _DENY_PHRASES = ("不是", "不对", "不能", "不可以", "不行", "不要", 
 #: 语音确认是整个权限模型里**唯一**的人工闸门，把「不太行」听成「行」
 #: 等于把关机、执行命令这类操作放了行 —— 所以这里只看字面，宁可多问一次。
 _NEGATIVE_CHARS = "不没别勿非甭毋无莫休"
+
+#: 电平兜底要连续高够这么久才算"开口"（毫秒）。人说话是持续的，噪声是一下一下的。
+_LEVEL_CONFIRM_MS = 180.0
+#: 判定门槛至少是**环境噪声**的这个倍数（写死的 voice_floor 在吵的房间里不够用）。
+#: 2.5 倍是个折中：稳态噪声压得住，说话比底噪高两三倍的人也不会漏。
+_AMBIENT_RATIO = 2.5
+#: 环境噪声估计的每块上浮系数（32ms 一块，1.06 意味着半秒左右翻一倍）：
+#: 噪声变大时几块之内就追上去，说话时不会被自己的声音顶高门槛
+_AMBIENT_RISE = 1.06
 #: 答话开头的语气词（「嗯，行」里的「嗯，」先剥掉再判）。
 _FILLER = re.compile(r"^[\s，,。.、！!~～呃嗯哦噢唉哎诶啊呀呐唔额]+")
 #: 反问 / 犹豫的尾巴：跟在一个肯定词后面就不是同意（「好什么好」）。
@@ -153,6 +162,16 @@ class VoiceAgent:
         # 超时判定从"说了多久"改成"静了多久"，全靠这两个值。
         self._last_voice_at = 0.0
         self._voice_ms = 0.0
+        #: VAD **亲口**确认过"有人在说话"。电平兜底只是"可能有人"，两者必须分开：
+        #: 只看电平的话，风扇/空调/音箱底噪每块都过门槛，"最后一次听到人声"会被
+        #: 一直刷新 —— 用户唤醒后不说话，界面就一直显示"正在听"直到 45 秒硬上限。
+        self._vad_confirmed = False
+        #: 电平连续高于门槛的时长（毫秒）：噪声是"一下一下"的，人说话是持续的
+        self._level_run_ms = 0.0
+        #: 环境噪声估计。**从配置的 voice_floor 起步、只允许慢慢往上追**：
+        #: 一开始就把第一块的电平当底噪的话，一开口那一块就把门槛顶到自己的
+        #: 三倍，于是"说话比底噪高两三倍"的人永远触发不了（实测踩过）。
+        self._ambient = 0.0
         # 收音保护期：唤醒词和提示音的尾音还没散干净，这段音频不参与录音，
         # 否则会出现「喊完唤醒词，助手把唤醒词本身当成一条指令执行了」。
         # 按**样本数**而不是墙上时间来算：麦克风本来就是实时的，两者等价，
@@ -387,6 +406,11 @@ class VoiceAgent:
             "listen_timeout_ms": int(self.cfg.agent.listen_timeout_ms),
             # 输入检测：界面据此显示「听到你开口了，慢慢说」
             "listen_heard": bool(self._heard_speech),
+            # 诊断用：VAD 有没有确认、电平连续高了多久、环境噪声多少 ——
+            # "唤醒后一直显示正在听"这类问题看这几个值就清楚了
+            "listen_vad": bool(self._vad_confirmed),
+            "listen_level_ms": int(self._level_run_ms),
+            "ambient": round(float(self._ambient), 5),
             "listen_ms": int(self._voice_ms),
             # 后台子代理 / 定时轮询：界面拿它显示「派出去的活还在跑」
             "subagents": self.brain.subagents.snapshot(),
@@ -494,22 +518,41 @@ class VoiceAgent:
         顺便记录"最后一次听到人声的时刻"和累计说话时长，超时判定要用。
         """
         try:
-            voiced = self.vad.speech_detected
+            vad_voiced = self.vad.speech_detected
         except Exception:  # noqa: BLE001 - VAD 读不到就当没听到
-            voiced = False
-        if not voiced:
-            samples = np.asarray(block, dtype=np.float32).reshape(-1)
-            if samples.size:
-                level = float(np.sqrt(np.mean(samples ** 2)))
-                voiced = level >= float(getattr(self.cfg.agent, "voice_floor", 0.008))
+            vad_voiced = False
+        samples = np.asarray(block, dtype=np.float32).reshape(-1)
+        if not samples.size:
+            return
+        block_ms = samples.size * 1000.0 / max(1, self.cfg.audio.sample_rate)
+        level = float(np.sqrt(np.mean(samples ** 2)))
+        # 环境噪声：从 voice_floor 起步，取"当前电平"和"慢慢上浮的估计"里较小的那个。
+        # 安静时它会贴着底噪；稳定噪声（风扇/空调/音箱）几块之内就被追上，
+        # 门槛随之抬高 —— 光靠写死的 0.008 在吵一点的房间里挡不住，
+        # 而每块都过门槛就会把"最后一次听到人声"一直刷新（用户报的那个 bug）。
+        floor_cfg = float(getattr(self.cfg.agent, "voice_floor", 0.008))
+        if self._ambient <= 0:
+            self._ambient = floor_cfg
+        self._ambient = min(level, self._ambient * _AMBIENT_RISE + 0.0002)
+        self._ambient = max(self._ambient, floor_cfg * 0.5)
+        threshold = max(floor_cfg, self._ambient * _AMBIENT_RATIO)
+        if level >= threshold:
+            self._level_run_ms += block_ms
+        else:
+            self._level_run_ms = 0.0
+        # 电平兜底要**连续**高够久才算"开口"：一下按键声、一次爆音不算
+        voiced = vad_voiced or self._level_run_ms >= _LEVEL_CONFIRM_MS
         if not voiced:
             return
+        if vad_voiced:
+            self._vad_confirmed = True
         now = time.monotonic()
         self._last_voice_at = now
-        self._voice_ms += block.size * 1000.0 / max(1, self.cfg.audio.sample_rate)
+        self._voice_ms += block_ms
         if not self._heard_speech:
             self._heard_speech = True
-            self.log("[agent] 听到你开口了，慢慢说")
+            self.log("[agent] 听到你开口了，慢慢说（电平 %.4f，环境 %.4f，%s）"
+                     % (level, self._ambient, "VAD 确认" if vad_voiced else "电平提示"))
         if not self._speech_started_at:
             self._speech_started_at = now
 
@@ -567,7 +610,21 @@ class VoiceAgent:
         now = time.monotonic()
         config = self.cfg.agent
 
-        if not self._heard_speech:
+        if not self._vad_confirmed:
+            # 只有"电平提示"、VAD 没亲口确认过 → **不能**因此无限等下去。
+            # 这正是用户报的"唤醒后不说话，界面一直显示正在听/录制"：
+            # 背景噪声每块都高于门槛，把"最后一次听到人声"一直刷新，
+            # 那条 8 秒超时永远轮不到。现在按原来的超时收工，只是给电平提示
+            # 多留一点时间（万一是说话很轻、VAD 没抓到的真人）。
+            budget = int(self._listen_timeout_ms)
+            if self._heard_speech:
+                budget = max(budget, 4000)
+            if now <= self._listen_started + budget / 1000.0:
+                return
+            self._stand_down("（只听到环境噪声，没听到你说话）" if self._heard_speech
+                             else "（没听到你说话）")
+            return
+        if not self._heard_speech:      # 兜底：理论上走不到（VAD 确认过就有 heard）
             if now <= self._listen_started + self._listen_timeout_ms / 1000.0:
                 return
             self._stand_down()
@@ -797,6 +854,9 @@ class VoiceAgent:
         self._heard_speech = False
         self._speech_started_at = 0.0
         self._last_voice_at = 0.0
+        self._vad_confirmed = False
+        self._level_run_ms = 0.0
+        self._ambient = 0.0              # 环境噪声重新测（从 voice_floor 起步）
         self._voice_ms = 0.0
         # 防止上一轮的尾音被当成这一轮的开头（arm 时会重新设成完整保护期）
         self._guard_samples = int(self.cfg.audio.sample_rate * 0.15)
@@ -820,6 +880,9 @@ class VoiceAgent:
         self._heard_speech = False
         self._speech_started_at = 0.0
         self._last_voice_at = 0.0
+        self._vad_confirmed = False
+        self._level_run_ms = 0.0
+        self._ambient = 0.0
         self._voice_ms = 0.0
         self._guard_samples = int(self.cfg.audio.sample_rate * 0.2)
 

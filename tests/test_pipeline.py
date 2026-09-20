@@ -516,12 +516,33 @@ def main() -> int:
 
     real_vad = agent.vad
     agent.vad = StubVad()
+    # 电平兜底要**连续**高够久才算开口：一下按键声、一次爆音不算
     agent._mark_voice(np.full(512, 0.05, dtype=np.float32))
-    check("电平够大就算用户在说话（不依赖 VAD）", agent._heard_speech)
+    check("单独一块大电平不算开口（噪声是一下一下的）", not agent._heard_speech,
+          str(agent._heard_speech) + " 连续=" + str(int(agent._level_run_ms)) + "ms")
+    for _ in range(8):                       # 8×32ms = 256ms，超过 180ms 的判定线
+        agent._mark_voice(np.full(512, 0.05, dtype=np.float32))
+    check("持续说话才认（不依赖 VAD，照顾说话轻的人）", agent._heard_speech)
     agent._heard_speech = False
     agent._last_voice_at = 0.0
+    agent._level_run_ms = 0.0
     agent._mark_voice(np.zeros(512, dtype=np.float32))
     check("静音不会被当成说话", not agent._heard_speech)
+
+    # 用户报的问题：唤醒后不说话，界面却一直显示"正在录制"。
+    # 原因是环境噪声（风扇/空调/音箱底噪）每块都高于写死的 voice_floor，
+    # 把"最后一次听到人声"一直刷新，那条 8 秒超时永远轮不到。
+    agent._ambient = 0.0
+    agent._heard_speech = False
+    agent._level_run_ms = 0.0
+    noise = np.random.default_rng(7).normal(0, 0.012, 512).astype(np.float32)
+    for _ in range(60):                      # 约 2 秒的稳态噪声
+        agent._mark_voice(noise)
+    check("持续环境噪声不会被当成说话（自适应门槛跟得上）",
+          not agent._heard_speech and not agent._vad_confirmed,
+          "环境=%.4f 连续=%dms" % (agent._ambient, int(agent._level_run_ms)))
+    check("环境噪声被跟上了（阈值抬高，不是靠写死的 0.008）",
+          agent._ambient > 0.008, "%.4f" % agent._ambient)
     agent.vad = real_vad
 
     # 一直说、不停顿：旧代码会在 max_utterance_ms 之后回待命

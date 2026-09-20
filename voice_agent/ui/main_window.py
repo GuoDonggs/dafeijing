@@ -47,6 +47,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
+    QSystemTrayIcon,
     QPlainTextEdit,
     QVBoxLayout,
     QWidget,
@@ -105,6 +106,40 @@ def app_icon(color: str = theme.BLUE) -> QIcon:
     return QIcon(pixmap)
 
 
+#: 任务栏/开始菜单靠它把进程和图标认成一个独立程序（不设的话 Windows 会
+#: 把这些窗口归到 python.exe 名下，任务栏上就是 Python 的图标）
+APP_USER_MODEL_ID = "voiceagent.dafeijing.voice-assistant"
+
+
+def apply_app_identity(app=None) -> None:  # noqa: ANN001
+    """给进程和应用设图标与身份：任务栏、Alt+Tab、子窗口都用同一张图。
+
+    两件事都要做：
+    1. SetCurrentProcessExplicitAppUserModelID —— 让 Windows 知道"这是一个独立
+       程序"，否则任务栏按钮/固定项显示的是 python.exe 的图标；
+    2. QApplication.setWindowIcon —— 子窗口（设置页、运行日志、模型向导…）
+       自己不设图标，靠应用级图标兜底，不然它们又变回默认图标。
+    """
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:  # noqa: BLE001 - 非 Windows / 老系统就算了
+        pass
+    icon = app_icon()
+    if icon.isNull():
+        return
+    if app is None:
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+    try:
+        if app is not None:
+            app.setWindowIcon(icon)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class FramelessDialog(QDialog):
     """无边框的圆角窗口：页面窗口和日志窗口都用它当外壳。
 
@@ -113,6 +148,8 @@ class FramelessDialog(QDialog):
 
     def __init__(self, parent: QWidget | None, title: str, width: int, height: int) -> None:
         super().__init__(parent)
+        # 独立顶层窗口：不自己设一次，任务栏上就是默认（Python）图标
+        self.setWindowIcon(app_icon())
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setModal(False)
@@ -269,11 +306,16 @@ class MainWindow(QWidget):
         # 没有语音通道时（引擎没启动、界面里点"试运行"）也要能确认：
         # 以前这条路直接返回 False，于是放开模式下"执行命令"这类操作
         # 全被拒，用户看到的是"明明放开了却什么都干不了"。
+        # 托盘图标：窗口图标、任务栏、托盘用同一张图（icon.webp）
+        apply_app_identity()
+        self._tray: QSystemTrayIcon | None = None
+
         self._confirm_pending: dict | None = None
         self.confirm_requested.connect(self._show_confirm_box)
         self.console.confirm_hook = self._ask_confirm_from_worker
 
         self._build()
+        self._build_tray()
         self._bind_shortcuts()
 
         # 助手要「重启 / 退出程序本身」时，请求会从这里转回界面线程 ——
@@ -324,8 +366,8 @@ class MainWindow(QWidget):
         self.btn_menu.clicked.connect(self.open_menu)
         bar.addWidget(self.btn_menu)
         bar.addStretch(1)
-        self.btn_min = ui.WindowButton("chevrondown", "最小化")
-        self.btn_min.clicked.connect(self.showMinimized)
+        self.btn_min = ui.WindowButton("chevrondown", "最小化到托盘")
+        self.btn_min.clicked.connect(self.hide_to_tray)
         self.btn_close = ui.WindowButton("plus", "退出", danger=True)
         self.btn_close.paintEvent = _paint_close(self.btn_close)  # type: ignore[assignment]
         self.btn_close.clicked.connect(self.close)
@@ -639,6 +681,50 @@ class MainWindow(QWidget):
         self._logs_dialog = dialog
 
     # ───────────────── 控制 ─────────────────
+
+    # ───────────────── 托盘 ─────────────────
+    def _build_tray(self) -> None:
+        """系统托盘：最小化之后还能操作（以前最小化就找不着了）。"""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        tray = QSystemTrayIcon(app_icon(), self)
+        tray.setToolTip("大肥鲸 · 语音助手")
+        menu = QMenu()
+        menu.addAction("显示主界面", self.show_from_tray)
+        menu.addSeparator()
+        menu.addAction("启动监听", self.start_engine)
+        menu.addAction("停止监听", self.stop_engine)
+        menu.addAction("打断当前任务", self.cancel_task)
+        menu.addSeparator()
+        menu.addAction("退出", self.close)
+        tray.setContextMenu(menu)
+        # 左键单击/双击都拉回主界面（两种习惯都有）
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        self._tray = tray
+
+    def _on_tray_activated(self, reason) -> None:  # noqa: ANN001
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_from_tray()
+
+    def hide_to_tray(self) -> None:
+        """收起主界面但**继续在后台听**（再点托盘图标就回来）。"""
+        if self._tray is None:
+            self.showMinimized()      # 没有托盘（少数桌面环境）时退回普通最小化
+            return
+        self.hide()
+        self.console.log("[ui] 已收进托盘，还在后台听着；点托盘图标回来")
+        try:
+            self._tray.showMessage("大肥鲸还在后台", "点托盘图标可以把我叫回来。",
+                                   app_icon(), 3000)
+        except Exception:  # noqa: BLE001 - 通知失败无所谓
+            pass
+
+    def show_from_tray(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     # ───────────────── 确认通道（无语音时用对话框）─────────────────
     def _ask_confirm_from_worker(self, question: str) -> bool:
