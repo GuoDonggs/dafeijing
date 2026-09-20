@@ -30,6 +30,14 @@
 环境变量开关（scripts/build_exe.py 会设置）：
    VOICE_AGENT_CONSOLE_ONLY=1   只出命令行版
    VOICE_AGENT_SLIM=1           去掉 onnxruntime 的 CUDA / TensorRT DLL（省约 170 MB）
+   VOICE_AGENT_WITH_CHATTS=1    把 ChatTTS 那套（torch 3.9 GB）也打进去
+
+4) **默认不带 ChatTTS**（2026-09-20 定的）。
+   实测：整个产物 4.76 GB 里 torch 一个包就占 3.9 GB（82%），而它只服务一个可选
+   音色引擎 ChatTTS；用户实际用的是默认的 sherpa-onnx VITS 音色。去掉之后安装包
+   从 3.7 GB 降到 GB 级以下，启动也更快。源码运行/开发完全不受影响 —— 想连
+   ChatTTS 一起打包，就设 VOICE_AGENT_WITH_CHATTS=1（speech.py 在没有它的时候
+   会给出明确提示，而不是抛一个看不懂的 ImportError）。
 """
 
 import os
@@ -50,6 +58,8 @@ def _switch(name):
 
 CONSOLE_ONLY = _switch("VOICE_AGENT_CONSOLE_ONLY")
 SLIM = _switch("VOICE_AGENT_SLIM")
+#: 默认**不带** ChatTTS/torch（见文件头第 4 条）；要带就设这个开关
+WITH_CHATTS = _switch("VOICE_AGENT_WITH_CHATTS")
 # exe 的版本资源（属性 → 详细信息里那份版本号）。由 build_exe.py 生成；
 # 直接敲 pyinstaller 时用仓库里现成的那份，没有就不带版本号。
 VERSION_FILE = os.environ.get("VOICE_AGENT_VERSION_FILE") or str(PACKAGING_DIR / "version_info.txt")
@@ -66,6 +76,8 @@ if not Path(ICON_FILE).is_file():
 print("[spec] 构建模式：" + ("只出命令行版 VoiceAgentCLI.exe" if CONSOLE_ONLY
                              else "窗口版 VoiceAgent.exe + 命令行版 VoiceAgentCLI.exe"))
 print("[spec] 精简 CUDA/TensorRT：" + ("开" if SLIM else "关"))
+print("[spec] ChatTTS/torch：" + ("打进包里" if WITH_CHATTS
+                                 else "不带（默认；要带请设 VOICE_AGENT_WITH_CHATTS=1）"))
 
 # ── 数据文件 ───────────────────────────────────────────────────────────────
 # web/ 是网页控制台的三个静态文件，程序用 Path(__file__).parent / "web" 找它们，
@@ -104,9 +116,12 @@ def _add_package_data(package, subdir=""):
         print("[spec] 收 " + package + "/" + subdir + " 的数据文件")
 
 
-_add_package_data("ChatTTS", "res")
-# transformers / tokenizers 的钩子（PyInstaller 自带）会处理自己的数据，
-# 这里只补 ChatTTS 自己的。
+if WITH_CHATTS:
+    _add_package_data("ChatTTS", "res")
+    # transformers / tokenizers 的钩子（PyInstaller 自带）会处理自己的数据，
+    # 这里只补 ChatTTS 自己的。
+else:
+    print("[spec] 不带 ChatTTS，跳过它的 res/ 数据文件")
 
 # ── 二进制 ─────────────────────────────────────────────────────────────────
 # sherpa_onnx 把 C 运行时放在 sherpa_onnx/lib/ 下（含它自己那份 onnxruntime.dll）。
@@ -144,18 +159,22 @@ EXCLUDES = [
     # 注意：PyQt6 不能排 —— 桌面界面就是用它写的，排掉之后 exe 起不来。
     # 只排我们不用的那几个 GUI 框架（Tkinter 也已经不用了）。
     "PyQt5", "PySide2", "PySide6", "wx", "tkinter",
-    # torch 及其语音依赖必须**打进去** —— ChatTTS 就是跑在它上面的。
-    # 之前这里把 torch 排掉了，等于 exe 里选了 chattts 也起不来。
-    # torchvision 用不到，可以排（它自己就好几百 MB）。
-    # torchgen 不能排：torch 自己 import 它，排掉就是
-    # "No module named 'torchgen'"。torchvision 用不到，留着排除。
     "torchvision",
     "tensorflow", "keras", "sklearn",
-    # numba / llvmlite 不能排：ChatTTS 自己 import numba，einx 还要 sympy。
-    # （sympy 也不在上面那几行里 —— 同样是因为 einx。）
     "cupy", "pyarrow", "dask",
     "pytest", "_pytest", "sphinx", "docutils",
 ]
+
+if not WITH_CHATTS:
+    # ChatTTS 那一套（torch 一个包就 3.9 GB）默认不进包，理由见文件头第 4 条。
+    # torchgen 跟着 torch 一起排 —— torch 自己 import 它，所以"带 torch"和
+    # "排 torchgen" 不能并存；反过来不带 torch 时排掉它不会误伤任何东西。
+    EXCLUDES += [
+        "torch", "torchgen", "torchaudio",
+        "ChatTTS", "einx", "sympy", "vector_quantize_pytorch",
+        "numba", "llvmlite",
+        "transformers", "tokenizers", "safetensors", "huggingface_hub", "hf_xet",
+    ]
 
 a = Analysis(
     [str(PACKAGING_DIR / "entrypoint.py")],
@@ -169,6 +188,20 @@ a = Analysis(
     excludes=EXCLUDES,
     noarchive=False,
 )
+
+if not WITH_CHATTS:
+    # excludes 管的是"模块图"，可 torch 的 DLL 是**二进制**那一侧被 hook 拖进来的
+    # （实测残留 torch/lib/cudnn64_9.dll）。这里再按路径滤一道，产物里不留 torch 目录。
+    _before = len(a.binaries)
+
+    def _in_torch(entry):
+        # 源路径（site-packages\torch\lib\…）和产物里的目标目录（torch\lib）都看一眼
+        return any(part.replace("/", "\\").lower().split("\\").count("torch") > 0
+                   for part in (str(entry[0]), str(entry[1])))
+
+    a.binaries = [entry for entry in a.binaries if not _in_torch(entry)]
+    if _before != len(a.binaries):
+        print("[spec] 丢掉 " + str(_before - len(a.binaries)) + " 个 torch 残留二进制")
 
 if SLIM:
     # onnxruntime-gpu 里 CUDA provider 一个 DLL 就 168 MB，TensorRT 那个也要 0.9 MB。

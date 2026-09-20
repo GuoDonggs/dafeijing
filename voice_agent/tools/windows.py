@@ -16,6 +16,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from .. import known_dirs
 from ._shared import HOME, screenshot_dir
 
 _CMD_SYNTAX = re.compile(r'[&|<>^"\']')
@@ -87,6 +88,15 @@ def _launch(target: str, args: list[str] | None = None) -> bool:
 
 
 def _desktop() -> Path:
+    """用户的桌面在哪。
+
+    桌面**可以被搬走**（用户这台机器就在 D:\桌面），所以先问已知文件夹
+    （known_dirs → SHGetKnownFolderPath，毫秒级、不起进程）；取不到或不存在的
+    时候才退回原来那条 PowerShell + HOME/Desktop 的老路。
+    """
+    known = known_dirs.known_dir("Desktop")
+    if known.is_dir():
+        return known
     value = _ps("[Environment]::GetFolderPath('Desktop')", timeout=8.0)
     path = Path(value) if value else HOME / "Desktop"
     return path if path.is_dir() else HOME / "Desktop"

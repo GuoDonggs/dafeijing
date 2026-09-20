@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from .. import known_dirs
 from ._shared import HOME, last_utterance, memory_file
 from .windows import _desktop
 
@@ -45,7 +46,11 @@ _CHAIN_TAIL = re.compile(r"(文件夹|目录|文件|路径)$")
 #: 光看 endsWith 会把 "mymusic" 也认成"音乐"目录，所以带 ASCII 的一律不认。
 _LEAD_IN_MAX = 4
 
-#: 口语目录名 → 真实位置（和 _resolve_path 共用一份，别抄成两份）
+#: 口语目录名 → Windows 已知文件夹名（和 _resolve_path 共用一份，别抄成两份）
+#: 右边的名字交给 known_dirs.known_dir() 去问系统 —— 这些文件夹**可以被用户搬走**
+#: （资源管理器 → 属性 → 位置 → 移动），搬完真位置在注册表里，而
+#: C:\Users\<你>\Downloads 往往还留着空壳。用户报的就是这条：下载目录改到
+#: D:\download 之后，助手仍旧打开 C:\Users\<你>\Downloads。
 _NAMED_DIRS = {
     "下载": "Downloads", "downloads": "Downloads",
     "文档": "Documents", "documents": "Documents",
@@ -54,6 +59,16 @@ _NAMED_DIRS = {
     "视频": "Videos", "videos": "Videos",
     "桌面": "Desktop", "desktop": "Desktop",
 }
+
+
+def _named_dir(name: str) -> Path:
+    r"""口语目录名（"下载"/"桌面"/"documents"…）→ 真实路径。
+
+    一律走 known_dirs（SHGetKnownFolderPath），**不要**再拼 HOME —— 用户把
+    「下载」搬到 D:\download 之后，HOME/Downloads 那个空壳还在，拼出来的路径
+    看着没错、打开却是错的地方。
+    """
+    return known_dirs.known_dir(_NAMED_DIRS[str(name).strip().lower()])
 
 
 def _is_drive_root(path: Path) -> bool:
@@ -617,7 +632,7 @@ def _resolve_path(raw: str) -> Path:
     if rest:
         base: Path | None = None
         if head_low in _NAMED_DIRS:
-            base = _desktop() if _NAMED_DIRS[head_low] == "Desktop" else HOME / _NAMED_DIRS[head_low]
+            base = _named_dir(head_low)
         elif head_low in ("主目录", "用户目录", "home"):
             base = HOME
         else:
@@ -627,7 +642,7 @@ def _resolve_path(raw: str) -> Path:
         if base is not None:
             return base / rest.replace("\\", os.sep)
     if lowered in _NAMED_DIRS:
-        return _desktop() if _NAMED_DIRS[lowered] == "Desktop" else HOME / _NAMED_DIRS[lowered]
+        return _named_dir(lowered)
     drive = re.fullmatch(r"([A-Za-z])\s*(盘|:)?", value)
     if drive:
         return Path(drive.group(1).upper() + ":\\")

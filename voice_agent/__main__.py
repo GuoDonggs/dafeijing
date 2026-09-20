@@ -616,9 +616,16 @@ def cmd_doctor(args) -> int:
     from .speaker import Voiceprint
 
     voice = Voiceprint(cfg)
-    print("声纹：" + voice.status_text()
-          + ("；模型 " + voice.model_name if voice.model_name else "；模型未下载"
-             "（python scripts/download_models.py --only speaker）"))
+    if voice.model_name:
+        voice_hint = "；模型 " + voice.model_name
+    elif getattr(sys, "frozen", False):
+        # 打包版里**没有 scripts/**，让人跑那个脚本等于指一条死路
+        voice_hint = ("；模型未下载（界面 ☰ →「语音模型」里点「自动下载」，"
+                      "或 VoiceAgentCLI.exe models --download）")
+    else:
+        voice_hint = ("；模型未下载（python scripts/download_models.py --only speaker，"
+                      "或 python -m voice_agent models --download）")
+    print("声纹：" + voice.status_text() + voice_hint)
     try:
         print("音频设备：" + str(len(audio_io.list_devices().splitlines())) + " 个")
     except Exception as exc:  # noqa: BLE001

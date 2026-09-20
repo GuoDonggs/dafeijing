@@ -528,7 +528,7 @@ def window_smoke() -> None:
             first = window._logs_dialog
             check("第一次就能打开运行日志（不再闪退）", first is not None)
             check("日志窗口里能看到已有的日志",
-                  bool(first.view.toPlainText()) or not console.logs,
+                  bool(first.view.toPlainText()) or not window.console.logs,
                   str(len(first.view.toPlainText())))
             window.show_logs()
             check("再点一次是同一个窗口（不会堆出一摞）",
@@ -572,7 +572,7 @@ def window_smoke() -> None:
                   str(collected.get("vision_one")))
             profiles.save()
             check("保存后配置里真的有这个档案",
-                  "vision_one" in (windows_console := settings.page.console).cfg.llm.profiles,
+                  "vision_one" in settings.page.console.cfg.llm.profiles,
                   str(list(settings.page.console.cfg.llm.profiles)))
             check("保存后看图用途指向了新档案",
                   settings.page.console.cfg.llm.routes.get("vision") == "vision_one",

@@ -69,9 +69,8 @@ models/
 config.yaml
 config.yaml.bak
 
-# —— Node 残留 ——
-# 本项目没有 Node 构建步骤（web/ 是免依赖的原生 JS），node_modules/ 是空壳。
-# 这几个是早期误留的，真要纳入版本管理就 git add -f。
+# —— Node 残留（2026-09-21 已把当时的空壳删掉，留着这三行以防误跑 npm）——
+# 本项目没有 Node 构建步骤，web/ 是免依赖的原生 JS。
 node_modules/
 package.json
 package-lock.json

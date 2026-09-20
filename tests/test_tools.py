@@ -876,7 +876,6 @@ def read_documents() -> None:
     print("读文档：结构、行号、续读、预算")
     import tempfile as _tempfile
 
-    from voice_agent import journal as _journal  # noqa: F401  保证包已导入
     from voice_agent.brain import RESULT_BUDGET, Brain
     from voice_agent.config import Config
     from voice_agent.tools import files as files_mod
@@ -939,6 +938,68 @@ def read_documents() -> None:
               len(brain._label_result("system_info", "x" * 3000, "ok")) <= RESULT_BUDGET + 60)
 
 
+def known_folders() -> None:
+    r"""用户把「下载」搬到别的盘之后，助手必须跟着去新地方。
+
+    回归：以前是 HOME/"Downloads" 拼出来的。用户把下载目录改到 D:\download
+    （资源管理器 → 属性 → 位置 → 移动），C:\Users\<你>\Downloads 那个空壳还在，
+    于是助手一直打开错的地方 —— 而界面/日志上看不出任何异常。
+    """
+    print("\n口语目录名 + Windows 已知文件夹")
+    from voice_agent import known_dirs
+    from voice_agent.tools import files as files_mod
+
+    # 1) 注入一个「搬走了」的取值：解析必须跟着系统的答案走，而不是拼 HOME。
+    #    真去改用户注册表当然不行，所以这里换掉问系统的那一个函数。
+    _downloads_id = "374DE290-123F-4565-9164-39C4925E467B"
+    original = known_dirs._shget
+    known_dirs.clear_cache()
+    moved = Path(tempfile.gettempdir()) / "va-搬走的下载目录"
+
+    def fake_shget(folder_id: str):  # noqa: ANN202
+        # FOLDERID 有没有花括号、大小写如何都不该影响判定
+        return moved if str(folder_id).strip("{}").upper() == _downloads_id else None
+
+    known_dirs._shget = fake_shget  # type: ignore[assignment]
+    try:
+        check("系统说下载目录在别处时，就按系统说的走",
+              known_dirs.known_dir("Downloads") == moved,
+              str(known_dirs.known_dir("Downloads")))
+        check("「下载」解析到搬走之后的目录",
+              files_mod._resolve_path("下载") == moved,
+              str(files_mod._resolve_path("下载")))
+        check("「下载\\报告.txt」接在搬走之后的目录后面",
+              files_mod._resolve_path("下载\\报告.txt") == moved / "报告.txt",
+              str(files_mod._resolve_path("下载\\报告.txt")))
+    finally:
+        known_dirs._shget = original  # type: ignore[assignment]
+        known_dirs.clear_cache()
+
+    # 2) 真机上交叉验证：程序的答案必须等于注册表里的答案。
+    #    （资源管理器把「位置」写进 User Shell Folders，这里是同一个来源。）
+    real = known_dirs.known_dir("Downloads")
+    check("真机解析出来的下载目录确实存在：" + str(real), real.is_dir())
+    want: Path | None = None
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+        ) as key:
+            raw, _kind = winreg.QueryValueEx(key, "{" + _downloads_id + "}")
+        want = Path(os.path.expandvars(str(raw)))
+    except (OSError, ImportError):
+        want = None  # 不是 Windows / 没有这一项：跳过这条，不误报
+    check("和注册表里的下载目录一致（改过位置也一致）",
+          want is None
+          or str(real).rstrip("\\").lower() == str(want).rstrip("\\").lower(),
+          "程序=" + str(real) + " 注册表=" + str(want))
+    check("桌面同理（这台机器上桌面也搬过）",
+          known_dirs.known_dir("Desktop") == files_mod._desktop(),
+          str(known_dirs.known_dir("Desktop")))
+
+
 def main() -> int:
     print("=== 工具层体检 ===")
     static_audit()
@@ -955,6 +1016,7 @@ def main() -> int:
     continuous_talk()
     folder_mapping()
     spoken_location_tools()
+    known_folders()
     self_control()
     print()
     if failures:

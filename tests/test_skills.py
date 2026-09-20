@@ -364,7 +364,7 @@ action:
     # 组合技能的内层**底线工具**（run_command 等）必须真的问用户一次 ——
     # 以前内层拿到的是 on_confirm=lambda: True，等于把 floor 整个绕过。
     asked: list[str] = []
-    out = tools.call("seq_floor", {}, on_confirm=lambda q, *a: (asked.append(q), True)[1])
+    tools.call("seq_floor", {}, on_confirm=lambda q, *a: (asked.append(q), True)[1])
     check("组合技能里跑 run_command 会真的问一次",
           len(asked) >= 1 and "命令" in " ".join(asked), str(asked)[:60])
     check("没拿到确认通道时内层底线工具不执行",

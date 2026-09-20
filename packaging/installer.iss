@@ -8,7 +8,11 @@
 ; 2) 默认装到 {autopf}\VoiceAgent，没管理员权限时自动落到用户目录；
 ; 3) **不动用户数据**：卸载只删安装时装进去的文件，config.yaml / build/ /
 ;    apps.yaml / skills/ 这些运行期产生的东西留在原地（卸载时问一句要不要一起删）；
-; 4) 超过 2GB 时必须分卷（DiskSpanning），所以产物可能是 setup.exe + setup-1.bin。
+; 4) **单文件**：DiskSpanning=no —— 压缩后的数据全都装在 Setup.exe 里，
+;    不会再有 Setup-*.bin 那种"必须一起发过去"的分卷。
+;    Inno 的硬性要求是：压缩后超过 4,200,000,000 字节才必须分卷
+;    （官方文档 [Setup] DiskSpanning 一节），我们离得很远；
+;    真到了那一天，Inno 自己会在编译时报错，不会悄悄出一个残缺的单文件。
 
 #ifndef AppVersion
   #define AppVersion "0.0"
@@ -46,10 +50,10 @@ VersionInfoVersion={#AppVersion}
 VersionInfoProductName=大肥鲸 VoiceAgent
 VersionInfoProductVersion={#AppVersion}
 VersionInfoDescription=大肥鲸 VoiceAgent 安装程序
-Compression=lzma2/fast
-SolidCompression=no
-DiskSpanning=yes
-DiskSliceSize=max
+Compression=lzma2/normal
+; 固体压缩：所有文件压成一条流，总体更小（代价是编译慢一些、装的时候顺序解压）
+SolidCompression=yes
+DiskSpanning=no
 WizardStyle=modern
 SetupLogging=yes
 CloseApplications=yes

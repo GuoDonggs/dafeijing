@@ -19,6 +19,7 @@
     python scripts/build_exe.py
 
 第一次 3~10 分钟（要扫 numpy / scipy / cv2 / onnxruntime 几万条依赖），之后有缓存会快一些。
+默认不带 ChatTTS/torch，实测约 1 分钟、产物 564 MB；带上它要 5 分钟以上、约 4.8 GB。
 
 常用开关：
 
@@ -30,6 +31,7 @@
 | python scripts/build_exe.py --clean | 连 PyInstaller 缓存一起清掉（改了 spec 却像没生效时用） |
 | python scripts/build_exe.py --with-config | 把项目里的 config.yaml 也复制进产物（**里面有 API Key**） |
 | python scripts/build_exe.py --dry-run | 只打印要执行的命令（**什么都不动**：不删产物、不暂存数据、不写版本资源） |
+| VOICE_AGENT_WITH_CHATTS=1 python scripts/build_exe.py | 把 ChatTTS 那套（torch 3.9 GB）一起打进去，默认**不带**（见第 4 节） |
 
 也可以直接 pyinstaller packaging/voice-agent.spec，但那样要自己维护
 --distpath/--workpath 和两个环境变量，不如走脚本。
@@ -101,43 +103,50 @@ skills/ 同理：往 dist/VoiceAgent/skills/ 里丢 .yaml / .py 就多一个技�
 
 ## 4. 体积
 
-实测（Python 3.12.2 + PyInstaller 6.22.2 + onnxruntime-gpu 1.29 + sherpa_onnx 1.13.7
-+ torch 2.13 + ChatTTS 0.2.5）：
+实测（Python 3.12.2 + PyInstaller 6.22.2 + onnxruntime-gpu 1.29 + sherpa_onnx 1.13.7）：
 
 | 构建 | 产物 | 体积 | 构建耗时 |
 | --- | --- | --- | --- |
-| 默认（桌面版 + 命令行版） | dist/VoiceAgent/ | **4.6 GB**（5463 个文件），两个 exe 各 68 MB | 约 5.5 分钟 |
-| python scripts/build_exe.py --console --slim | dist-slim/VoiceAgent/ | 见下 | 约 3 分钟 |
+| 默认（窗口版 + 命令行版，**不带 ChatTTS**） | dist/VoiceAgent/ | **564 MB / 434 个文件**，两个 exe 各 12.5 MB | 约 1 分钟 |
+| VOICE_AGENT_WITH_CHATTS=1 时 | dist/VoiceAgent/ | 约 **4.8 GB**（5400+ 个文件） | 约 5.5 分钟 |
+| python scripts/build_exe.py --console --slim | dist-slim/VoiceAgent/ | 见下 | 约 40 秒 |
 
-占大头的几项：
+默认构建里占大头的几项：
 
 | 组件 | 大约 | 说明 |
 | --- | --- | --- |
-| torch/ | 4.0 GB | **ChatTTS 的推理后端**。排掉它，exe 里选 chattts 就起不来 |
 | onnxruntime/（capi + providers） | 200 MB | 其中 onnxruntime_providers_cuda.dll 一个就 168 MB，--slim 会去掉它 |
 | cv2/ | 111 MB | screen.py 的找图（模板匹配）用得上 |
-| transformers/ + tokenizers/ + huggingface_hub/ | 110 MB | ChatTTS 的文本前端与权重加载 |
+| PyQt6/ | 72 MB | 桌面界面（排不得） |
 | scipy/ + scipy.libs/ | 67 MB | audio.py 只用 scipy.signal.resample_poly 一个函数，但整个包都会进来 |
 | sherpa_onnx/ | 27 MB | KWS / VAD / ASR / TTS 的 C 运行时（含它自带的一份 onnxruntime.dll） |
-| numpy/ + numba/ + llvmlite/ | 90 MB | numba 是 ChatTTS 直接 import 的，排不掉 |
-| PIL/ + python312.dll + 标准库 + 两个 exe | 约 60 MB | |
+| numpy/ + PIL/ + python312.dll + 标准库 + 两个 exe | 约 50 MB | |
 
-**只想跑 VITS 的话不用这么大。** 在 packaging/voice-agent.spec 的 EXCLUDES 里
-把 torch / ChatTTS / transformers / tokenizers / vocos / encodec /
-vector_quantize_pytorch / einx / pybase16384 / huggingface_hub / safetensors /
-hf_xet 加回去，产物体积会回到 560 MB 左右 —— 代价是 exe 里选 chattts 会明确报错，
-只能用 vits。两者不可兼得。
+**ChatTTS 默认不进包**，这是 2026-09-20 定的：它是可选的第二个音色引擎，
+背后是一整套 torch —— 实测 torch 一个包 3.9 GB，占了整个产物的 82%，
+而装机版的默认音色 VITS（sherpa-onnx）根本不用它。去掉之后产物从 4.76 GB
+降到 564 MB，构建时间也从 5.5 分钟降到 1 分钟。
+
+代价只有一个：装出来的那份在配置里选 chattts 会**明确报错**并告诉用户怎么办
+（换回 vits，或者自己 pip install ChatTTS 后用源码版），不会静悄悄地哑掉。
+源码运行完全不受影响。要连 ChatTTS 一起打包：
+
+    $env:VOICE_AGENT_WITH_CHATTS=1; python scripts/build_exe.py
+
+> 带上 torch 时 **torchgen / numba / sympy 都不能排**：torch 自己 import torchgen，
+> einx 要 sympy，ChatTTS 要 numba。排掉的表现是运行时 "No module named 'torchgen'"
+> —— 构建阶段完全看不出来。spec 里这两个方向是绑在一起的，别只改一半。
+
+另外还会按路径滤掉 torch 的**残留二进制**（excludes 管的是模块图，DLL 是另一条路
+进来的：实测漏过一个 torch/lib/cudnn64_9.dll）。
 
 两个 exe 各嵌了一份 PYZ 归档，所以窗口版 + 命令行版会比只出命令行版多占一份。
 介意体积就用 --console；再要小就加 --slim（去掉 CUDA provider，省 170 MB）。
 
-特意排除掉的（本机装了也不进包）：torchvision、pandas、matplotlib、
-PyQt5/PySide、IPython / jupyter、tensorflow、sklearn、cupy 等。
-排除清单在 packaging/voice-agent.spec 的 EXCLUDES。
-
-> 注意两个**不能排**的：torchgen（torch 自己 import 它）和 numba / sympy
-> （ChatTTS 与 einx 要）。排掉的表现是运行时
-> "No module named 'torchgen'"，构建阶段完全看不出来。
+其余特意排除掉的（本机装了也不进包）：torchvision、pandas、matplotlib、
+PyQt5/PySide、IPython / jupyter、tensorflow、sklearn、cupy，以及只有 ChatTTS
+用得到的 transformers / tokenizers / huggingface_hub / safetensors / hf_xet。
+完整清单在 packaging/voice-agent.spec 的 EXCLUDES。
 
 ## 5. 构建完怎么验
 

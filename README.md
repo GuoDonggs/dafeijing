@@ -52,7 +52,7 @@
 | ⏱ 说完就回待命  | 一次任务做完自动回到「等待唤醒」；唤醒后一直没提问也会自动回落，不会一直占着麦克风                                       |
 | ✋ 随时打断    | 播报或执行中再喊一次唤醒词，立即停播、取消任务、重新听你说                                                   |
 | 🗣 本地语音识别 | Paraformer 中文模型，RTF 0.03（1 秒音频约 30 毫秒出字）                                        |
-| 🔊 本地语音合成 | VITS（快，CPU）或 ChatTTS（更自然，显卡）二选一，长回复按句流式播放                                       |
+| 🔊 本地语音合成 | VITS（快，CPU）或 ChatTTS（更自然，显卡）二选一，长回复按句流式播放；**安装包自带 VITS**，ChatTTS 要自己装或用源码版 |
 | ⚙️ 算力可选   | CPU / GPU 自动或手动，三档资源占用预设，界面里直接切                                                 |
 | 🧠 多模型    | 主对话、同意判定、看图可以分别挂不同的模型和思考深度                                                      |
 | 🧵 子代理    | 把「要好几步、中间结果又长又吵」的事丢到后台去做，主对话立刻回一句「我让人去查了」，做完它自己回来汇报                             |
@@ -428,10 +428,12 @@ python -m voice_agent voices --set bazong           # 写进配置（不动其�
 1. **要独显**：约 2 GB 显存；没有 N 卡会自动退回 CPU，那就非常慢了；
 2. **首次加载十几秒**：要联网下约 1 GB 权重，之后走本地缓存；
 3. **慢**：RTF 0.9~1.9，一句话要等 1~2 秒才开口；
-4. **源码运行要装包**：python -m pip install ChatTTS（约 2 GB，含 torch 依赖）。
+4. **要装包**：python -m pip install ChatTTS（约 2 GB，含 torch 依赖）。
    没装却在配置里选它，启动会直接报错并告诉你怎么办 —— 不会静悄悄地哑掉。
-   **打包版已经把 ChatTTS 打进去了**，开箱即用；代价是产物从 563 MB 涨到 4.6 GB
-   （torch 一个包就 4 GB）。只想要小体积见 packaging/README.md 第 4 节。
+   **安装包默认不带 ChatTTS**（torch 一个包就 3.9 GB，占了整个安装包的八成，
+   而 VITS 不需要它）：装出来的那份只能用 vits 音色。想连 ChatTTS 一起打包，
+   用 `VOICE_AGENT_WITH_CHATTS=1 python scripts/build_exe.py`，
+   细节见 packaging/README.md 第 4 节。
 
 改完要**重启引擎**（主界面会弹提示条，点「立即重启」即可）。
 
@@ -1481,7 +1483,7 @@ vits 的 lexicon.txt 里一个英文字母都没有，C盘 的 C 会被判为 OO
 | 语音合成（ChatTTS） | RTF 0.9~1.9（音质更好，但要显卡、首次加载十几秒）                       |
 | 语音识别          | RTF 0.03（1 秒音频约 30 毫秒）                               |
 | 端到端响应         | 说完话到开口：规则模式约 0.1s；LLM 模式取决于模型首字延迟                    |
-| 打包体积          | dist/VoiceAgent 约 4.6 GB / 5457 个文件（含 torch，模型仍不在包内） |
+| 打包体积          | 不带 ChatTTS：dist/VoiceAgent 564 MB / 434 个文件；**单文件**安装包 1.2 GB（含 models/ 约 1 GB；exe 里不再有 .bin 分卷） |
 
 十五个测试脚本共 **538 项断言全部通过**（另加 selftest 10 项）：
 
@@ -2304,6 +2306,25 @@ conversation.json、apps.yaml、audit.jsonl 都还在。
 | **打断上一个任务再说新任务，新任务不执行、界面一直「思考中」，可「打断」按钮还有用** | 说「退下/再见」的分支只置了 _stopping 却**没有真的停引擎**：引擎照旧在听、唤醒词照旧答应，但 TurnToken.is_set() 从此永远为真，之后每一句话都被当场作废；而作废那条路直接 return，状态就永远烂在 think 上 | 「退下」＝念句告别回待命（麦克风不关，唤醒词照样叫人）；_stopping 只属于 stop()；作废时若没有更新的任务接手就把状态放回待命 |
 
 第四条当时的日志签名（一眼可认）：**「开始处理」的下一行就是「被打断」，用时 0.0s**，从 23:22:37 说「没事了，退下吧。」起每一轮都是这样，重启引擎后立刻恢复正常 —— 这也是为什么它看起来像随机故障。
+
+### 追加十一：下载目录跟着系统走 + 安装包变单文件（并瘦身 8 倍）
+
+这一轮三件事：用户报的一个真 bug、安装包形态、以及一次清理。
+
+| 问题 | 根因 | 修法 |
+| --- | --- | --- |
+| **改了「下载」文件夹的位置，助手还是打开 C:\Users\<你>\Downloads** | 口语路径是拿 HOME 拼出来的（**HOME/Downloads**）。可这些文件夹能被用户搬走（资源管理器 → 属性 → 位置 → 移动），搬完真位置只记在注册表的 KnownFolders 里，而旧路径往往还留着空壳 —— 于是路径看着对、打开的是错的地方 | 新增 voice_agent/known_dirs.py：纯 ctypes 调 **SHGetKnownFolderPath**（资源管理器自己也查它），下载/文档/图片/音乐/视频/桌面六个全部走它；取不到再退回 HOME 拼法。工具层、桌面判断、老截图迁移全部换过来 |
+| **安装包会多出一个几 GB 的 -1.bin，漏了就装不上** | installer.iss 里 DiskSpanning=yes：payload 一过 2 GB 就被切成 Setup.exe + Setup-1.bin | 改 DiskSpanning=no（压缩数据全在 Setup.exe 里）。Inno 只在压缩后超过 4.2 GB 时才**强制**分卷，我们离得很远；构建脚本还会在收尾时校验「产物里不许有 .bin」，真出现就当失败 |
+| **安装包 3.7 GB 里 3.9 GB 是 torch** | 为了可选的 ChatTTS 音色把整套 torch 打了进去，而装机版默认用的是 VITS | 默认**不带** ChatTTS（产物 4.76 GB → 564 MB，构建 5.5 分钟 → 1 分钟）；要带就 VOICE_AGENT_WITH_CHATTS=1。选了 chattts 又没打进去时，speech.py 给出的是「怎么恢复」而不是一句 ImportError |
+| 顺手清掉 | — | 早期误留的 node_modules / package.json / package-lock.json（空壳）、screen.py 里没人用的导入、test_gui 里一个**引用了未定义变量 console** 的断言（左边为真时才没炸，属于埋着的暗雷）、doctor 在打包版里让人去跑根本不存在的 scripts/download_models.py |
+
+**「下载目录」这条是怎么核实的**：真机上 Downloads 已经被改到 D:\download（Pictures 到 D:\photo、桌面到 D:\桌面），
+而 C:\Users\gs\Downloads 那个空壳还在 —— 正好是这条 bug 的现场。修完的断言分两层：
+
+1. 注入一个「搬走了」的系统答案，要求解析跟着走（不碰用户注册表）；
+2. **和注册表交叉验证**：程序说 D:\download，User Shell Folders 里也必须是 D:\download。
+
+第二条是关键 —— 只测「能拼出一个路径」是抓不到这类 bug 的。
 
 ### 怎么自证
 

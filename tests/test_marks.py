@@ -201,7 +201,7 @@ def main() -> int:
           str([item.name for item in store.all()]))
     check("新建的那个被自动改名了（不覆盖已有标记）",
           second.name != spaced.name and second.name.startswith("范围"), second.name)
-    other = store.add_region(0, 0, 40, 40, name="下载区")
+    store.add_region(0, 0, 40, 40, name="下载区")
     ok, why = store.rename("下载区", "范围1")
     check("改名撞上「看着一样」的**别的**标记会被拦（不制造分不清的两个）",
           not ok and "已经有" in why, str((ok, why)))

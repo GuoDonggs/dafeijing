@@ -10,8 +10,13 @@
     python scripts/build_installer.py --dry-run       # 只打印会做什么
 
 产物在 dist/installer/：
-    VoiceAgent-Setup-<版本>.exe          安装程序（双击即装）
-    VoiceAgent-Setup-<版本>-1.bin        payload 超过 2GB 时的分卷（一起发给对方）
+    VoiceAgent-Setup-<版本>.exe          安装程序（**单文件**：payload 全在 exe 里，
+                                         没有 -1.bin 那种"必须一起发过去"的分卷）
+
+单文件是**故意**的：早期版本开了 DiskSpanning=yes，payload 一超 2 GB 就多出一个
+几 GB 的 .bin，发给别人时漏了它安装程序就没法用。现在 DiskSpanning=no，
+压缩数据全在 Setup.exe 里（Inno 只在压缩后超过 4.2 GB 时才强制分卷）。
+另外：ChatTTS 那套（torch 3.9 GB）默认不进包，要带就设 VOICE_AGENT_WITH_CHATTS=1。
 
 为什么走 Inno Setup：Windows 上"像样的安装程序"得处理快捷方式、控制面板卸载项、
 升级替换、无管理员权限时退到用户目录、卸载时别把用户数据删掉 —— 这些手写容易漏。
@@ -40,6 +45,8 @@ PAYLOAD = WORK / "payload"
 ISS = PROJECT_ROOT / "packaging" / "installer.iss"
 OUT_DIR = PROJECT_ROOT / "dist" / "installer"
 ICON_FILE = WORK / "voice-agent.ico"
+#: 兜底画图标时 QApplication 的引用（不持有会被回收，进程随即闪退）
+_HOLD_APP: list = []
 LANG_FILE = WORK / "ChineseSimplified.isl"
 
 #: 简体中文语言文件（Inno 官方只带英文，这是社区维护的那份）
@@ -107,7 +114,8 @@ def make_icon() -> bool:
         from PyQt6.QtWidgets import QApplication
         from PIL import Image
 
-        _app = QApplication.instance() or QApplication([])  # noqa: F841 - 不持有会闪退
+        # 引用必须留着：QApplication 被垃圾回收掉的话后面的渲染会直接崩
+        _HOLD_APP.append(QApplication.instance() or QApplication([]))
         from voice_agent.ui import theme
 
         size = 256
@@ -269,12 +277,19 @@ def main(argv: list[str] | None = None) -> int:
     if not produced:
         print("  [异常] " + str(OUT_DIR) + " 里没找到产物")
         return 1
+    slices = [item for item in produced if item.suffix.lower() == ".bin"]
+    if slices:
+        # 单文件是承诺：真出现分卷就是配置被改回去了，直接失败比"悄悄多发几个文件"强
+        print("  [异常] 出现了分卷 " + "、".join(item.name for item in slices)
+              + " —— packaging/installer.iss 里的 DiskSpanning 应该是 no")
+        return 1
     for item in produced:
-        # 分块算 sha256：分卷可能有近 2GB，整块 read_bytes() 会吃掉同样多的内存
+        # 分块算 sha256：文件可能有几 GB，整块 read_bytes() 会吃掉同样多的内存
         with item.open("rb") as handle:
             digest = hashlib.file_digest(handle, "sha256").hexdigest()[:16]
         print("  " + item.name.ljust(34) + build_exe.human_size(item.stat().st_size).rjust(11)
               + "  sha256:" + digest)
+    print("  单文件安装包：直接发给对方就行，不需要再带别的东西。")
     setup_exe = next((p for p in produced if p.suffix.lower() == ".exe"), produced[0])
     if len(produced) > 1:
         print("  （安装程序总是分卷：这些文件要一起发给对方，放在同一个目录）")

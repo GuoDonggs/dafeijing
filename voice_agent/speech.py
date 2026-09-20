@@ -428,10 +428,12 @@ class Tts:
         except ImportError as exc:
             raise RuntimeError(
                 "选择了 ChatTTS 但导不进来：" + str(exc)[:80]
-                + "。源码运行的话装一下：python -m pip install ChatTTS"
-                "（约 2 GB，含 torch 依赖）；"
-                "打包版已经把 ChatTTS 打进去了，起不来多半是显存不够或模型没下完。"
-                "想立刻恢复：界面上「语音与算力 → 合成引擎」换回 vits。"
+                + "。安装包默认**不带** ChatTTS：torch 一个包就 3.9 GB、占了整个"
+                "安装包的八成，而默认的 vits 音色不需要它。"
+                "想立刻恢复：界面上「语音与算力 → 合成引擎」换回 vits；"
+                "真要用 ChatTTS，就自己装（python -m pip install ChatTTS，"
+                "约 2 GB，含 torch）后用源码运行，或者用 "
+                "VOICE_AGENT_WITH_CHATTS=1 重新打包一份。"
             ) from exc
         import torch  # noqa: PLC0415
 

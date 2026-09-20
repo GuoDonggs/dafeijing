@@ -22,7 +22,6 @@ from typing import Any
 import numpy as np
 
 from . import paths
-from .config import PROJECT_ROOT
 
 __all__ = [
     "app_map_path", "load_app_map", "save_app_map", "resolve_app",

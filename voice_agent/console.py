@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 import yaml
 
-from . import __version__, audio as audio_io, journal, paths, security, tools
+from . import __version__, audio as audio_io, journal, known_dirs, paths, security, tools
 from . import voices as voice_table
 from .agent import VoiceAgent
 from .config import (
@@ -334,7 +334,9 @@ class Console:
         # 再框一次又会从"范围1"重新编号，看起来就像全丢了）。
         legacy_data = paths.legacy_data_dir()
         moved = paths.migrate_legacy([
-            (Path.home() / "Pictures" / "voice-agent", paths.sub("screenshots")),
+            # 老截图位置：Pictures 也可能被用户搬走（如 D:\photo），
+            # 所以问里已知文件夹而不是拼 HOME（否则老截图永远搬不过来）
+            (known_dirs.known_dir("Pictures") / "voice-agent", paths.sub("screenshots")),
             (PROJECT_ROOT / "apps.yaml", paths.sub("apps")),
             (legacy_data / "marks.json", paths.sub("marks")),
             (legacy_data / "memory.json", paths.sub("memory")),
