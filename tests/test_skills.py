@@ -349,6 +349,18 @@ action:
     check("内置工具还在（没被换掉）",
           tools.REGISTRY["list_files"].source == "builtin")
 
+    # 底线名单是**运行时**由 Brain / Console 调 security.configure() 装进去的。
+    # 这条套件不经过它们，不配置的话 _state["floor"] 是空的 —— 于是
+    # 「内层底线工具会真的问一次」这条断言等于什么都没验（实测：一直红，
+    # 而用户真跑起来时名单是满的）。这里按应用启动时的做法装上默认名单。
+    from voice_agent import security as security_mod
+    from voice_agent.config import SecurityCfg
+
+    security_mod.configure(SecurityCfg())
+    check("底线名单装上了（否则下面那条断言等于没验）",
+          security_mod.in_floor("run_command"),
+          str(security_mod.snapshot().get("floor")))
+
     # 组合技能的内层**底线工具**（run_command 等）必须真的问用户一次 ——
     # 以前内层拿到的是 on_confirm=lambda: True，等于把 floor 整个绕过。
     asked: list[str] = []

@@ -331,6 +331,9 @@ class VoiceAgent:
     def stop(self) -> None:
         """停止监听并释放设备；可再次 start()。"""
         self._stop_background("停止引擎")
+        # 推进 epoch：正在跑的任务手里的 TurnToken 立刻作废（和 _stopping 双保险，
+        # 也保证「epoch 只在作废时才动」这条不变式永远成立）
+        self._epoch += 1
         self._stopping.set()
         self._running = False
         self._stop_speak.set()
@@ -941,11 +944,17 @@ class VoiceAgent:
         self.last_heard = text
         self._note("user", text)
         if rules.is_exit(text, self.cfg.agent.exit_words):
-            # 说「退下 / 关闭语音」= 用户要它停下来。以前只念一句告别就回待命，
-            # 引擎照旧在听（用户以为关掉了），而且这条分支短路了 LLM，
-            # 连"让模型调 quit_self"的机会都没有。现在真的停。
+            # 说「退下 / 关闭语音」= 这一轮到此为止，回待命、继续听唤醒词
+            # （用户实测就是这么用的：说完「退下吧」接着喊「大肥鲸」它还答应）。
+            #
+            # 这里**绝对不能**再置 _stopping：它只属于 stop()。上一版置了它却
+            # 没真停引擎，就变成了最坏的一种——引擎照旧在听、唤醒词照旧答应，
+            # 可 TurnToken.is_set() 永远是「停」，于是之后**每一句话都被当场
+            # 作废**（日志里「开始处理」的下一行就是「被打断」，0.0s），
+            # 而作废那条路又没把状态改回待命，界面就永远停在「思考中」；
+            # 只有「打断」还能用（它自己会把状态复位）。用户 23:22:37 说了
+            # 「没事了，退下吧。」，之后每一轮都 0.0s 作废，正是这样。
             self._spawn(self._say_notice, "好，我先退下了。")
-            self._stopping.set()
             return
         self._spawn(self._handle_command, text)
 
@@ -981,6 +990,12 @@ class VoiceAgent:
             # 说清楚"上一个任务到此为止"，日志里能一眼看到它没有继续跑
             self.log("[agent] 任务已作废（{:.1f}s，被新任务/打断取代，不会再有动作）"
                      .format(elapsed))
+            # 只有「没有更新的任务接手」时才复位：epoch 还等于自己，说明
+            # 没人来接管状态，那就必须把它从 think 放回去 —— 否则界面永远
+            # 显示「思考中」（用户报的正是这个）。有更新的任务接手时不能碰，
+            # 否则会把它刚设好的「思考中」抹掉。
+            if epoch == self._epoch:
+                self._state = _IDLE
             return
         self.log("[brain] {:.1f}s → {}".format(elapsed, reply[:120]))
         self.log("[agent] 这一轮说完：用时 %.1fs，回复 %d 字，追问窗口 %s"

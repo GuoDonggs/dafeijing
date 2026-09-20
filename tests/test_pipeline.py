@@ -159,7 +159,6 @@ def stale_task_cancel() -> None:
     现在这一轮拿的是绑 epoch 的 TurnToken：epoch 只往前走，旧任务永远作废。
     """
     print("\n场景 10：打断之后旧任务必须作废（不是「把信号清掉」）")
-    import threading as _threading
 
     from voice_agent import tools as tools_mod
     from voice_agent.llm import LlmError
@@ -236,6 +235,67 @@ def stale_task_cancel() -> None:
     fresh._stopping.clear()
 
 
+def exit_word_does_not_poison() -> None:
+    """说「退下」之后，引擎还得能继续干活，界面不能永远停在「思考中」。
+
+    用户报的：打断上一个任务、再说一句新的，新任务不执行、界面一直「思考中」，
+    可「打断」按钮还有用。日志里的签名很明确 —— 每一轮都是「开始处理」的下一行
+    就是「被打断」，0.0s。根因：退出词分支置了 _stopping 却**没有真的停引擎**：
+    引擎照旧在听、唤醒词照旧答应（用户实测就是这样），可 TurnToken.is_set()
+    从此永远为真，之后每一句话都被当场作废；而作废那条路又直接 return，
+    状态就永远烂在 think 上 —— 只有「打断」会把它复位。
+    """
+    print("\n场景 11：说了「退下」之后，引擎还得能继续干活")
+
+    def harness() -> tuple[VoiceAgent, list]:
+        agent = VoiceAgent(Config.load(), log=lambda *a: None)
+        spoken: list = []
+        # 不真的出声、不真开线程：同步执行才可复现
+        agent._speak = lambda text, kind="reply": spoken.append((kind, text))  # type: ignore[assignment]
+        agent._note = lambda *a, **k: None  # type: ignore[assignment]
+
+        def sync_spawn(func, *args):  # noqa: ANN001, ANN202
+            agent._epoch += 1
+            agent._local.epoch = agent._epoch
+            func(*args, epoch=agent._epoch)
+
+        agent._spawn = sync_spawn  # type: ignore[assignment]
+        return agent, spoken
+
+    class FakeAsr:
+        """只回答「我说了什么」，其它一切照旧。"""
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def transcribe(self, samples, punctuate=True):  # noqa: ANN001, ANN202
+            return self.text
+
+    agent, spoken = harness()
+    agent.asr = FakeAsr("没事了，退下吧。")  # type: ignore[assignment]
+    agent._listen_target = "command"
+    agent._state = "listen"
+    agent._on_utterance(np.zeros(RATE, dtype=np.float32))
+    check("说了「退下」引擎没停（唤醒词还能叫人）", not agent._stopping.is_set())
+    check("「退下」回待命，不烂在「思考中」", agent._state == "idle", agent._state)
+    check("告了别", spoken == [("notice", "好，我先退下了。")], str(spoken))
+
+    called: list = []
+    agent.brain.respond = (  # type: ignore[assignment]
+        lambda text, confirm=None, interrupt=None: (called.append(text) or "调好了"))
+    agent._handle_command("调整音量到五十五。", epoch=agent._epoch)
+    check("退出之后的新任务真的进了大脑", called == ["调整音量到五十五。"], str(called))
+    check("新任务跑完不再停在「思考中」", agent._state != "think", agent._state)
+
+    # 保底：将来万一又有谁只置标志不停引擎，状态也不能烂在 think 上
+    stuck, _ = harness()
+    stuck.brain.respond = lambda text, confirm=None, interrupt=None: "好的"  # type: ignore[assignment]
+    stuck._stopping.set()
+    stuck._state = "idle"
+    stuck._handle_command("随便说点啥", epoch=stuck._epoch)
+    check("取消信号置位时状态也能复位", stuck._state == "idle", stuck._state)
+
+
 def main() -> int:
     cfg = Config.load()
     # 这条测试验证的是状态机本身，所以要固定两个外部变量：
@@ -298,11 +358,21 @@ def main() -> int:
     print("\n场景 3：播报中喊唤醒词可以打断")
     spoken.clear()
     agent._interrupt.clear()
-    agent._speaking.set()  # 假装正在播报
-    # 刚在场景 1 命中过，防抖冷却还没过（真实使用里两次唤醒间隔远大于 1.5s）
-    agent.wake.reset_cooldown()  # type: ignore[union-attr]
-    barge_audio = find_wake_audio(agent, wake_word)
-    fired = False if barge_audio is None else feed_until_wake(agent, barge_audio)
+    # 合成音自带随机噪声（见 find_wake_audio / replay_for 的说明）：同一段音频
+    # 在独立检测器上能触发，不等于喂进**播报中**的状态机也一定触发。这条断言
+    # 验证的是状态机（播报期间照样能被唤醒并打断），不是声学模型的极限，
+    # 所以和其它场景一样重试几次，不让它随机变红。
+    fired = False
+    for attempt in range(4):
+        agent._speaking.set()  # 假装正在播报
+        # 刚在场景 1 命中过，防抖冷却还没过（真实使用里两次唤醒间隔远大于 1.5s）
+        agent.wake.reset_cooldown()  # type: ignore[union-attr]
+        barge_audio = find_wake_audio(agent, wake_word)
+        fired = False if barge_audio is None else feed_until_wake(agent, barge_audio)
+        if fired:
+            break
+        agent._interrupt.clear()
+        print("    第 " + str(attempt + 1) + " 次合成音没能打断，换一段再来")
     check("播报期间喊唤醒词能被检测到", fired)
     check("打断事件已置位", agent._interrupt.is_set())
     check("打断后重新开始听", agent._state == "listen", agent._state)
@@ -671,6 +741,7 @@ def main() -> int:
         speech_mod.audio_io.play = original_play
 
     stale_task_cancel()
+    exit_word_does_not_poison()
 
     print()
     if failures:
