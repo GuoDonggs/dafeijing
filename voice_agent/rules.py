@@ -28,6 +28,50 @@ _CHITCHAT = (
 
 _DOMAIN = re.compile(r"([\w-]+\.)+(com|cn|net|org|io|ai|top|xyz|me|dev|app)(/\S*)?")
 
+#: 全角数字「３０」也要认（用户是"说"出来的，ASR 有时给全角）
+_FULLWIDTH = str.maketrans("０１２３４５６７８９", "0123456789")
+#: 输出设备相关的说法
+_DEVICE_TALK = re.compile(r"(输出设备|播放设备|扬声器|音响|耳机|声音从)")
+_SWITCH_TALK = re.compile(r"(切换|换到|换成|换去|切到|改用)")
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _chinese_number(text: str) -> int | None:
+    """把「三十」「四十」「九十五」这类说法读成数字（只处理 0-100）。
+
+    ASR 经常给中文数字 —— 「音量调到三十」如果不认，就会退成"调大一点"，
+    用户得看着屏幕再喊一遍。
+    """
+    # 「百分之五十」= 50：先把"百分之"去掉，否则里面的"百"会被当成一百
+    raw = re.sub(r"百分之", "", str(text or ""))
+    found = re.search(r"[零〇一二两三四五六七八九十百]{1,4}", raw)
+    if not found:
+        return None
+    # 「一点」「一些」「一下」里的"一"不是数量：后面跟着这些字就不算数字，
+    # 否则"声音大一点"会被读成"音量设成 1%"
+    if raw[found.end():found.end() + 1] in ("点", "些", "下", "会", "会儿"):
+        return None
+    body = found.group(0)
+    if "百" in body:
+        head = body.split("百")[0]
+        rest = body.split("百")[1]
+        total = (_CN_DIGITS.get(head, 1) if head else 1) * 100
+        if rest:
+            total += _chinese_number(rest) or 0
+        return total if total <= 100 else None
+    if "十" in body:
+        head, _, tail = body.partition("十")
+        tens = _CN_DIGITS.get(head, 1) if head else 1
+        ones = _CN_DIGITS.get(tail, 0) if tail else 0
+        return tens * 10 + ones
+    total = 0
+    for ch in body:
+        if ch not in _CN_DIGITS:
+            return None
+        total = total * 10 + _CN_DIGITS[ch]
+    return total
+
 
 def _clean(text: str) -> str:
     value = (text or "").strip()
@@ -127,15 +171,42 @@ def route(text: str) -> tuple[str, dict[str, Any]] | None:
             kind = "电池"
         return "system_info", {"kind": kind}
 
-    # ── 音量 / 媒体 ────────────────────────────────────────────────
-    if re.search(r"(静音|别出声)", value):
-        return "volume", {"action": "mute"}
-    if re.search(r"音量", value):
-        if re.search(r"(大|高|上|加|升)", value):
-            return "volume", {"action": "up"}
-        if re.search(r"(小|低|下|减|降)", value):
-            return "volume", {"action": "down"}
-        return "volume", {"action": "up"}
+    # ── 音量 / 输出设备 / 媒体 ─────────────────────────────────────
+    # 输出设备那条要排在音量前面：**「换成耳机」里也有"声音"的意思**，
+    # 被音量那条抢走就变成调音量了。名字本身（耳机/音响/扬声器）不从目标里剥掉 ——
+    # 它就是用户要的那台设备。
+    if _DEVICE_TALK.search(value) or _SWITCH_TALK.search(value):
+        if re.search(r"(有哪些|列一下|列出|看看|是什么|哪个|几个|什么设备)", value):
+            return "output_device", {"action": "list"}
+        target = value
+        for word in ("请", "帮我", "麻烦", "把", "我的", "一下", "声音", "音频",
+                     "输出设备", "播放设备", "输出", "设备", "切换", "换到", "换成",
+                     "换去", "切到", "改用", "到", "成", "用", "的"):
+            target = target.replace(word, "")
+        target = target.strip(" 的。")
+        if target:
+            return "output_device", {"action": "switch", "name": target}
+        return "output_device", {"action": "list"}
+    # 静音相关先判：它不一定带"音量/声音"两个字（「静音」「别静音」）
+    if re.search(r"(静音|别出声|别响了|别发声|别响)", value):
+        if re.search(r"(取消|解除|恢复|不要|别)", value):
+            return "output_volume", {"action": "unmute"}
+        return "output_volume", {"action": "mute"}
+    # "音量调到 30" / "音量 30" / "调到百分之三十" → 绝对值
+    if re.search(r"音量|声音|喇叭", value):
+        number = re.search(r"([0-9０-９]{1,3})", value)
+        percent = int(str(number.group(1)).translate(_FULLWIDTH)) if number else None
+        if percent is None:
+            percent = _chinese_number(value)
+        if percent is not None and 0 <= percent <= 100:
+            return "output_volume", {"action": "set", "percent": percent}
+        if re.search(r"(取消静音|恢复声音|开声)", value):
+            return "output_volume", {"action": "unmute"}
+        if re.search(r"(大|高|上|加|升|响|调)", value):
+            return "output_volume", {"action": "up"}
+        if re.search(r"(小|低|下|减|降|轻)", value):
+            return "output_volume", {"action": "down"}
+        return "output_volume", {"action": "get"}
     if re.search(r"(下一首|下一个|切歌|换首歌)", value):
         return "media_control", {"action": "next"}
     if re.search(r"(上一首|上一个|退回)", value):

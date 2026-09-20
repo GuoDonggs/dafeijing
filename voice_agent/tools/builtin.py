@@ -43,6 +43,7 @@ from .selfctl import (
 )
 from .subagents import cancel_subagent_tool, spawn_subagent_tool, subagent_status_tool
 from .watches import list_watches_tool, start_watch_tool, stop_watch_tool
+from .sound import output_device_tool, output_volume_tool
 from .system_info import get_time, system_info
 from .vision import (
     app_map_tool,
@@ -188,6 +189,18 @@ _register(Tool(
 ))
 
 #: app_map 的"这次只是查表"判断：action 留空 / list / 列出 / 查看 都算查。
+def _is_volume_query(args: dict) -> bool:
+    """这次只是读音量？（只读模式下也放行的那些说法）"""
+    action = str((args or {}).get("action") or "").strip().lower()
+    return action in ("", "get", "查看", "查询", "看看", "读")
+
+
+def _is_device_query(args: dict) -> bool:
+    """这次只是列出输出设备、不切换？"""
+    action = str((args or {}).get("action") or "list").strip().lower()
+    return action in ("", "list", "列出", "查看", "有哪些", "看看")
+
+
 def _is_map_query(args: dict) -> bool:
     action = str((args or {}).get("action") or "").strip().lower()
     return action in ("", "list", "列出", "查看", "show")
@@ -473,8 +486,45 @@ _register(Tool(
 # ─────────────────────────── 系统类 ───────────────────────────
 
 _register(Tool(
+    name="output_volume",
+    description=(
+        "读或设置**电脑当前输出设备**的音量（0-100），也能静音 / 取消静音。"
+        "用户说「音量调到 30」「声音大一点」「静音」时用它 —— 这是设备的主音量，"
+        "和音量键那种相对调整不一样（那个是 volume 工具）。"
+    ),
+    parameters=_params(
+        action={"type": "string",
+                "description": "get（读，默认）/ set（设成 percent）/ up / down / mute / unmute"},
+        percent={"type": "integer", "description": "action=set 时设成多少，0-100"},
+    ),
+    handler=output_volume_tool,
+    # 纯读（action 留空 / get）在只读模式下也放行；要改就得看模式
+    read_if=_is_volume_query,
+    tags=("音量", "系统", "不花钱"),
+    group="音量",
+))
+
+_register(Tool(
+    name="output_device",
+    description=(
+        "查看 / 切换**电脑当前的输出设备**（扬声器、耳机、HDMI、虚拟声卡…）。"
+        "用户说「换成耳机」「声音从哪出来」「切到第几个设备」时用它。"
+        "切换会把 Windows 的默认输出设备改掉（三个角色一起切）。"
+    ),
+    parameters=_params(
+        action={"type": "string", "description": "list（列出来）/ switch（切过去）"},
+        name={"type": "string", "description": "switch 时的目标：名字、序号或设备 id"},
+    ),
+    handler=output_device_tool,
+    read_if=_is_device_query,
+    # 换默认输出设备是**改系统状态**：标准模式问一句，放开模式直接做
+    confirm_if=lambda args: not _is_device_query(args),
+    tags=("音量", "设备", "系统"),
+))
+
+_register(Tool(
     name="volume",
-    description="调节系统音量：调大、调小、静音、最大。",
+    description="按音量键调系统音量：调大、调小、静音、最大（只知道相对量，读不出当前值）。",
     parameters=_params(
         action={"type": "string", "description": "up / down / mute / max / min"},
         steps=_I,
